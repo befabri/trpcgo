@@ -971,13 +971,15 @@ func TestErrorType(t *testing.T) {
 // --- SSE Subscription Tests ---
 
 // parseSSEEvents reads SSE events from a response body.
-// Returns a slice of {event, data} pairs.
+// Returns a slice of parsed events. Data messages without an explicit
+// event type use "message" (the SSE default).
 func parseSSEEvents(t *testing.T, resp *http.Response, maxEvents int) []sseEvent {
 	t.Helper()
 	var events []sseEvent
 	scanner := bufio.NewScanner(resp.Body)
 
-	var currentEvent, currentData string
+	var currentEvent, currentData, currentID string
+	hasData := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		switch {
@@ -985,13 +987,23 @@ func parseSSEEvents(t *testing.T, resp *http.Response, maxEvents int) []sseEvent
 			currentEvent = strings.TrimPrefix(line, "event: ")
 		case strings.HasPrefix(line, "data: "):
 			currentData = strings.TrimPrefix(line, "data: ")
+			hasData = true
 		case line == "data: ":
 			currentData = ""
+			hasData = true
+		case strings.HasPrefix(line, "id: "):
+			currentID = strings.TrimPrefix(line, "id: ")
 		case line == "":
-			if currentEvent != "" {
-				events = append(events, sseEvent{event: currentEvent, data: currentData})
+			if hasData || currentEvent != "" {
+				evt := currentEvent
+				if evt == "" {
+					evt = "message" // SSE default event type
+				}
+				events = append(events, sseEvent{event: evt, data: currentData, id: currentID})
 				currentEvent = ""
 				currentData = ""
+				currentID = ""
+				hasData = false
 				if len(events) >= maxEvents {
 					return events
 				}
@@ -1004,6 +1016,7 @@ func parseSSEEvents(t *testing.T, resp *http.Response, maxEvents int) []sseEvent
 type sseEvent struct {
 	event string
 	data  string
+	id    string
 }
 
 func TestSubscriptionSSE(t *testing.T) {
@@ -1052,10 +1065,13 @@ func TestSubscriptionSSE(t *testing.T) {
 	}
 	for i := 1; i <= 3; i++ {
 		if events[i].event != "message" {
-			t.Errorf("events[%d].event = %q, want message", i, events[i].event)
+			t.Errorf("events[%d].event = %q, want message (SSE default)", i, events[i].event)
 		}
 		if events[i].data != fmt.Sprintf("%d", i) {
 			t.Errorf("events[%d].data = %q, want %d", i, events[i].data, i)
+		}
+		if events[i].id != "" {
+			t.Errorf("events[%d].id = %q, want empty (untracked)", i, events[i].id)
 		}
 	}
 	if events[4].event != "return" {
@@ -1239,6 +1255,261 @@ func TestSubscriptionMaxDuration(t *testing.T) {
 	}
 	if elapsed > 3*time.Second {
 		t.Errorf("stream took too long (%v), maxDuration should cap at ~500ms", elapsed)
+	}
+}
+
+func TestSubscriptionTrackedEvents(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	type Item struct {
+		Name string `json:"name"`
+	}
+
+	trpcgo.VoidSubscribe(router, "items", func(ctx context.Context) (<-chan trpcgo.TrackedEvent[Item], error) {
+		ch := make(chan trpcgo.TrackedEvent[Item])
+		go func() {
+			defer close(ch)
+			ch <- trpcgo.Tracked("evt-1", Item{Name: "first"})
+			ch <- trpcgo.Tracked("evt-2", Item{Name: "second"})
+		}()
+		return ch, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/items")
+	defer resp.Body.Close()
+
+	// connected + 2 tracked messages + return = 4 events
+	events := parseSSEEvents(t, resp, 4)
+	if len(events) < 4 {
+		t.Fatalf("got %d events, want at least 4, got: %v", len(events), events)
+	}
+
+	// First event: connected.
+	if events[0].event != "connected" {
+		t.Errorf("events[0].event = %q, want connected", events[0].event)
+	}
+
+	// Data messages: default "message" event type, with id and data.
+	for i, want := range []struct {
+		id   string
+		data string
+	}{
+		{"evt-1", `{"name":"first"}`},
+		{"evt-2", `{"name":"second"}`},
+	} {
+		idx := i + 1
+		e := events[idx]
+		if e.event != "message" {
+			t.Errorf("events[%d].event = %q, want message", idx, e.event)
+		}
+		if e.id != want.id {
+			t.Errorf("events[%d].id = %q, want %q", idx, e.id, want.id)
+		}
+		if e.data != want.data {
+			t.Errorf("events[%d].data = %q, want %q", idx, e.data, want.data)
+		}
+	}
+
+	// Last event: return.
+	if events[3].event != "return" {
+		t.Errorf("events[3].event = %q, want return", events[3].event)
+	}
+}
+
+func TestSubscriptionUntrackedEventsHaveNoID(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	trpcgo.VoidSubscribe(router, "plain", func(ctx context.Context) (<-chan string, error) {
+		ch := make(chan string)
+		go func() {
+			defer close(ch)
+			ch <- "hello"
+			ch <- "world"
+		}()
+		return ch, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/plain")
+	defer resp.Body.Close()
+
+	events := parseSSEEvents(t, resp, 4)
+	if len(events) < 4 {
+		t.Fatalf("got %d events, want 4", len(events))
+	}
+
+	for i := 1; i <= 2; i++ {
+		if events[i].id != "" {
+			t.Errorf("events[%d].id = %q, want empty (untracked events must not have id)", i, events[i].id)
+		}
+	}
+}
+
+func TestSubscriptionWireFormat(t *testing.T) {
+	// Verify the exact SSE wire format matches tRPC:
+	// - Control events (connected, ping, return) have "event:" field
+	// - Data messages have NO "event:" field (use SSE default)
+	// - Data messages have "data:" field with JSON content
+	router := trpcgo.NewRouter()
+
+	trpcgo.VoidSubscribe(router, "single", func(ctx context.Context) (<-chan int, error) {
+		ch := make(chan int)
+		go func() {
+			defer close(ch)
+			ch <- 42
+		}()
+		return ch, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/single")
+	defer resp.Body.Close()
+
+	// Read all raw lines.
+	var lines []string
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+
+	// Must not contain "event: message" anywhere.
+	for i, line := range lines {
+		if line == "event: message" {
+			t.Fatalf("line %d: data messages must not include 'event: message'", i)
+		}
+	}
+
+	// Must contain "data: 42" (the actual data).
+	hasData := false
+	for _, line := range lines {
+		if line == "data: 42" {
+			hasData = true
+			break
+		}
+	}
+	if !hasData {
+		t.Errorf("missing 'data: 42' line in output:\n%s", strings.Join(lines, "\n"))
+	}
+
+	// Must contain control events with event: prefix.
+	hasConnected := false
+	hasReturn := false
+	for _, line := range lines {
+		if line == "event: connected" {
+			hasConnected = true
+		}
+		if line == "event: return" {
+			hasReturn = true
+		}
+	}
+	if !hasConnected {
+		t.Error("missing 'event: connected' line")
+	}
+	if !hasReturn {
+		t.Error("missing 'event: return' line")
+	}
+}
+
+func TestSubscriptionConnectedEventData(t *testing.T) {
+	t.Run("with reconnect timeout", func(t *testing.T) {
+		router := trpcgo.NewRouter(
+			trpcgo.WithSSEReconnectAfterInactivity(3 * time.Second),
+		)
+
+		trpcgo.VoidSubscribe(router, "stream", func(ctx context.Context) (<-chan string, error) {
+			ch := make(chan string)
+			close(ch)
+			return ch, nil
+		})
+
+		server := newTestServer(t, router.Handler("/trpc"))
+		resp := mustGet(t, server, "/trpc/stream")
+		defer resp.Body.Close()
+
+		events := parseSSEEvents(t, resp, 2)
+		if len(events) == 0 || events[0].event != "connected" {
+			t.Fatalf("first event should be connected, got %v", events)
+		}
+
+		var connData map[string]any
+		if err := json.Unmarshal([]byte(events[0].data), &connData); err != nil {
+			t.Fatalf("failed to parse connected data %q: %v", events[0].data, err)
+		}
+		if v, ok := connData["reconnectAfterInactivityMs"]; !ok {
+			t.Error("connected data missing reconnectAfterInactivityMs")
+		} else if v != float64(3000) {
+			t.Errorf("reconnectAfterInactivityMs = %v, want 3000", v)
+		}
+	})
+
+	t.Run("without reconnect timeout", func(t *testing.T) {
+		router := trpcgo.NewRouter()
+
+		trpcgo.VoidSubscribe(router, "stream", func(ctx context.Context) (<-chan string, error) {
+			ch := make(chan string)
+			close(ch)
+			return ch, nil
+		})
+
+		server := newTestServer(t, router.Handler("/trpc"))
+		resp := mustGet(t, server, "/trpc/stream")
+		defer resp.Body.Close()
+
+		events := parseSSEEvents(t, resp, 2)
+		if len(events) == 0 || events[0].event != "connected" {
+			t.Fatalf("first event should be connected, got %v", events)
+		}
+
+		var connData map[string]any
+		if err := json.Unmarshal([]byte(events[0].data), &connData); err != nil {
+			t.Fatalf("failed to parse connected data %q: %v", events[0].data, err)
+		}
+		if _, ok := connData["reconnectAfterInactivityMs"]; ok {
+			t.Error("connected data should omit reconnectAfterInactivityMs when 0")
+		}
+	})
+}
+
+func TestSubscriptionTrackedSerializationError(t *testing.T) {
+	// TrackedEvent where Data fails to marshal should emit serialized-error.
+	router := trpcgo.NewRouter()
+
+	type BadData struct {
+		Fn func() `json:"fn"` // functions can't be marshaled
+	}
+
+	trpcgo.VoidSubscribe(router, "bad", func(ctx context.Context) (<-chan trpcgo.TrackedEvent[BadData], error) {
+		ch := make(chan trpcgo.TrackedEvent[BadData])
+		go func() {
+			defer close(ch)
+			ch <- trpcgo.Tracked("id-1", BadData{Fn: func() {}})
+		}()
+		return ch, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/bad")
+	defer resp.Body.Close()
+
+	events := parseSSEEvents(t, resp, 3)
+
+	hasSerialized := false
+	for _, e := range events {
+		if e.event == "serialized-error" {
+			hasSerialized = true
+			if !strings.Contains(e.data, "failed to serialize") {
+				t.Errorf("serialized-error data = %q, want 'failed to serialize'", e.data)
+			}
+			break
+		}
+	}
+	if !hasSerialized {
+		t.Errorf("expected serialized-error event, got: %v", events)
 	}
 }
 
@@ -1578,6 +1849,39 @@ func TestGenerateTSIdempotent(t *testing.T) {
 
 	if string(data1) != string(data2) {
 		t.Errorf("GenerateTS is not idempotent:\nfirst:\n%s\nsecond:\n%s", data1, data2)
+	}
+}
+
+func TestGenerateTSTrackedEventUnwrap(t *testing.T) {
+	type Notification struct {
+		Message string `json:"message"`
+	}
+
+	router := trpcgo.NewRouter()
+	trpcgo.VoidSubscribe(router, "notifications", func(ctx context.Context) (<-chan trpcgo.TrackedEvent[Notification], error) {
+		return nil, nil
+	})
+
+	outputPath := filepath.Join(t.TempDir(), "trpc.ts")
+	if err := router.GenerateTS(outputPath); err != nil {
+		t.Fatalf("GenerateTS failed: %v", err)
+	}
+
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	output := string(data)
+
+	// The subscription output should be Notification, not TrackedEvent.
+	if !strings.Contains(output, "$Subscription<void, Notification>") {
+		t.Errorf("TrackedEvent should be unwrapped to Notification:\n%s", output)
+	}
+	if strings.Contains(output, "TrackedEvent") {
+		t.Errorf("TrackedEvent should not appear in output:\n%s", output)
+	}
+	if !strings.Contains(output, "export interface Notification") {
+		t.Errorf("Notification interface should be emitted:\n%s", output)
 	}
 }
 

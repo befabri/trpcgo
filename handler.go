@@ -72,8 +72,9 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !isBatch {
 		if s, ok := results[0].response.(streamer); ok {
 			if err := s.writeSSE(ctx, w, sseOptions{
-				pingInterval: h.router.opts.ssePingInterval,
-				maxDuration:  h.router.opts.sseMaxDuration,
+				pingInterval:              h.router.opts.ssePingInterval,
+				maxDuration:               h.router.opts.sseMaxDuration,
+				reconnectAfterInactivityMs: h.router.opts.sseReconnectAfterInactivityMs,
 			}); err != nil {
 				writeErrorResponse(w, NewError(CodeInternalServerError, err.Error()), "", http.StatusInternalServerError)
 			}

@@ -9,14 +9,15 @@ import (
 const defaultMaxBodySize int64 = 1 << 20 // 1 MB
 
 type routerOptions struct {
-	allowBatching       bool
-	allowMethodOverride bool
-	maxBodySize         int64
-	onError             func(ctx context.Context, err *Error, path string)
-	createContext        func(r *http.Request) context.Context
-	ssePingInterval     time.Duration
-	sseMaxDuration      time.Duration
-	typeOutput          string
+	allowBatching                  bool
+	allowMethodOverride            bool
+	maxBodySize                    int64
+	onError                        func(ctx context.Context, err *Error, path string)
+	createContext                  func(r *http.Request) context.Context
+	ssePingInterval                time.Duration
+	sseMaxDuration                 time.Duration
+	sseReconnectAfterInactivityMs  int
+	typeOutput                     string
 }
 
 // Option configures a Router.
@@ -63,6 +64,16 @@ func WithSSEPingInterval(d time.Duration) Option {
 func WithSSEMaxDuration(d time.Duration) Option {
 	return func(o *routerOptions) {
 		o.sseMaxDuration = d
+	}
+}
+
+// WithSSEReconnectAfterInactivity tells the client to reconnect after
+// the given duration of inactivity. This is sent in the SSE connected
+// event as reconnectAfterInactivityMs, matching tRPC's protocol.
+// Default is 0 (disabled).
+func WithSSEReconnectAfterInactivity(d time.Duration) Option {
+	return func(o *routerOptions) {
+		o.sseReconnectAfterInactivityMs = int(d.Milliseconds())
 	}
 }
 

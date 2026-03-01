@@ -8,7 +8,32 @@ import (
 	"time"
 )
 
-// wrapStreamHandler adapts a function that returns a receive channel into an HandlerFunc.
+// TrackedEvent wraps a value with an ID for SSE reconnection support.
+// When the client disconnects and reconnects, it sends the last received ID
+// back in the input (as lastEventId), allowing the handler to resume from
+// where it left off.
+type TrackedEvent[T any] struct {
+	ID   string
+	Data T
+}
+
+// Tracked creates a TrackedEvent that associates an ID with data.
+// The ID is sent as the SSE id field, enabling client reconnection.
+func Tracked[T any](id string, data T) TrackedEvent[T] {
+	return TrackedEvent[T]{ID: id, Data: data}
+}
+
+// tracked is the interface used at runtime to detect TrackedEvent values
+// regardless of their type parameter.
+type tracked interface {
+	trackID() string
+	trackData() any
+}
+
+func (e TrackedEvent[T]) trackID() string { return e.ID }
+func (e TrackedEvent[T]) trackData() any  { return e.Data }
+
+// wrapStreamHandler adapts a function that returns a receive channel into a HandlerFunc.
 // Used for subscription procedures that stream data via SSE.
 func wrapStreamHandler[I any, O any](fn func(ctx context.Context, input I) (<-chan O, error)) HandlerFunc {
 	return func(ctx context.Context, rawInput json.RawMessage) (any, error) {
@@ -48,8 +73,9 @@ type streamer interface {
 }
 
 type sseOptions struct {
-	pingInterval time.Duration
-	maxDuration  time.Duration
+	pingInterval              time.Duration
+	maxDuration               time.Duration
+	reconnectAfterInactivityMs int
 }
 
 func (s *sseStream[O]) writeSSE(ctx context.Context, w http.ResponseWriter, opts sseOptions) error {
@@ -65,8 +91,11 @@ func (s *sseStream[O]) writeSSE(ctx context.Context, w http.ResponseWriter, opts
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
-	// Send connected event.
-	writeSSEEvent(w, "connected", []byte("{}"))
+	// Send connected event with client options.
+	connData, _ := json.Marshal(sseClientOptions{
+		ReconnectAfterInactivityMs: opts.reconnectAfterInactivityMs,
+	})
+	writeSSENamedEvent(w, "connected", connData)
 	flusher.Flush()
 
 	pingInterval := opts.pingInterval
@@ -89,41 +118,71 @@ func (s *sseStream[O]) writeSSE(ctx context.Context, w http.ResponseWriter, opts
 		case <-ctx.Done():
 			return nil
 		case <-maxTimer:
-			writeSSEEvent(w, "return", nil)
+			writeSSENamedEvent(w, "return", nil)
 			flusher.Flush()
 			return nil
 		case <-pingTicker.C:
-			writeSSEEvent(w, "ping", nil)
+			writeSSENamedEvent(w, "ping", nil)
 			flusher.Flush()
 		case val, ok := <-s.ch:
 			if !ok {
 				// Channel closed — stream complete.
-				writeSSEEvent(w, "return", nil)
+				writeSSENamedEvent(w, "return", nil)
 				flusher.Flush()
 				return nil
 			}
-			data, err := json.Marshal(val)
+
+			// Check if the value is a TrackedEvent.
+			var data []byte
+			var id string
+			var err error
+			if te, ok := any(val).(tracked); ok {
+				data, err = json.Marshal(te.trackData())
+				id = te.trackID()
+			} else {
+				data, err = json.Marshal(val)
+			}
+
 			if err != nil {
 				errData, _ := json.Marshal(map[string]any{
 					"code":    NameFromCode(CodeInternalServerError),
 					"message": "failed to serialize subscription data",
 				})
-				writeSSEEvent(w, "serialized-error", errData)
+				writeSSENamedEvent(w, "serialized-error", errData)
 				flusher.Flush()
 				return nil
 			}
-			writeSSEEvent(w, "message", data)
+			writeSSEData(w, data, id)
 			flusher.Flush()
 		}
 	}
 }
 
-func writeSSEEvent(w http.ResponseWriter, event string, data []byte) {
+// sseClientOptions is sent in the connected event data, matching tRPC's SSEClientOptions.
+type sseClientOptions struct {
+	ReconnectAfterInactivityMs int `json:"reconnectAfterInactivityMs,omitempty"`
+}
+
+// writeSSENamedEvent writes an SSE event with an explicit event type
+// (connected, ping, return, serialized-error).
+func writeSSENamedEvent(w http.ResponseWriter, event string, data []byte) {
 	fmt.Fprintf(w, "event: %s\n", event)
 	if len(data) > 0 {
 		fmt.Fprintf(w, "data: %s\n", data)
 	} else {
 		fmt.Fprint(w, "data: \n")
+	}
+	fmt.Fprint(w, "\n")
+}
+
+// writeSSEData writes a data-only SSE message (no event type field).
+// This matches tRPC's wire format where data messages use the default
+// "message" event type. If id is non-empty, an id field is included
+// for tracked event reconnection support.
+func writeSSEData(w http.ResponseWriter, data []byte, id string) {
+	fmt.Fprintf(w, "data: %s\n", data)
+	if id != "" {
+		fmt.Fprintf(w, "id: %s\n", id)
 	}
 	fmt.Fprint(w, "\n")
 }
