@@ -1,0 +1,27 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+/trpcgo
+
+# Node
+node_modules/
+
+# Generated (TanStack Router)
+routeTree.gen.ts
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
