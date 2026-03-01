@@ -19,11 +19,9 @@ type callResult struct {
 }
 
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	isDev := h.router.opts.isDev
-
 	// Only allow GET and POST
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		writeErrorResponse(w, NewError(CodeMethodNotSupported, "only GET and POST are supported"), "", http.StatusMethodNotAllowed, isDev)
+		h.writeErrorResponse(w, NewError(CodeMethodNotSupported, "only GET and POST are supported"), "", http.StatusMethodNotAllowed, nil, "")
 		return
 	}
 
@@ -31,7 +29,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Check if batching is allowed
 	if isBatch && !h.router.opts.allowBatching {
-		writeErrorResponse(w, NewError(CodeBadRequest, "batching is not enabled"), "", http.StatusBadRequest, isDev)
+		h.writeErrorResponse(w, NewError(CodeBadRequest, "batching is not enabled"), "", http.StatusBadRequest, nil, "")
 		return
 	}
 
@@ -40,7 +38,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		paths := parsePaths(r, h.basePath)
 		for _, path := range paths {
 			if proc, ok := h.router.lookup(path); ok && proc.typ == ProcedureSubscription {
-				writeErrorResponse(w, NewError(CodeBadRequest, "subscriptions cannot be batched"), "", http.StatusBadRequest, isDev)
+				h.writeErrorResponse(w, NewError(CodeBadRequest, "subscriptions cannot be batched"), "", http.StatusBadRequest, nil, "")
 				return
 			}
 		}
@@ -50,9 +48,9 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	calls, err := parseRequest(r, h.basePath, isBatch, h.router.opts.maxBodySize)
 	if err != nil {
 		if trpcErr, ok := errors.AsType[*Error](err); ok {
-			writeErrorResponse(w, trpcErr, "", HTTPStatusFromCode(trpcErr.Code), isDev)
+			h.writeErrorResponse(w, trpcErr, "", HTTPStatusFromCode(trpcErr.Code), nil, "")
 		} else {
-			writeErrorResponse(w, NewError(CodeInternalServerError, "internal server error"), "", http.StatusInternalServerError, isDev)
+			h.writeErrorResponse(w, NewError(CodeInternalServerError, "internal server error"), "", http.StatusInternalServerError, nil, "")
 		}
 		return
 	}
@@ -65,7 +63,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// JSONL streaming: concurrent execution with progressive chunk delivery.
 	if isBatch && r.Header.Get("trpc-accept") == "application/jsonl" {
-		h.writeJSONLStream(ctx, w, r, calls, isDev)
+		h.writeJSONLStream(ctx, w, r, calls)
 		return
 	}
 
@@ -79,13 +77,17 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Check if single result is a streamer (SSE subscription).
 	if !isBatch {
 		if s, ok := results[0].response.(streamer); ok {
+			path := calls[0].path
 			if err := s.writeSSE(ctx, w, sseOptions{
 				pingInterval:              h.router.opts.ssePingInterval,
 				maxDuration:               h.router.opts.sseMaxDuration,
 				reconnectAfterInactivityMs: h.router.opts.sseReconnectAfterInactivityMs,
-				isDev:                      isDev,
+				isDev:                      h.router.opts.isDev,
+				formatError: func(sseErr *Error) any {
+					return formatError(&h.router.opts, sseErr, path, ctx, ProcedureSubscription)
+				},
 			}); err != nil {
-				writeErrorResponse(w, NewError(CodeInternalServerError, err.Error()), "", http.StatusInternalServerError, isDev)
+				h.writeErrorResponse(w, NewError(CodeInternalServerError, err.Error()), "", http.StatusInternalServerError, ctx, "")
 			}
 			return
 		}
@@ -96,7 +98,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		data, err := json.Marshal(results[0].response)
 		if err != nil {
-			writeErrorResponse(w, NewError(CodeInternalServerError, "failed to serialize response"), "", http.StatusInternalServerError, isDev)
+			h.writeErrorResponse(w, NewError(CodeInternalServerError, "failed to serialize response"), "", http.StatusInternalServerError, ctx, "")
 			return
 		}
 		w.WriteHeader(results[0].status)
@@ -113,7 +115,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := json.Marshal(responses)
 	if err != nil {
-		writeErrorResponse(w, NewError(CodeInternalServerError, "failed to serialize response"), "", http.StatusInternalServerError, isDev)
+		h.writeErrorResponse(w, NewError(CodeInternalServerError, "failed to serialize response"), "", http.StatusInternalServerError, ctx, "")
 		return
 	}
 	statusCode := determineBatchStatus(results)
@@ -122,16 +124,21 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *httpHandler) executeCall(ctx context.Context, r *http.Request, call parsedRequest) (any, int) {
-	isDev := h.router.opts.isDev
-
 	proc, ok := h.router.lookup(call.path)
 	if !ok {
 		trpcErr := NewError(CodeNotFound, "procedure not found")
 		if h.router.opts.onError != nil {
 			h.router.opts.onError(ctx, trpcErr, call.path)
 		}
-		return newErrorEnvelope(trpcErr, call.path, isDev), HTTPStatusFromCode(CodeNotFound)
+		return formatError(&h.router.opts, trpcErr, call.path, ctx, ""), HTTPStatusFromCode(CodeNotFound)
 	}
+
+	// Inject procedure metadata into context for middleware access.
+	ctx = withProcedureMeta(ctx, ProcedureMeta{
+		Path: call.path,
+		Type: proc.typ,
+		Meta: proc.meta,
+	})
 
 	// For subscriptions, merge lastEventId into input (tRPC reconnection protocol).
 	if proc.typ == ProcedureSubscription {
@@ -143,7 +150,7 @@ func (h *httpHandler) executeCall(ctx context.Context, r *http.Request, call par
 		if h.router.opts.onError != nil {
 			h.router.opts.onError(ctx, err, call.path)
 		}
-		return newErrorEnvelope(err, call.path, isDev), HTTPStatusFromCode(err.Code)
+		return formatError(&h.router.opts, err, call.path, ctx, proc.typ), HTTPStatusFromCode(err.Code)
 	}
 
 	// Execute with pre-computed middleware chain.
@@ -162,7 +169,7 @@ func (h *httpHandler) executeCall(ctx context.Context, r *http.Request, call par
 			// Never leak internal error details to clients.
 			trpcErr = NewError(CodeInternalServerError, "internal server error")
 		}
-		return newErrorEnvelope(trpcErr, call.path, isDev), HTTPStatusFromCode(trpcErr.Code)
+		return formatError(&h.router.opts, trpcErr, call.path, ctx, proc.typ), HTTPStatusFromCode(trpcErr.Code)
 	}
 
 	// Return streamers unwrapped so the handler can detect and dispatch SSE.
@@ -251,12 +258,13 @@ func mergeLastEventId(r *http.Request, input json.RawMessage) json.RawMessage {
 // and progressive chunk delivery, matching tRPC's httpBatchStreamLink protocol.
 //
 // Wire format:
-//   Head:  {"0":[[0],[null,0,0]],"1":[[0],[null,0,1]]}\n
-//   Chunk: [chunkId,0,[[envelope]]]\n  (per result, in completion order)
-func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWriter, r *http.Request, calls []parsedRequest, isDev bool) {
+//
+//	Head:  {"0":[[0],[null,0,0]],"1":[[0],[null,0,1]]}\n
+//	Chunk: [chunkId,0,[[envelope]]]\n  (per result, in completion order)
+func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWriter, r *http.Request, calls []parsedRequest) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeErrorResponse(w, NewError(CodeInternalServerError, "streaming not supported"), "", http.StatusInternalServerError, isDev)
+		h.writeErrorResponse(w, NewError(CodeInternalServerError, "streaming not supported"), "", http.StatusInternalServerError, ctx, "")
 		return
 	}
 
@@ -270,7 +278,7 @@ func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWrite
 	}
 	headData, err := json.Marshal(head)
 	if err != nil {
-		writeErrorResponse(w, NewError(CodeInternalServerError, "failed to serialize response"), "", http.StatusInternalServerError, isDev)
+		h.writeErrorResponse(w, NewError(CodeInternalServerError, "failed to serialize response"), "", http.StatusInternalServerError, ctx, "")
 		return
 	}
 
@@ -308,9 +316,16 @@ func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWrite
 	}
 }
 
-func writeErrorResponse(w http.ResponseWriter, err *Error, path string, status int, isDev bool) {
+func (h *httpHandler) writeErrorResponse(w http.ResponseWriter, err *Error, path string, status int, ctx context.Context, typ ProcedureType) {
 	w.Header().Set("Content-Type", "application/json")
-	data, marshalErr := json.Marshal(newErrorEnvelope(err, path, isDev))
+	var formatted any
+	if ctx != nil {
+		formatted = formatError(&h.router.opts, err, path, ctx, typ)
+	} else {
+		// Pre-context errors (e.g., method not allowed) use default formatting.
+		formatted = defaultErrorEnvelope(err, path, h.router.opts.isDev)
+	}
+	data, marshalErr := json.Marshal(formatted)
 	if marshalErr != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return

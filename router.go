@@ -40,7 +40,7 @@ func (r *Router) Use(mw ...Middleware) {
 	r.middleware = append(r.middleware, mw...)
 }
 
-func (r *Router) register(path string, typ ProcedureType, handler HandlerFunc, mw []Middleware, inputType, outputType reflect.Type) {
+func (r *Router) register(path string, typ ProcedureType, handler HandlerFunc, mw []Middleware, meta any, inputType, outputType reflect.Type) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.procedures[path]; exists {
@@ -50,9 +50,45 @@ func (r *Router) register(path string, typ ProcedureType, handler HandlerFunc, m
 		typ:        typ,
 		handler:    handler,
 		middleware: mw,
+		meta:       meta,
 		inputType:  inputType,
 		outputType: outputType,
 	}
+}
+
+// Merge copies all procedures from the source routers into this router.
+// Panics if any procedure path already exists.
+// Global middleware and options on source routers are NOT copied.
+func (r *Router) Merge(sources ...*Router) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, src := range sources {
+		src.mu.RLock()
+		for path, proc := range src.procedures {
+			if _, exists := r.procedures[path]; exists {
+				src.mu.RUnlock()
+				panic(fmt.Sprintf("trpcgo: Merge: duplicate procedure %q", path))
+			}
+			r.procedures[path] = &procedure{
+				typ:        proc.typ,
+				handler:    proc.handler,
+				middleware: proc.middleware,
+				meta:       proc.meta,
+				inputType:  proc.inputType,
+				outputType: proc.outputType,
+			}
+		}
+		src.mu.RUnlock()
+	}
+}
+
+// MergeRouters creates a new Router combining procedures from all sources.
+// Panics if any two routers define a procedure at the same path.
+// The returned router has default options and no global middleware.
+func MergeRouters(routers ...*Router) *Router {
+	merged := NewRouter()
+	merged.Merge(routers...)
+	return merged
 }
 
 func (r *Router) lookup(path string) (*procedure, bool) {

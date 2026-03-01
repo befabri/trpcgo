@@ -25,3 +25,4 @@ routeTree.gen.ts
 # OS
 .DS_Store
 Thumbs.db
+trpc/

@@ -15,10 +15,21 @@ type routerOptions struct {
 	maxBodySize                    int64
 	onError                        func(ctx context.Context, err *Error, path string)
 	createContext                  func(r *http.Request) context.Context
+	errorFormatter                 func(ErrorFormatterInput) any
 	ssePingInterval                time.Duration
 	sseMaxDuration                 time.Duration
 	sseReconnectAfterInactivityMs  int
 	typeOutput                     string
+}
+
+// ErrorFormatterInput is passed to a custom error formatter.
+// It includes the default error shape so the formatter can extend or replace it.
+type ErrorFormatterInput struct {
+	Error *Error
+	Type  ProcedureType
+	Path  string
+	Ctx   context.Context
+	Shape errorEnvelope // the default tRPC error shape
 }
 
 // Option configures a Router.
@@ -91,6 +102,15 @@ func WithDev(enabled bool) Option {
 func WithMaxBodySize(n int64) Option {
 	return func(o *routerOptions) {
 		o.maxBodySize = n
+	}
+}
+
+// WithErrorFormatter sets a custom error formatter that transforms error
+// responses. The function receives the default error shape and can return
+// a modified or entirely different shape. This matches tRPC's errorFormatter.
+func WithErrorFormatter(fn func(ErrorFormatterInput) any) Option {
+	return func(o *routerOptions) {
+		o.errorFormatter = fn
 	}
 }
 

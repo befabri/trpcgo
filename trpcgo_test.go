@@ -624,12 +624,12 @@ func TestMiddlewareOrdering(t *testing.T) {
 	trpcgo.VoidQuery(router, "test", func(ctx context.Context) (string, error) {
 		calls = append(calls, "handler")
 		return "ok", nil
-	}, func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+	}, trpcgo.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
 		return func(ctx context.Context, input json.RawMessage) (any, error) {
 			calls = append(calls, "per-proc")
 			return next(ctx, input)
 		}
-	})
+	}))
 
 	server := newTestServer(t, router.Handler("/trpc"))
 
@@ -2474,5 +2474,860 @@ func TestJSONLBatchConcurrency(t *testing.T) {
 		if ch.index == 1 && data["name"] != "Fast" {
 			t.Errorf("chunk[1] name = %v, want Fast", data["name"])
 		}
+	}
+}
+
+// --- Procedure Metadata Tests ---
+
+func TestProcedureMeta(t *testing.T) {
+	type AuthMeta struct {
+		RequiresAuth bool
+		Role         string
+	}
+
+	var gotMeta trpcgo.ProcedureMeta
+
+	router := trpcgo.NewRouter()
+	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input json.RawMessage) (any, error) {
+			pm, ok := trpcgo.GetProcedureMeta(ctx)
+			if !ok {
+				t.Error("expected ProcedureMeta in context")
+			}
+			gotMeta = pm
+			return next(ctx, input)
+		}
+	})
+	trpcgo.VoidQuery(router, "hello", func(ctx context.Context) (string, error) {
+		return "hi", nil
+	}, trpcgo.WithMeta(AuthMeta{RequiresAuth: true, Role: "admin"}))
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/hello")
+	resp.Body.Close()
+
+	if gotMeta.Path != "hello" {
+		t.Errorf("ProcedureMeta.Path = %q, want %q", gotMeta.Path, "hello")
+	}
+	if gotMeta.Type != trpcgo.ProcedureQuery {
+		t.Errorf("ProcedureMeta.Type = %q, want %q", gotMeta.Type, trpcgo.ProcedureQuery)
+	}
+	meta, ok := gotMeta.Meta.(AuthMeta)
+	if !ok {
+		t.Fatalf("ProcedureMeta.Meta type = %T, want AuthMeta", gotMeta.Meta)
+	}
+	if !meta.RequiresAuth || meta.Role != "admin" {
+		t.Errorf("meta = %+v, want {RequiresAuth:true Role:admin}", meta)
+	}
+}
+
+func TestProcedureMetaNil(t *testing.T) {
+	var gotMeta trpcgo.ProcedureMeta
+
+	router := trpcgo.NewRouter()
+	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input json.RawMessage) (any, error) {
+			pm, _ := trpcgo.GetProcedureMeta(ctx)
+			gotMeta = pm
+			return next(ctx, input)
+		}
+	})
+	trpcgo.VoidQuery(router, "hello", func(ctx context.Context) (string, error) {
+		return "hi", nil
+	}) // no WithMeta
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/hello")
+	resp.Body.Close()
+
+	if gotMeta.Meta != nil {
+		t.Errorf("ProcedureMeta.Meta = %v, want nil", gotMeta.Meta)
+	}
+	if gotMeta.Path != "hello" {
+		t.Errorf("ProcedureMeta.Path = %q, want %q", gotMeta.Path, "hello")
+	}
+}
+
+func TestProcedureMetaMutation(t *testing.T) {
+	var gotType trpcgo.ProcedureType
+
+	router := trpcgo.NewRouter()
+	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input json.RawMessage) (any, error) {
+			pm, _ := trpcgo.GetProcedureMeta(ctx)
+			gotType = pm.Type
+			return next(ctx, input)
+		}
+	})
+	trpcgo.Mutation(router, "user.create", func(ctx context.Context, input CreateUserInput) (User, error) {
+		return User{ID: "1", Name: input.Name}, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	resp := mustPost(t, server, "/trpc/user.create", `{"name":"Bob"}`)
+	resp.Body.Close()
+
+	if gotType != trpcgo.ProcedureMutation {
+		t.Errorf("ProcedureMeta.Type = %q, want %q", gotType, trpcgo.ProcedureMutation)
+	}
+}
+
+// --- Error Formatter Tests ---
+
+func TestErrorFormatter(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+		return map[string]any{
+			"error": map[string]any{
+				"code":    input.Shape.Error.Code,
+				"message": input.Shape.Error.Message,
+				"data":    input.Shape.Error.Data,
+				"custom":  "extra-field",
+			},
+		}
+	}))
+
+	trpcgo.VoidQuery(router, "fail", func(ctx context.Context) (string, error) {
+		return "", trpcgo.NewError(trpcgo.CodeBadRequest, "invalid input")
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/fail")
+	if resp.StatusCode != 400 {
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+
+	body := decodeJSON(t, resp)
+	errObj, ok := body["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error object, got %v", body)
+	}
+	if errObj["custom"] != "extra-field" {
+		t.Errorf("custom field = %v, want extra-field", errObj["custom"])
+	}
+	if errObj["message"] != "invalid input" {
+		t.Errorf("message = %v, want 'invalid input'", errObj["message"])
+	}
+}
+
+func TestErrorFormatterReceivesContext(t *testing.T) {
+	type ctxKey string
+
+	var gotVal string
+	router := trpcgo.NewRouter(
+		trpcgo.WithContextCreator(func(r *http.Request) context.Context {
+			return context.WithValue(r.Context(), ctxKey("tenant"), "acme")
+		}),
+		trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+			gotVal, _ = input.Ctx.Value(ctxKey("tenant")).(string)
+			return input.Shape // pass through default shape
+		}),
+	)
+
+	trpcgo.VoidQuery(router, "fail", func(ctx context.Context) (string, error) {
+		return "", trpcgo.NewError(trpcgo.CodeBadRequest, "nope")
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/fail")
+	resp.Body.Close()
+
+	if gotVal != "acme" {
+		t.Errorf("error formatter ctx value = %q, want %q", gotVal, "acme")
+	}
+}
+
+func TestErrorFormatterNotFound(t *testing.T) {
+	var gotPath string
+	router := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+		gotPath = input.Path
+		return input.Shape
+	}))
+
+	trpcgo.VoidQuery(router, "exists", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/nonexistent")
+	resp.Body.Close()
+
+	if gotPath != "nonexistent" {
+		t.Errorf("formatter path = %q, want %q", gotPath, "nonexistent")
+	}
+}
+
+// --- Router Merging Tests ---
+
+func TestMergeRouters(t *testing.T) {
+	r1 := trpcgo.NewRouter()
+	trpcgo.VoidQuery(r1, "hello", func(ctx context.Context) (string, error) {
+		return "hello", nil
+	})
+
+	r2 := trpcgo.NewRouter()
+	trpcgo.VoidQuery(r2, "world", func(ctx context.Context) (string, error) {
+		return "world", nil
+	})
+
+	merged := trpcgo.MergeRouters(r1, r2)
+	server := newTestServer(t, merged.Handler("/trpc"))
+
+	resp1 := mustGet(t, server, "/trpc/hello")
+	if resp1.StatusCode != 200 {
+		resp1.Body.Close()
+		t.Fatalf("hello: status = %d, want 200", resp1.StatusCode)
+	}
+	if got := resultScalar(t, decodeJSON(t, resp1)); got != "hello" {
+		t.Errorf("hello = %v, want hello", got)
+	}
+
+	resp2 := mustGet(t, server, "/trpc/world")
+	if resp2.StatusCode != 200 {
+		resp2.Body.Close()
+		t.Fatalf("world: status = %d, want 200", resp2.StatusCode)
+	}
+	if got := resultScalar(t, decodeJSON(t, resp2)); got != "world" {
+		t.Errorf("world = %v, want world", got)
+	}
+}
+
+func TestMergeRoutersDuplicatePanics(t *testing.T) {
+	r1 := trpcgo.NewRouter()
+	trpcgo.VoidQuery(r1, "dup", func(ctx context.Context) (string, error) {
+		return "a", nil
+	})
+
+	r2 := trpcgo.NewRouter()
+	trpcgo.VoidQuery(r2, "dup", func(ctx context.Context) (string, error) {
+		return "b", nil
+	})
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic on duplicate procedure path")
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "dup") {
+			t.Fatalf("expected panic mentioning 'dup', got %v", r)
+		}
+	}()
+	trpcgo.MergeRouters(r1, r2)
+}
+
+func TestRouterMergeMethod(t *testing.T) {
+	sub := trpcgo.NewRouter()
+	trpcgo.VoidQuery(sub, "sub.hello", func(ctx context.Context) (string, error) {
+		return "from sub", nil
+	})
+
+	main := trpcgo.NewRouter(trpcgo.WithMethodOverride(true))
+	trpcgo.VoidQuery(main, "main.hello", func(ctx context.Context) (string, error) {
+		return "from main", nil
+	})
+	main.Merge(sub)
+
+	server := newTestServer(t, main.Handler("/trpc"))
+
+	// sub procedure accessible
+	resp := mustGet(t, server, "/trpc/sub.hello")
+	if resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := resultScalar(t, decodeJSON(t, resp)); got != "from sub" {
+		t.Errorf("result = %v, want 'from sub'", got)
+	}
+
+	// main options (method override) apply to merged procedures
+	resp2 := mustPost(t, server, "/trpc/sub.hello", "")
+	if resp2.StatusCode != 200 {
+		resp2.Body.Close()
+		t.Fatalf("method override status = %d, want 200", resp2.StatusCode)
+	}
+}
+
+func TestMergeRoutersWithGlobalMiddleware(t *testing.T) {
+	var calls []string
+
+	r1 := trpcgo.NewRouter()
+	trpcgo.VoidQuery(r1, "a", func(ctx context.Context) (string, error) {
+		calls = append(calls, "handler-a")
+		return "a", nil
+	})
+
+	r2 := trpcgo.NewRouter()
+	trpcgo.VoidQuery(r2, "b", func(ctx context.Context) (string, error) {
+		calls = append(calls, "handler-b")
+		return "b", nil
+	})
+
+	merged := trpcgo.NewRouter()
+	merged.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input json.RawMessage) (any, error) {
+			calls = append(calls, "global-mw")
+			return next(ctx, input)
+		}
+	})
+	merged.Merge(r1, r2)
+
+	server := newTestServer(t, merged.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/a")
+	resp.Body.Close()
+
+	if len(calls) != 2 || calls[0] != "global-mw" || calls[1] != "handler-a" {
+		t.Errorf("calls = %v, want [global-mw, handler-a]", calls)
+	}
+}
+
+// --- Server-Side Caller Tests ---
+
+func TestRawCall(t *testing.T) {
+	router := trpcgo.NewRouter()
+	trpcgo.Query(router, "user.get", func(ctx context.Context, input GetUserInput) (User, error) {
+		return User{ID: input.ID, Name: "Alice"}, nil
+	})
+
+	result, err := router.RawCall(context.Background(), "user.get", json.RawMessage(`{"id":"42"}`))
+	if err != nil {
+		t.Fatalf("RawCall error: %v", err)
+	}
+
+	user, ok := result.(User)
+	if !ok {
+		t.Fatalf("result type = %T, want User", result)
+	}
+	if user.ID != "42" || user.Name != "Alice" {
+		t.Errorf("result = %+v, want {ID:42 Name:Alice}", user)
+	}
+}
+
+func TestTypedCall(t *testing.T) {
+	router := trpcgo.NewRouter()
+	trpcgo.Query(router, "user.get", func(ctx context.Context, input GetUserInput) (User, error) {
+		return User{ID: input.ID, Name: "Bob"}, nil
+	})
+
+	user, err := trpcgo.Call[GetUserInput, User](router, context.Background(), "user.get", GetUserInput{ID: "99"})
+	if err != nil {
+		t.Fatalf("Call error: %v", err)
+	}
+	if user.ID != "99" || user.Name != "Bob" {
+		t.Errorf("result = %+v, want {ID:99 Name:Bob}", user)
+	}
+}
+
+func TestRawCallNotFound(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	_, err := router.RawCall(context.Background(), "nonexistent", nil)
+	if err == nil {
+		t.Fatal("expected error for nonexistent procedure")
+	}
+
+	trpcErr, ok := err.(*trpcgo.Error)
+	if !ok {
+		t.Fatalf("error type = %T, want *trpcgo.Error", err)
+	}
+	if trpcErr.Code != trpcgo.CodeNotFound {
+		t.Errorf("error code = %v, want NOT_FOUND", trpcErr.Code)
+	}
+}
+
+func TestRawCallSubscriptionRejected(t *testing.T) {
+	router := trpcgo.NewRouter()
+	trpcgo.VoidSubscribe(router, "events", func(ctx context.Context) (<-chan string, error) {
+		ch := make(chan string)
+		close(ch)
+		return ch, nil
+	})
+
+	_, err := router.RawCall(context.Background(), "events", nil)
+	if err == nil {
+		t.Fatal("expected error for subscription via RawCall")
+	}
+}
+
+func TestRawCallRunsMiddleware(t *testing.T) {
+	type ctxKey string
+	var gotUser string
+
+	router := trpcgo.NewRouter()
+	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input json.RawMessage) (any, error) {
+			return next(context.WithValue(ctx, ctxKey("user"), "admin"), input)
+		}
+	})
+	trpcgo.VoidQuery(router, "whoami", func(ctx context.Context) (string, error) {
+		gotUser = ctx.Value(ctxKey("user")).(string)
+		return gotUser, nil
+	})
+
+	result, err := router.RawCall(context.Background(), "whoami", nil)
+	if err != nil {
+		t.Fatalf("RawCall error: %v", err)
+	}
+	if result != "admin" {
+		t.Errorf("result = %v, want admin", result)
+	}
+	if gotUser != "admin" {
+		t.Errorf("gotUser = %v, want admin", gotUser)
+	}
+}
+
+func TestRawCallWithProcedureMeta(t *testing.T) {
+	var gotMeta trpcgo.ProcedureMeta
+
+	router := trpcgo.NewRouter()
+	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input json.RawMessage) (any, error) {
+			pm, _ := trpcgo.GetProcedureMeta(ctx)
+			gotMeta = pm
+			return next(ctx, input)
+		}
+	})
+	trpcgo.VoidQuery(router, "test", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	}, trpcgo.WithMeta("test-meta"))
+
+	_, err := router.RawCall(context.Background(), "test", nil)
+	if err != nil {
+		t.Fatalf("RawCall error: %v", err)
+	}
+
+	if gotMeta.Path != "test" {
+		t.Errorf("meta.Path = %q, want %q", gotMeta.Path, "test")
+	}
+	if gotMeta.Meta != "test-meta" {
+		t.Errorf("meta.Meta = %v, want %q", gotMeta.Meta, "test-meta")
+	}
+}
+
+func TestCallBeforeHandler(t *testing.T) {
+	router := trpcgo.NewRouter()
+	trpcgo.VoidQuery(router, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	})
+
+	// RawCall before Handler() is called — should still work.
+	result, err := router.RawCall(context.Background(), "ping", nil)
+	if err != nil {
+		t.Fatalf("RawCall error: %v", err)
+	}
+	if result != "pong" {
+		t.Errorf("result = %v, want pong", result)
+	}
+}
+
+func TestCallHandlerError(t *testing.T) {
+	router := trpcgo.NewRouter()
+	trpcgo.VoidQuery(router, "fail", func(ctx context.Context) (string, error) {
+		return "", trpcgo.NewError(trpcgo.CodeForbidden, "denied")
+	})
+
+	_, err := trpcgo.Call[struct{}, string](router, context.Background(), "fail", struct{}{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	trpcErr, ok := err.(*trpcgo.Error)
+	if !ok {
+		t.Fatalf("error type = %T, want *trpcgo.Error", err)
+	}
+	if trpcErr.Code != trpcgo.CodeForbidden {
+		t.Errorf("error code = %v, want FORBIDDEN", trpcErr.Code)
+	}
+}
+
+// --- Additional coverage for gaps ---
+
+func TestProcedureMetaAccessibleInHandler(t *testing.T) {
+	var gotMeta trpcgo.ProcedureMeta
+
+	router := trpcgo.NewRouter()
+	trpcgo.VoidQuery(router, "check", func(ctx context.Context) (string, error) {
+		pm, ok := trpcgo.GetProcedureMeta(ctx)
+		if !ok {
+			t.Error("expected ProcedureMeta in handler context")
+		}
+		gotMeta = pm
+		return "ok", nil
+	}, trpcgo.WithMeta("handler-visible"))
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/check")
+	resp.Body.Close()
+
+	if gotMeta.Path != "check" {
+		t.Errorf("Path = %q, want %q", gotMeta.Path, "check")
+	}
+	if gotMeta.Meta != "handler-visible" {
+		t.Errorf("Meta = %v, want %q", gotMeta.Meta, "handler-visible")
+	}
+}
+
+func TestProcedureMetaSubscriptionType(t *testing.T) {
+	var gotType trpcgo.ProcedureType
+
+	router := trpcgo.NewRouter()
+	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input json.RawMessage) (any, error) {
+			pm, _ := trpcgo.GetProcedureMeta(ctx)
+			gotType = pm.Type
+			return next(ctx, input)
+		}
+	})
+	trpcgo.VoidSubscribe(router, "events", func(ctx context.Context) (<-chan string, error) {
+		ch := make(chan string, 1)
+		ch <- "hello"
+		close(ch)
+		return ch, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// Initiate SSE request, just check that middleware ran.
+	req, _ := http.NewRequest("GET", server.URL+"/trpc/events", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	resp.Body.Close()
+
+	if gotType != trpcgo.ProcedureSubscription {
+		t.Errorf("ProcedureMeta.Type = %q, want %q", gotType, trpcgo.ProcedureSubscription)
+	}
+}
+
+func TestProcedureOptionUsePlusWithMeta(t *testing.T) {
+	var gotMeta trpcgo.ProcedureMeta
+	mwCalled := false
+
+	router := trpcgo.NewRouter()
+	trpcgo.VoidQuery(router, "both", func(ctx context.Context) (string, error) {
+		pm, _ := trpcgo.GetProcedureMeta(ctx)
+		gotMeta = pm
+		return "ok", nil
+	},
+		trpcgo.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+			return func(ctx context.Context, input json.RawMessage) (any, error) {
+				mwCalled = true
+				return next(ctx, input)
+			}
+		}),
+		trpcgo.WithMeta(map[string]string{"role": "admin"}),
+	)
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/both")
+	resp.Body.Close()
+
+	if !mwCalled {
+		t.Error("per-procedure middleware was not called")
+	}
+	m, ok := gotMeta.Meta.(map[string]string)
+	if !ok {
+		t.Fatalf("Meta type = %T, want map[string]string", gotMeta.Meta)
+	}
+	if m["role"] != "admin" {
+		t.Errorf("Meta[role] = %q, want %q", m["role"], "admin")
+	}
+}
+
+func TestProcedureMetaIsolationInBatch(t *testing.T) {
+	metas := make(map[string]any)
+	var mu sync.Mutex
+
+	router := trpcgo.NewRouter(trpcgo.WithBatching(true))
+	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input json.RawMessage) (any, error) {
+			pm, _ := trpcgo.GetProcedureMeta(ctx)
+			mu.Lock()
+			metas[pm.Path] = pm.Meta
+			mu.Unlock()
+			return next(ctx, input)
+		}
+	})
+	trpcgo.VoidQuery(router, "a", func(ctx context.Context) (string, error) {
+		return "a", nil
+	}, trpcgo.WithMeta("meta-a"))
+	trpcgo.VoidQuery(router, "b", func(ctx context.Context) (string, error) {
+		return "b", nil
+	}, trpcgo.WithMeta("meta-b"))
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// Batch request requires ?batch=1
+	resp := mustGet(t, server, "/trpc/a,b?batch=1")
+	resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if metas["a"] != "meta-a" {
+		t.Errorf("meta for 'a' = %v, want 'meta-a'", metas["a"])
+	}
+	if metas["b"] != "meta-b" {
+		t.Errorf("meta for 'b' = %v, want 'meta-b'", metas["b"])
+	}
+}
+
+func TestErrorFormatterReceivesProcedureType(t *testing.T) {
+	var gotType trpcgo.ProcedureType
+
+	router := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+		gotType = input.Type
+		return input.Shape
+	}))
+
+	trpcgo.Mutation(router, "fail", func(ctx context.Context, input struct{}) (string, error) {
+		return "", trpcgo.NewError(trpcgo.CodeBadRequest, "bad")
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+	resp := mustPost(t, server, "/trpc/fail", `{}`)
+	resp.Body.Close()
+
+	if gotType != trpcgo.ProcedureMutation {
+		t.Errorf("ErrorFormatterInput.Type = %q, want %q", gotType, trpcgo.ProcedureMutation)
+	}
+}
+
+func TestErrorFormatterOnInternalError(t *testing.T) {
+	formatterCalled := false
+
+	router := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+		formatterCalled = true
+		return input.Shape
+	}))
+
+	trpcgo.VoidQuery(router, "panic-ish", func(ctx context.Context) (string, error) {
+		// Return a non-trpc error — handler wraps it as INTERNAL_SERVER_ERROR
+		return "", fmt.Errorf("unexpected: db connection lost")
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/panic-ish")
+	resp.Body.Close()
+
+	if resp.StatusCode != 500 {
+		t.Errorf("status = %d, want 500", resp.StatusCode)
+	}
+	if !formatterCalled {
+		t.Error("error formatter was not called for internal error")
+	}
+}
+
+func TestErrorFormatterInBatchResponse(t *testing.T) {
+	callCount := atomic.Int32{}
+
+	router := trpcgo.NewRouter(
+		trpcgo.WithBatching(true),
+		trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+			callCount.Add(1)
+			return input.Shape
+		}),
+	)
+
+	trpcgo.VoidQuery(router, "ok", func(ctx context.Context) (string, error) {
+		return "fine", nil
+	})
+	trpcgo.VoidQuery(router, "fail", func(ctx context.Context) (string, error) {
+		return "", trpcgo.NewError(trpcgo.CodeBadRequest, "bad")
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// Batch: ok + fail
+	resp := mustGet(t, server, "/trpc/ok,fail")
+	resp.Body.Close()
+
+	if callCount.Load() != 1 {
+		t.Errorf("formatter called %d times, want 1 (only for the failing procedure)", callCount.Load())
+	}
+}
+
+func TestErrorFormatterSSESerializedError(t *testing.T) {
+	formatterCalled := false
+
+	router := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+		formatterCalled = true
+		return map[string]any{
+			"code":    input.Shape.Error.Code,
+			"message": input.Shape.Error.Message,
+			"custom":  "sse-formatted",
+		}
+	}))
+
+	type BadData struct {
+		Ch chan int // channels can't be JSON serialized
+	}
+
+	trpcgo.VoidSubscribe(router, "bad", func(ctx context.Context) (<-chan BadData, error) {
+		ch := make(chan BadData, 1)
+		ch <- BadData{Ch: make(chan int)}
+		close(ch)
+		return ch, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	resp, err := http.Get(server.URL + "/trpc/bad")
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	if !formatterCalled {
+		t.Error("error formatter was not called for SSE serialized-error")
+	}
+	if !strings.Contains(bodyStr, "sse-formatted") {
+		t.Errorf("SSE body missing formatted error, got:\n%s", bodyStr)
+	}
+}
+
+func TestMergePreservesPerProcMiddleware(t *testing.T) {
+	mwCalled := false
+
+	sub := trpcgo.NewRouter()
+	trpcgo.VoidQuery(sub, "guarded", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	}, trpcgo.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input json.RawMessage) (any, error) {
+			mwCalled = true
+			return next(ctx, input)
+		}
+	}))
+
+	main := trpcgo.NewRouter()
+	main.Merge(sub)
+
+	server := newTestServer(t, main.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/guarded")
+	resp.Body.Close()
+
+	if !mwCalled {
+		t.Error("per-procedure middleware from source router was not preserved after merge")
+	}
+}
+
+func TestMergePreservesMeta(t *testing.T) {
+	var gotMeta any
+
+	sub := trpcgo.NewRouter()
+	trpcgo.VoidQuery(sub, "tagged", func(ctx context.Context) (string, error) {
+		pm, _ := trpcgo.GetProcedureMeta(ctx)
+		gotMeta = pm.Meta
+		return "ok", nil
+	}, trpcgo.WithMeta("preserved"))
+
+	main := trpcgo.NewRouter()
+	main.Merge(sub)
+
+	server := newTestServer(t, main.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/tagged")
+	resp.Body.Close()
+
+	if gotMeta != "preserved" {
+		t.Errorf("meta after merge = %v, want %q", gotMeta, "preserved")
+	}
+}
+
+func TestMergeEmptyRouters(t *testing.T) {
+	r1 := trpcgo.NewRouter()
+	r2 := trpcgo.NewRouter()
+
+	merged := trpcgo.MergeRouters(r1, r2)
+	server := newTestServer(t, merged.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/anything")
+	resp.Body.Close()
+
+	if resp.StatusCode != 404 {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestRawCallVoidQuery(t *testing.T) {
+	router := trpcgo.NewRouter()
+	trpcgo.VoidQuery(router, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	})
+
+	// nil input for void query
+	result, err := router.RawCall(context.Background(), "ping", nil)
+	if err != nil {
+		t.Fatalf("RawCall error: %v", err)
+	}
+	if result != "pong" {
+		t.Errorf("result = %v, want pong", result)
+	}
+}
+
+func TestRawCallAfterHandler(t *testing.T) {
+	router := trpcgo.NewRouter()
+	trpcgo.VoidQuery(router, "test", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	})
+
+	// Call Handler() first to pre-compute middleware chains
+	_ = router.Handler("/trpc")
+
+	// RawCall should use the pre-computed chain
+	result, err := router.RawCall(context.Background(), "test", nil)
+	if err != nil {
+		t.Fatalf("RawCall error: %v", err)
+	}
+	if result != "ok" {
+		t.Errorf("result = %v, want ok", result)
+	}
+}
+
+func TestRawCallConcurrent(t *testing.T) {
+	router := trpcgo.NewRouter()
+	trpcgo.Query(router, "echo", func(ctx context.Context, input struct{ V int }) (int, error) {
+		return input.V, nil
+	})
+
+	_ = router.Handler("/trpc") // pre-compute
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 100)
+	for i := range 100 {
+		wg.Add(1)
+		go func(v int) {
+			defer wg.Done()
+			input, _ := json.Marshal(struct{ V int }{V: v})
+			result, err := router.RawCall(context.Background(), "echo", input)
+			if err != nil {
+				errs <- fmt.Errorf("RawCall(%d): %w", v, err)
+				return
+			}
+			got, ok := result.(int)
+			if !ok {
+				errs <- fmt.Errorf("RawCall(%d): result type %T, want int", v, result)
+				return
+			}
+			if got != v {
+				errs <- fmt.Errorf("RawCall(%d): got %d, want %d", v, got, v)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
 	}
 }

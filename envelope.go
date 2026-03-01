@@ -1,6 +1,9 @@
 package trpcgo
 
-import "runtime"
+import (
+	"context"
+	"runtime"
+)
 
 // resultEnvelope is the success response envelope: {"result":{"data":...}}
 type resultEnvelope struct {
@@ -33,7 +36,8 @@ func newResultEnvelope(data any) resultEnvelope {
 	return resultEnvelope{Result: resultData{Data: data}}
 }
 
-func newErrorEnvelope(err *Error, path string, isDev bool) errorEnvelope {
+// defaultErrorEnvelope builds the standard tRPC error envelope.
+func defaultErrorEnvelope(err *Error, path string, isDev bool) errorEnvelope {
 	httpStatus := HTTPStatusFromCode(err.Code)
 	data := errorShapeData{
 		Code:       NameFromCode(err.Code),
@@ -52,4 +56,19 @@ func newErrorEnvelope(err *Error, path string, isDev bool) errorEnvelope {
 			Data:    data,
 		},
 	}
+}
+
+// formatError builds the error response, applying the custom error formatter if configured.
+func formatError(opts *routerOptions, err *Error, path string, ctx context.Context, typ ProcedureType) any {
+	shape := defaultErrorEnvelope(err, path, opts.isDev)
+	if opts.errorFormatter == nil {
+		return shape
+	}
+	return opts.errorFormatter(ErrorFormatterInput{
+		Error: err,
+		Type:  typ,
+		Path:  path,
+		Ctx:   ctx,
+		Shape: shape,
+	})
 }

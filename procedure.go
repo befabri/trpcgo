@@ -24,8 +24,40 @@ type procedure struct {
 	handler        HandlerFunc
 	wrappedHandler HandlerFunc
 	middleware     []Middleware
+	meta           any
 	inputType      reflect.Type
 	outputType     reflect.Type
+}
+
+// ProcedureOption configures a single procedure registration.
+type ProcedureOption func(*procedureConfig)
+
+type procedureConfig struct {
+	middleware []Middleware
+	meta       any
+}
+
+func collectProcedureConfig(opts []ProcedureOption) procedureConfig {
+	var cfg procedureConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg
+}
+
+// Use adds per-procedure middleware.
+func Use(mw ...Middleware) ProcedureOption {
+	return func(c *procedureConfig) {
+		c.middleware = append(c.middleware, mw...)
+	}
+}
+
+// WithMeta attaches metadata to a procedure, accessible in middleware
+// via GetProcedureMeta(ctx).
+func WithMeta(meta any) ProcedureOption {
+	return func(c *procedureConfig) {
+		c.meta = meta
+	}
 }
 
 func wrapHandler[I any, O any](fn func(ctx context.Context, input I) (O, error)) HandlerFunc {
