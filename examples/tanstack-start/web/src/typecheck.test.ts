@@ -3,7 +3,7 @@
 // If it compiles, the generated types are compatible with @trpc/client.
 
 import { createTRPCClient, httpBatchLink } from "@trpc/client";
-import type { AppRouter, User, GetUserByIdInput, CreateUserInput } from "../gen/trpc.js";
+import type { AppRouter, User, GetUserByIdInput, CreateUserInput, Role, Status } from "../gen/trpc.js";
 
 // 1. createTRPCClient accepts AppRouter as a type parameter
 const trpc = createTRPCClient<AppRouter>({
@@ -14,10 +14,20 @@ const trpc = createTRPCClient<AppRouter>({
 async function testGetUserById() {
   const user = await trpc.user.getUserById.query({ id: "1" });
 
-  // Output is User
+  // Output is User with all fields
   const _id: string = user.id;
   const _name: string = user.name;
   const _email: string = user.email;
+  const _role: Role = user.role;
+  const _status: Status = user.status;
+  const _avatarUrl: string = user.avatarUrl;
+  const _preferences: Record<string, unknown> = user.preferences;
+  const _tags: Record<string, string> = user.tags;
+  const _createdAt: string = user.createdAt;
+
+  // Optional fields
+  const _bio: string | undefined = user.bio;
+  const _extraData: unknown | undefined = user.extraData;
 
   // @ts-expect-error — input requires `id` field
   await trpc.user.getUserById.query({});
@@ -26,13 +36,15 @@ async function testGetUserById() {
   await trpc.user.getUserById.query({ id: 123 });
 }
 
-// 3. Query with void input returns typed array output
+// 3. Query with pagination input returns paginated output
 async function testListUsers() {
-  const users = await trpc.user.listUsers.query();
+  const result = await trpc.user.listUsers.query({ page: 1, perPage: 20 });
 
-  // Output is User[]
-  const _first: User = users[0];
-  const _len: number = users.length;
+  // Output is PaginatedList<User>
+  const _first: User = result.items[0];
+  const _total: number = result.total;
+  const _page: number = result.page;
+  const _perPage: number = result.perPage;
 }
 
 // 4. Mutation with typed input returns typed output

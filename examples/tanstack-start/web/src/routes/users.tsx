@@ -1,8 +1,10 @@
 import { Link, Outlet, createFileRoute } from "@tanstack/react-router";
 import { Spinner } from "./-components/spinner";
+import { RoleBadge, StatusDot } from "./-components/badges";
 
 export const Route = createFileRoute("/users")({
-  loader: ({ context: { trpc } }) => trpc.user.listUsers.query(),
+  loader: ({ context: { trpc } }) =>
+    trpc.user.listUsers.query({ page: 1, perPage: 20 }),
   pendingComponent: () => (
     <div className="p-4">
       <Spinner /> Loading users...
@@ -12,12 +14,12 @@ export const Route = createFileRoute("/users")({
 });
 
 function UsersComponent() {
-  const users = Route.useLoaderData();
+  const data = Route.useLoaderData();
 
   return (
     <div className="flex-1 flex">
-      <div className="divide-y w-56">
-        {users.map((user) => (
+      <div className="divide-y w-64">
+        {data.items.map((user) => (
           <div key={user.id}>
             <Link
               to="/users/$userId"
@@ -26,7 +28,13 @@ function UsersComponent() {
               className="block py-2 px-3 text-blue-700"
               activeProps={{ className: "font-bold" }}
             >
-              {user.name}
+              <div className="flex items-center gap-2">
+                <StatusDot status={user.status} />
+                <span className="truncate">{user.name}</span>
+                <span className="ml-auto">
+                  <RoleBadge role={user.role} />
+                </span>
+              </div>
             </Link>
           </div>
         ))}
