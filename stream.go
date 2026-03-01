@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime"
 	"time"
 )
 
@@ -76,6 +77,7 @@ type sseOptions struct {
 	pingInterval              time.Duration
 	maxDuration               time.Duration
 	reconnectAfterInactivityMs int
+	isDev                      bool
 }
 
 func (s *sseStream[O]) writeSSE(ctx context.Context, w http.ResponseWriter, opts sseOptions) error {
@@ -144,10 +146,20 @@ func (s *sseStream[O]) writeSSE(ctx context.Context, w http.ResponseWriter, opts
 			}
 
 			if err != nil {
-				errData, _ := json.Marshal(map[string]any{
+				errShape := map[string]any{
 					"code":    NameFromCode(CodeInternalServerError),
 					"message": "failed to serialize subscription data",
-				})
+				}
+				if opts.isDev {
+					buf := make([]byte, 4096)
+					n := runtime.Stack(buf, false)
+					errShape["data"] = map[string]any{
+						"code":       NameFromCode(CodeInternalServerError),
+						"httpStatus": http.StatusInternalServerError,
+						"stack":      string(buf[:n]),
+					}
+				}
+				errData, _ := json.Marshal(errShape)
 				writeSSENamedEvent(w, "serialized-error", errData)
 				flusher.Flush()
 				return nil

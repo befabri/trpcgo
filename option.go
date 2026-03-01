@@ -11,6 +11,7 @@ const defaultMaxBodySize int64 = 1 << 20 // 1 MB
 type routerOptions struct {
 	allowBatching                  bool
 	allowMethodOverride            bool
+	isDev                          bool
 	maxBodySize                    int64
 	onError                        func(ctx context.Context, err *Error, path string)
 	createContext                  func(r *http.Request) context.Context
@@ -74,6 +75,14 @@ func WithSSEMaxDuration(d time.Duration) Option {
 func WithSSEReconnectAfterInactivity(d time.Duration) Option {
 	return func(o *routerOptions) {
 		o.sseReconnectAfterInactivityMs = int(d.Milliseconds())
+	}
+}
+
+// WithDev enables development mode. When true, error responses include
+// Go stack traces in the data.stack field, matching tRPC's isDev behavior.
+func WithDev(enabled bool) Option {
+	return func(o *routerOptions) {
+		o.isDev = enabled
 	}
 }
 

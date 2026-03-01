@@ -2006,3 +2006,473 @@ func TestInternalErrorNotLeaked(t *testing.T) {
 		t.Error("onError should receive the original error with internal details")
 	}
 }
+
+// --- isDev Stack Trace Tests ---
+
+func TestDevModeStackTrace(t *testing.T) {
+	r := trpcgo.NewRouter(trpcgo.WithDev(true))
+
+	trpcgo.Query(r, "user.get", func(ctx context.Context, input GetUserInput) (User, error) {
+		return User{}, trpcgo.NewError(trpcgo.CodeNotFound, "not found")
+	})
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/user.get?input="+url.QueryEscape(`{"id":"1"}`))
+	body := decodeJSON(t, resp)
+	data := errorData(t, body)
+
+	stack, ok := data["stack"].(string)
+	if !ok || stack == "" {
+		t.Fatal("isDev=true should include stack trace in error data")
+	}
+	if !strings.Contains(stack, "goroutine") {
+		t.Errorf("stack trace should contain goroutine info, got: %s", stack[:min(len(stack), 100)])
+	}
+}
+
+func TestNonDevModeNoStackTrace(t *testing.T) {
+	r := trpcgo.NewRouter() // isDev defaults to false
+
+	trpcgo.Query(r, "user.get", func(ctx context.Context, input GetUserInput) (User, error) {
+		return User{}, trpcgo.NewError(trpcgo.CodeNotFound, "not found")
+	})
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/user.get?input="+url.QueryEscape(`{"id":"1"}`))
+	body := decodeJSON(t, resp)
+	data := errorData(t, body)
+
+	if _, ok := data["stack"]; ok {
+		t.Fatal("isDev=false should not include stack trace in error data")
+	}
+}
+
+// --- lastEventId Tests ---
+
+// lastEventIdSubscription sets up a subscription that captures the received lastEventId
+// via a channel (race-free) and returns it to the caller.
+func lastEventIdSubscription(r *trpcgo.Router) <-chan string {
+	type subInput struct {
+		Channel     string `json:"channel"`
+		LastEventId string `json:"lastEventId"`
+	}
+
+	gotID := make(chan string, 1)
+	trpcgo.Subscribe(r, "events", func(ctx context.Context, input subInput) (<-chan string, error) {
+		gotID <- input.LastEventId
+		ch := make(chan string)
+		go func() {
+			defer close(ch)
+			ch <- "ok"
+		}()
+		return ch, nil
+	})
+	return gotID
+}
+
+func TestLastEventId(t *testing.T) {
+	tests := []struct {
+		name    string
+		header  string            // Last-Event-Id header value (empty = don't set)
+		query   map[string]string // extra query params
+		input   string            // input query param (JSON, empty = none)
+		wantID  string
+	}{
+		{
+			name:   "from header",
+			header: "evt-42",
+			wantID: "evt-42",
+		},
+		{
+			name:   "from lastEventId query param",
+			query:  map[string]string{"lastEventId": "evt-99"},
+			wantID: "evt-99",
+		},
+		{
+			name:   "from Last-Event-Id query param",
+			query:  map[string]string{"Last-Event-Id": "evt-77"},
+			wantID: "evt-77",
+		},
+		{
+			name:   "header takes precedence over query",
+			header: "from-header",
+			query:  map[string]string{"lastEventId": "from-query"},
+			wantID: "from-header",
+		},
+		{
+			name:   "no lastEventId",
+			wantID: "",
+		},
+		{
+			name:   "merges with existing input",
+			header: "evt-7",
+			input:  `{"channel":"general"}`,
+			wantID: "evt-7",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := trpcgo.NewRouter()
+			gotID := lastEventIdSubscription(r)
+			server := newTestServer(t, r.Handler("/trpc"))
+
+			u := server.URL + "/trpc/events"
+			params := url.Values{}
+			if tt.input != "" {
+				params.Set("input", tt.input)
+			}
+			for k, v := range tt.query {
+				params.Set(k, v)
+			}
+			if q := params.Encode(); q != "" {
+				u += "?" + q
+			}
+
+			req, _ := http.NewRequest("GET", u, nil)
+			if tt.header != "" {
+				req.Header.Set("Last-Event-Id", tt.header)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+
+			// Read the captured ID (race-free via channel).
+			id := <-gotID
+
+			// Consume SSE to let handler finish cleanly.
+			parseSSEEvents(t, resp, 3)
+
+			if id != tt.wantID {
+				t.Errorf("lastEventId = %q, want %q", id, tt.wantID)
+			}
+		})
+	}
+}
+
+func TestLastEventIdNotMergedForQueries(t *testing.T) {
+	r := trpcgo.NewRouter()
+
+	var rawInput json.RawMessage
+	trpcgo.Query(r, "user.get", func(ctx context.Context, input GetUserInput) (User, error) {
+		return User{ID: input.ID, Name: "Alice"}, nil
+	})
+
+	// Register a raw handler to capture input.
+	r.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input json.RawMessage) (any, error) {
+			rawInput = append(json.RawMessage(nil), input...)
+			return next(ctx, input)
+		}
+	})
+
+	server := newTestServer(t, r.Handler("/trpc"))
+
+	inputJSON := url.QueryEscape(`{"id":"1"}`)
+	req, _ := http.NewRequest("GET", server.URL+"/trpc/user.get?input="+inputJSON, nil)
+	req.Header.Set("Last-Event-Id", "should-not-appear")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if strings.Contains(string(rawInput), "lastEventId") {
+		t.Errorf("lastEventId should not be merged for queries, got input: %s", rawInput)
+	}
+}
+
+// --- JSONL Streaming Batch Response Tests ---
+
+// parseJSONLResponse reads a JSONL streaming response and returns the head line
+// and all chunk lines. Each chunk is [chunkId, status, [[envelope]]].
+type jsonlChunk struct {
+	index    int
+	status   int
+	envelope map[string]any
+}
+
+func parseJSONLResponse(t *testing.T, resp *http.Response) (head map[string]any, chunks []jsonlChunk) {
+	t.Helper()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read JSONL body: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
+	if len(lines) < 1 {
+		t.Fatal("JSONL response has no lines")
+	}
+
+	// Parse head line.
+	if err := json.Unmarshal([]byte(lines[0]), &head); err != nil {
+		t.Fatalf("parse JSONL head: %v\nline: %s", err, lines[0])
+	}
+
+	// Parse chunk lines: [chunkId, status, [[envelope]]]
+	for _, line := range lines[1:] {
+		if line == "" {
+			continue
+		}
+		var parts []json.RawMessage
+		if err := json.Unmarshal([]byte(line), &parts); err != nil {
+			t.Fatalf("parse JSONL chunk: %v\nline: %s", err, line)
+		}
+		if len(parts) != 3 {
+			t.Fatalf("chunk has %d elements, want 3", len(parts))
+		}
+
+		var idx int
+		if err := json.Unmarshal(parts[0], &idx); err != nil {
+			t.Fatalf("parse chunk index: %v", err)
+		}
+		var status int
+		if err := json.Unmarshal(parts[1], &status); err != nil {
+			t.Fatalf("parse chunk status: %v", err)
+		}
+
+		// parts[2] is [[envelope]] — unwrap EncodedValue.
+		var encoded [][]map[string]any
+		if err := json.Unmarshal(parts[2], &encoded); err != nil {
+			t.Fatalf("parse chunk[%d] EncodedValue: %v\nraw: %s", idx, err, parts[2])
+		}
+		if len(encoded) != 1 || len(encoded[0]) != 1 {
+			t.Fatalf("chunk[%d] EncodedValue should be [[envelope]], got %s", idx, parts[2])
+		}
+		chunks = append(chunks, jsonlChunk{index: idx, status: status, envelope: encoded[0][0]})
+	}
+	return head, chunks
+}
+
+func TestJSONLBatchResponse(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string // POST body (empty for GET)
+		input  string // GET input query param
+	}{
+		{
+			name:   "GET batch",
+			method: "GET",
+			path:   "/trpc/user.getById,user.getById?batch=1",
+			input:  `{"0":{"id":"1"},"1":{"id":"2"}}`,
+		},
+		{
+			name:   "POST batch",
+			method: "POST",
+			path:   "/trpc/user.create,user.create?batch=1",
+			body:   `{"0":{"name":"Alice"},"1":{"name":"Bob"}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t, setupRouter().Handler("/trpc"))
+
+			reqURL := server.URL + tt.path
+			if tt.input != "" {
+				reqURL += "&input=" + url.QueryEscape(tt.input)
+			}
+			var body io.Reader
+			if tt.body != "" {
+				body = strings.NewReader(tt.body)
+			}
+			req, _ := http.NewRequest(tt.method, reqURL, body)
+			req.Header.Set("trpc-accept", "application/jsonl")
+			if tt.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != 200 {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+			if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", ct)
+			}
+			if vary := resp.Header.Get("Vary"); vary != "trpc-accept" {
+				t.Errorf("Vary = %q, want trpc-accept", vary)
+			}
+
+			head, chunks := parseJSONLResponse(t, resp)
+
+			// Head should have placeholders for 2 results.
+			if len(head) != 2 {
+				t.Fatalf("head has %d entries, want 2", len(head))
+			}
+
+			// Should have 2 chunk lines.
+			if len(chunks) != 2 {
+				t.Fatalf("got %d chunks, want 2", len(chunks))
+			}
+
+			// Both chunks should be FULFILLED (status 0) with result envelopes.
+			for _, ch := range chunks {
+				if ch.status != 0 {
+					t.Errorf("chunk[%d] status = %d, want 0 (FULFILLED)", ch.index, ch.status)
+				}
+				if _, ok := ch.envelope["result"]; !ok {
+					t.Errorf("chunk[%d] missing result key", ch.index)
+				}
+			}
+		})
+	}
+}
+
+func TestJSONLBatchHeadFormat(t *testing.T) {
+	server := newTestServer(t, setupRouter().Handler("/trpc"))
+
+	input := url.QueryEscape(`{"0":{"id":"1"},"1":{"id":"2"}}`)
+	req, _ := http.NewRequest("GET", server.URL+"/trpc/user.getById,user.getById?batch=1&input="+input, nil)
+	req.Header.Set("trpc-accept", "application/jsonl")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	head, _ := parseJSONLResponse(t, resp)
+
+	// Verify each head entry is [[placeholder], [null, 0, chunkId]].
+	for i := range 2 {
+		key := fmt.Sprintf("%d", i)
+		entry, ok := head[key]
+		if !ok {
+			t.Fatalf("head missing key %q", key)
+		}
+		arr, ok := entry.([]any)
+		if !ok || len(arr) != 2 {
+			t.Fatalf("head[%q] should be [data, chunkDef], got %v", key, entry)
+		}
+		// First element: [0] (placeholder)
+		dataSlot, ok := arr[0].([]any)
+		if !ok || len(dataSlot) != 1 || dataSlot[0] != float64(0) {
+			t.Errorf("head[%q] data slot should be [0], got %v", key, arr[0])
+		}
+		// Second element: [null, 0, chunkId]
+		chunkDef, ok := arr[1].([]any)
+		if !ok || len(chunkDef) != 3 {
+			t.Fatalf("head[%q] chunkDef should be [null,0,N], got %v", key, arr[1])
+		}
+		if chunkDef[0] != nil {
+			t.Errorf("head[%q] chunkDef[0] should be null, got %v", key, chunkDef[0])
+		}
+		if chunkDef[1] != float64(0) {
+			t.Errorf("head[%q] chunkDef[1] (type) should be 0, got %v", key, chunkDef[1])
+		}
+		if chunkDef[2] != float64(i) {
+			t.Errorf("head[%q] chunkDef[2] (chunkId) should be %d, got %v", key, i, chunkDef[2])
+		}
+	}
+}
+
+func TestJSONLBatchVaryHeader(t *testing.T) {
+	server := newTestServer(t, setupRouter().Handler("/trpc"))
+
+	// Standard batch (no JSONL) should also have Vary header.
+	input := url.QueryEscape(`{"0":{"id":"1"}}`)
+	resp := mustGet(t, server, "/trpc/user.getById?batch=1&input="+input)
+	defer resp.Body.Close()
+
+	if vary := resp.Header.Get("Vary"); vary != "trpc-accept" {
+		t.Errorf("Vary = %q, want trpc-accept", vary)
+	}
+}
+
+func TestJSONLBatchWithErrors(t *testing.T) {
+	server := newTestServer(t, setupRouter().Handler("/trpc"))
+
+	// One success, one error.
+	input := url.QueryEscape(`{"0":{"id":"1"},"1":{"id":"404"}}`)
+	req, _ := http.NewRequest("GET", server.URL+"/trpc/user.getById,user.getById?batch=1&input="+input, nil)
+	req.Header.Set("trpc-accept", "application/jsonl")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("JSONL status = %d, want 200 (always 200 for JSONL)", resp.StatusCode)
+	}
+
+	_, chunks := parseJSONLResponse(t, resp)
+
+	// All chunks should be FULFILLED (status 0) — errors are in the envelope, not rejections.
+	byIndex := map[int]map[string]any{}
+	for _, ch := range chunks {
+		if ch.status != 0 {
+			t.Errorf("chunk[%d] status = %d, want 0 (FULFILLED)", ch.index, ch.status)
+		}
+		byIndex[ch.index] = ch.envelope
+	}
+
+	// Entry 0 should be a success.
+	data := resultData(t, byIndex[0])
+	if data["name"] != "Alice" {
+		t.Errorf("chunk[0] name = %v, want Alice", data["name"])
+	}
+
+	// Entry 1 should be an error.
+	errData := errorData(t, byIndex[1])
+	if errData["code"] != "NOT_FOUND" {
+		t.Errorf("chunk[1] error code = %v, want NOT_FOUND", errData["code"])
+	}
+}
+
+func TestJSONLBatchConcurrency(t *testing.T) {
+	r := trpcgo.NewRouter(trpcgo.WithBatching(true), trpcgo.WithMethodOverride(true))
+
+	trpcgo.Query(r, "fast", func(ctx context.Context, input GetUserInput) (User, error) {
+		return User{ID: "fast", Name: "Fast"}, nil
+	})
+	trpcgo.Query(r, "slow", func(ctx context.Context, input GetUserInput) (User, error) {
+		time.Sleep(50 * time.Millisecond)
+		return User{ID: "slow", Name: "Slow"}, nil
+	})
+
+	server := newTestServer(t, r.Handler("/trpc"))
+
+	// Batch: slow first, fast second. With concurrent execution,
+	// the fast result should arrive as a chunk before the slow one.
+	req, _ := http.NewRequest("POST", server.URL+"/trpc/slow,fast?batch=1",
+		strings.NewReader(`{"0":{"id":"1"},"1":{"id":"2"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("trpc-accept", "application/jsonl")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	_, chunks := parseJSONLResponse(t, resp)
+	if len(chunks) != 2 {
+		t.Fatalf("got %d chunks, want 2", len(chunks))
+	}
+
+	// First chunk should be the fast handler (index 1), not the slow one (index 0).
+	if chunks[0].index != 1 {
+		t.Errorf("first chunk index = %d, want 1 (fast handler should complete first)", chunks[0].index)
+	}
+	if chunks[1].index != 0 {
+		t.Errorf("second chunk index = %d, want 0 (slow handler)", chunks[1].index)
+	}
+
+	// Both should have correct data.
+	for _, ch := range chunks {
+		data := resultData(t, ch.envelope)
+		if ch.index == 0 && data["name"] != "Slow" {
+			t.Errorf("chunk[0] name = %v, want Slow", data["name"])
+		}
+		if ch.index == 1 && data["name"] != "Fast" {
+			t.Errorf("chunk[1] name = %v, want Fast", data["name"])
+		}
+	}
+}

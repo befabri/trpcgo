@@ -1,5 +1,7 @@
 package trpcgo
 
+import "runtime"
+
 // resultEnvelope is the success response envelope: {"result":{"data":...}}
 type resultEnvelope struct {
 	Result resultData `json:"result"`
@@ -31,17 +33,23 @@ func newResultEnvelope(data any) resultEnvelope {
 	return resultEnvelope{Result: resultData{Data: data}}
 }
 
-func newErrorEnvelope(err *Error, path string) errorEnvelope {
+func newErrorEnvelope(err *Error, path string, isDev bool) errorEnvelope {
 	httpStatus := HTTPStatusFromCode(err.Code)
+	data := errorShapeData{
+		Code:       NameFromCode(err.Code),
+		HTTPStatus: httpStatus,
+		Path:       path,
+	}
+	if isDev {
+		buf := make([]byte, 4096)
+		n := runtime.Stack(buf, false)
+		data.Stack = string(buf[:n])
+	}
 	return errorEnvelope{
 		Error: errorShape{
 			Code:    err.Code,
 			Message: err.Message,
-			Data: errorShapeData{
-				Code:       NameFromCode(err.Code),
-				HTTPStatus: httpStatus,
-				Path:       path,
-			},
+			Data:    data,
 		},
 	}
 }
