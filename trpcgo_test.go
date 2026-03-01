@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3329,5 +3331,300 @@ func TestRawCallConcurrent(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Error(err)
+	}
+}
+
+// --- Validator Tests ---
+
+// testValidator is a simple struct validator for tests that checks "required",
+// "min", and "max" rules from `validate` struct tags on string fields.
+// This avoids importing go-playground/validator.
+func testValidator(v any) error {
+	val := reflect.ValueOf(v)
+	typ := val.Type()
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		tag := field.Tag.Get("validate")
+		if tag == "" {
+			continue
+		}
+		rules := strings.Split(tag, ",")
+		fieldVal := val.Field(i)
+		for _, rule := range rules {
+			parts := strings.SplitN(rule, "=", 2)
+			switch parts[0] {
+			case "required":
+				if fieldVal.IsZero() {
+					return fmt.Errorf("field %s is required", field.Name)
+				}
+			case "min":
+				if len(parts) > 1 {
+					n, _ := strconv.Atoi(parts[1])
+					if fieldVal.Kind() == reflect.String && len(fieldVal.String()) < n {
+						return fmt.Errorf("field %s must be at least %d characters", field.Name, n)
+					}
+				}
+			case "max":
+				if len(parts) > 1 {
+					n, _ := strconv.Atoi(parts[1])
+					if fieldVal.Kind() == reflect.String && len(fieldVal.String()) > n {
+						return fmt.Errorf("field %s must be at most %d characters", field.Name, n)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+type ValidatedInput struct {
+	Name string `json:"name" validate:"required"`
+}
+
+type ValidatedOutput struct {
+	Greeting string `json:"greeting"`
+}
+
+type MinMaxInput struct {
+	Username string `json:"username" validate:"min=3,max=10"`
+}
+
+func TestValidatorRejectsInvalidInput(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithValidator(testValidator))
+
+	trpcgo.Query(router, "greet", func(ctx context.Context, input ValidatedInput) (ValidatedOutput, error) {
+		return ValidatedOutput{Greeting: "Hello, " + input.Name + "!"}, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// Send request with empty name (missing required field).
+	input := url.QueryEscape(`{"name":""}`)
+	resp := mustGet(t, server, "/trpc/greet?input="+input)
+	if resp.StatusCode != 400 {
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+
+	body := decodeJSON(t, resp)
+	ed := errorData(t, body)
+	if ed["code"] != "BAD_REQUEST" {
+		t.Errorf("error.data.code = %v, want BAD_REQUEST", ed["code"])
+	}
+
+	// Also verify the error message mentions validation.
+	errObj := body["error"].(map[string]any)
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "validation") {
+		t.Errorf("error message = %q, want it to contain 'validation'", msg)
+	}
+}
+
+func TestValidatorAcceptsValidInput(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithValidator(testValidator))
+
+	trpcgo.Query(router, "greet", func(ctx context.Context, input ValidatedInput) (ValidatedOutput, error) {
+		return ValidatedOutput{Greeting: "Hello, " + input.Name + "!"}, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// Send request with valid name.
+	input := url.QueryEscape(`{"name":"Alice"}`)
+	resp := mustGet(t, server, "/trpc/greet?input="+input)
+	if resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	data := resultData(t, decodeJSON(t, resp))
+	if data["greeting"] != "Hello, Alice!" {
+		t.Errorf("greeting = %v, want 'Hello, Alice!'", data["greeting"])
+	}
+}
+
+func TestValidatorMinMax(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithValidator(testValidator))
+
+	trpcgo.Query(router, "checkUsername", func(ctx context.Context, input MinMaxInput) (string, error) {
+		return "ok:" + input.Username, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// Below min (less than 3 chars) → 400.
+	t.Run("below min", func(t *testing.T) {
+		input := url.QueryEscape(`{"username":"ab"}`)
+		resp := mustGet(t, server, "/trpc/checkUsername?input="+input)
+		if resp.StatusCode != 400 {
+			resp.Body.Close()
+			t.Fatalf("status = %d, want 400 for username below min length", resp.StatusCode)
+		}
+
+		body := decodeJSON(t, resp)
+		ed := errorData(t, body)
+		if ed["code"] != "BAD_REQUEST" {
+			t.Errorf("error.data.code = %v, want BAD_REQUEST", ed["code"])
+		}
+	})
+
+	// Within range (3-10 chars) → 200.
+	t.Run("within range", func(t *testing.T) {
+		input := url.QueryEscape(`{"username":"alice"}`)
+		resp := mustGet(t, server, "/trpc/checkUsername?input="+input)
+		if resp.StatusCode != 200 {
+			resp.Body.Close()
+			t.Fatalf("status = %d, want 200 for valid username", resp.StatusCode)
+		}
+
+		body := decodeJSON(t, resp)
+		got := resultScalar(t, body)
+		if got != "ok:alice" {
+			t.Errorf("result = %v, want ok:alice", got)
+		}
+	})
+
+	// Above max (more than 10 chars) → 400.
+	t.Run("above max", func(t *testing.T) {
+		input := url.QueryEscape(`{"username":"verylongusername"}`)
+		resp := mustGet(t, server, "/trpc/checkUsername?input="+input)
+		if resp.StatusCode != 400 {
+			resp.Body.Close()
+			t.Fatalf("status = %d, want 400 for username above max length", resp.StatusCode)
+		}
+
+		body := decodeJSON(t, resp)
+		ed := errorData(t, body)
+		if ed["code"] != "BAD_REQUEST" {
+			t.Errorf("error.data.code = %v, want BAD_REQUEST", ed["code"])
+		}
+	})
+}
+
+func TestValidatorWithErrorFormatter(t *testing.T) {
+	var capturedCause string
+
+	router := trpcgo.NewRouter(
+		trpcgo.WithValidator(testValidator),
+		trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+			// The error formatter receives the *Error which wraps the validation error.
+			// Verify we can access the underlying validation error via Unwrap.
+			if cause := input.Error.Unwrap(); cause != nil {
+				capturedCause = cause.Error()
+			}
+			return input.Shape
+		}),
+	)
+
+	trpcgo.Query(router, "greet", func(ctx context.Context, input ValidatedInput) (ValidatedOutput, error) {
+		return ValidatedOutput{Greeting: "Hello, " + input.Name + "!"}, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// Send invalid input to trigger validation error.
+	input := url.QueryEscape(`{"name":""}`)
+	resp := mustGet(t, server, "/trpc/greet?input="+input)
+	if resp.StatusCode != 400 {
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// The cause should be the validation error from testValidator.
+	if !strings.Contains(capturedCause, "field Name is required") {
+		t.Errorf("captured cause = %q, want it to contain 'field Name is required'", capturedCause)
+	}
+}
+
+func TestValidatorSkipsNonStruct(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithValidator(testValidator))
+
+	// Register a query with primitive string input — validator should be skipped.
+	trpcgo.Query(router, "echo", func(ctx context.Context, input string) (string, error) {
+		return "echo:" + input, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	input := url.QueryEscape(`"hello"`)
+	resp := mustGet(t, server, "/trpc/echo?input="+input)
+	if resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 200 (validator should skip primitive input)", resp.StatusCode)
+	}
+
+	body := decodeJSON(t, resp)
+	got := resultScalar(t, body)
+	if got != "echo:hello" {
+		t.Errorf("result = %v, want echo:hello", got)
+	}
+}
+
+func TestValidatorWithRawCall(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithValidator(testValidator))
+
+	trpcgo.Query(router, "greet", func(ctx context.Context, input ValidatedInput) (ValidatedOutput, error) {
+		return ValidatedOutput{Greeting: "Hello, " + input.Name + "!"}, nil
+	})
+
+	// Call Handler() to pre-compute middleware chains with validation.
+	_ = router.Handler("/trpc")
+
+	// Valid input via Call should succeed.
+	t.Run("valid input", func(t *testing.T) {
+		result, err := trpcgo.Call[ValidatedInput, ValidatedOutput](
+			router, context.Background(), "greet", ValidatedInput{Name: "Bob"},
+		)
+		if err != nil {
+			t.Fatalf("Call error: %v", err)
+		}
+		if result.Greeting != "Hello, Bob!" {
+			t.Errorf("greeting = %v, want 'Hello, Bob!'", result.Greeting)
+		}
+	})
+
+	// Invalid input via Call should return validation error.
+	t.Run("invalid input", func(t *testing.T) {
+		_, err := trpcgo.Call[ValidatedInput, ValidatedOutput](
+			router, context.Background(), "greet", ValidatedInput{Name: ""},
+		)
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+		trpcErr, ok := err.(*trpcgo.Error)
+		if !ok {
+			t.Fatalf("error type = %T, want *trpcgo.Error", err)
+		}
+		if trpcErr.Code != trpcgo.CodeBadRequest {
+			t.Errorf("error code = %v, want BAD_REQUEST", trpcErr.Code)
+		}
+		if !strings.Contains(trpcErr.Message, "validation") {
+			t.Errorf("error message = %q, want it to contain 'validation'", trpcErr.Message)
+		}
+	})
+}
+
+func TestValidatorNotSet(t *testing.T) {
+	// No validator configured — struct with validate tags should work normally.
+	router := trpcgo.NewRouter()
+
+	trpcgo.Query(router, "greet", func(ctx context.Context, input ValidatedInput) (ValidatedOutput, error) {
+		return ValidatedOutput{Greeting: "Hello, " + input.Name + "!"}, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// Send empty name — without a validator, the handler should run and produce a response.
+	input := url.QueryEscape(`{"name":""}`)
+	resp := mustGet(t, server, "/trpc/greet?input="+input)
+	if resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 200 (no validator configured, handler should run)", resp.StatusCode)
+	}
+
+	data := resultData(t, decodeJSON(t, resp))
+	if data["greeting"] != "Hello, !" {
+		t.Errorf("greeting = %v, want 'Hello, !'", data["greeting"])
 	}
 }

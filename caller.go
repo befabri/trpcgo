@@ -26,7 +26,11 @@ func (r *Router) RawCall(ctx context.Context, path string, input json.RawMessage
 	// Use pre-computed chain if Handler() was called, otherwise build on the fly.
 	handler := proc.wrappedHandler
 	if handler == nil {
-		handler = applyMiddleware(proc.handler, r.middleware, proc.middleware)
+		h := proc.handler
+		if r.opts.validator != nil && proc.inputType != nil {
+			h = withValidation(h, r.opts.validator, proc.inputType)
+		}
+		handler = applyMiddleware(h, r.middleware, proc.middleware)
 	}
 
 	// Inject procedure metadata into context.

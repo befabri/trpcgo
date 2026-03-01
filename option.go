@@ -16,6 +16,7 @@ type routerOptions struct {
 	onError                        func(ctx context.Context, err *Error, path string)
 	createContext                  func(r *http.Request) context.Context
 	errorFormatter                 func(ErrorFormatterInput) any
+	validator                      func(any) error
 	ssePingInterval                time.Duration
 	sseMaxDuration                 time.Duration
 	sseReconnectAfterInactivityMs  int
@@ -111,6 +112,19 @@ func WithMaxBodySize(n int64) Option {
 func WithErrorFormatter(fn func(ErrorFormatterInput) any) Option {
 	return func(o *routerOptions) {
 		o.errorFormatter = fn
+	}
+}
+
+// WithValidator sets a function that validates procedure inputs.
+// The function is called with the deserialized input struct after JSON
+// unmarshaling. Only struct-typed inputs are validated; primitives are skipped.
+//
+// This matches go-playground/validator directly — pass validate.V.Struct:
+//
+//	router := trpcgo.NewRouter(trpcgo.WithValidator(validate.V.Struct))
+func WithValidator(fn func(any) error) Option {
+	return func(o *routerOptions) {
+		o.validator = fn
 	}
 }
 

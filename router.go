@@ -114,7 +114,11 @@ func (r *Router) Handler(basePath string) http.Handler {
 	// Pre-compute middleware chains for each procedure.
 	r.mu.Lock()
 	for _, proc := range r.procedures {
-		proc.wrappedHandler = applyMiddleware(proc.handler, r.middleware, proc.middleware)
+		handler := proc.handler
+		if r.opts.validator != nil && proc.inputType != nil {
+			handler = withValidation(handler, r.opts.validator, proc.inputType)
+		}
+		proc.wrappedHandler = applyMiddleware(handler, r.middleware, proc.middleware)
 	}
 	r.mu.Unlock()
 
