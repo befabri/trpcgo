@@ -6,6 +6,8 @@
 
 # Go
 /trpcgo
+examples/tanstack-query/go-server/example-query
+examples/tanstack-start/go-server/example
 
 # Node
 node_modules/
@@ -25,5 +27,3 @@ routeTree.gen.ts
 # OS
 .DS_Store
 Thumbs.db
-trpc/
-zod/
