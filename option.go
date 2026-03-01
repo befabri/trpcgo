@@ -21,6 +21,8 @@ type routerOptions struct {
 	sseMaxDuration                 time.Duration
 	sseReconnectAfterInactivityMs  int
 	typeOutput                     string
+	zodOutput                      string
+	zodMini                        bool
 }
 
 // ErrorFormatterInput is passed to a custom error formatter.
@@ -135,5 +137,22 @@ func WithValidator(fn func(any) error) Option {
 func WithTypeOutput(path string) Option {
 	return func(o *routerOptions) {
 		o.typeOutput = path
+	}
+}
+
+// WithZodOutput enables automatic Zod schema generation alongside
+// TypeScript types. Requires WithTypeOutput to be set. The file watcher
+// regenerates both files when Go source changes are detected.
+func WithZodOutput(path string) Option {
+	return func(o *routerOptions) {
+		o.zodOutput = path
+	}
+}
+
+// WithZodMini switches Zod schema output to zod/mini functional syntax.
+// Only has effect when WithZodOutput is also set.
+func WithZodMini(enabled bool) Option {
+	return func(o *routerOptions) {
+		o.zodMini = enabled
 	}
 }

@@ -106,6 +106,9 @@ func (r *Router) lookup(path string) (*procedure, bool) {
 // If WithTypeOutput was configured, the TypeScript type file is written
 // and a file watcher is started to regenerate types when Go source changes.
 func (r *Router) Handler(basePath string) http.Handler {
+	if r.opts.zodOutput != "" && r.opts.typeOutput == "" {
+		log.Printf("trpcgo: WithZodOutput is set but WithTypeOutput is not — Zod schemas will not be generated")
+	}
 	if r.opts.typeOutput != "" {
 		if err := r.GenerateTS(r.opts.typeOutput); err != nil {
 			log.Printf("trpcgo: failed to generate TypeScript types: %v", err)

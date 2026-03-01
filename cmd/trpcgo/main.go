@@ -11,6 +11,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/trpcgo/trpcgo/internal/analysis"
 	"github.com/trpcgo/trpcgo/internal/codegen"
+	"github.com/trpcgo/trpcgo/internal/fsutil"
 	"github.com/trpcgo/trpcgo/internal/typemap"
 )
 
@@ -75,12 +76,12 @@ func main() {
 	}
 	defer watcher.Close()
 
-	if err := watcher.Add(absDir); err != nil {
+	if err := fsutil.WatchRecursive(watcher, absDir); err != nil {
 		fmt.Fprintf(os.Stderr, "Error watching %s: %v\n", absDir, err)
 		os.Exit(1)
 	}
 
-	log.Printf("Watching %s for changes...", absDir)
+	log.Printf("Watching %s for changes (recursive)...", absDir)
 
 	// Debounce: regenerate at most once per 200ms.
 	var debounce <-chan time.Time
@@ -90,13 +91,16 @@ func main() {
 			if !ok {
 				return
 			}
+			// Handle directory creation/removal for recursive watching.
+			fsutil.HandleDirEvent(watcher, event)
+
 			if filepath.Ext(event.Name) != ".go" {
 				continue
 			}
 			if event.Op&(fsnotify.Write|fsnotify.Create) == 0 {
 				continue
 			}
-			debounce = time.After(200 * time.Millisecond)
+			debounce = time.After(fsutil.DebounceInterval)
 
 		case <-debounce:
 			debounce = nil

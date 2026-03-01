@@ -10,15 +10,25 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/trpcgo/trpcgo/internal/analysis"
 	"github.com/trpcgo/trpcgo/internal/codegen"
+	"github.com/trpcgo/trpcgo/internal/fsutil"
+	"github.com/trpcgo/trpcgo/internal/typemap"
 )
 
-// startWatcher watches .go files in the current working directory and
-// regenerates TypeScript types when changes are detected. It uses static
-// analysis (go/packages) to read source files directly, so changes are
-// picked up without a server restart.
+// watchOpts holds resolved paths for the watcher goroutine.
+type watchOpts struct {
+	dir       string
+	output    string
+	zodOutput string
+	zodStyle  typemap.ZodStyle
+}
+
+// startWatcher watches .go files in the current working directory (recursively)
+// and regenerates TypeScript types and Zod schemas when changes are detected.
+// It uses static analysis (go/packages) to read source files directly, so
+// changes are picked up without a server restart.
 //
 // If the Go code is broken (syntax errors, type errors), the previous
-// TypeScript file is preserved.
+// generated files are preserved.
 func (r *Router) startWatcher() {
 	output := r.opts.typeOutput
 	if output == "" {
@@ -31,14 +41,8 @@ func (r *Router) startWatcher() {
 		return
 	}
 
-	if !filepath.IsAbs(output) {
-		abs, err := filepath.Abs(output)
-		if err != nil {
-			log.Printf("trpcgo: watcher: failed to resolve output path: %v", err)
-			return
-		}
-		output = abs
-	}
+	output = absPath(output)
+	zodOutput := absPath(r.opts.zodOutput)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -46,19 +50,31 @@ func (r *Router) startWatcher() {
 		return
 	}
 
-	if err := watcher.Add(cwd); err != nil {
+	if err := fsutil.WatchRecursive(watcher, cwd); err != nil {
 		log.Printf("trpcgo: watcher: failed to watch %s: %v", cwd, err)
 		watcher.Close()
 		return
 	}
 
-	log.Printf("trpcgo: watching %s for Go file changes", cwd)
+	log.Printf("trpcgo: watching %s for Go file changes (recursive)", cwd)
+
+	zodStyle := typemap.ZodStandard
+	if r.opts.zodMini {
+		zodStyle = typemap.ZodMini
+	}
+
+	opts := watchOpts{
+		dir:       cwd,
+		output:    output,
+		zodOutput: zodOutput,
+		zodStyle:  zodStyle,
+	}
 
 	go func() {
 		defer watcher.Close()
 
 		// Run static analysis immediately to enrich reflect-generated types.
-		regenerateFromSource(cwd, output)
+		regenerateFromSource(opts)
 
 		var debounce <-chan time.Time
 		for {
@@ -67,17 +83,20 @@ func (r *Router) startWatcher() {
 				if !ok {
 					return
 				}
+				// Handle directory creation/removal for recursive watching.
+				fsutil.HandleDirEvent(watcher, event)
+
 				if filepath.Ext(event.Name) != ".go" {
 					continue
 				}
 				if event.Op&(fsnotify.Write|fsnotify.Create) == 0 {
 					continue
 				}
-				debounce = time.After(300 * time.Millisecond)
+				debounce = time.After(fsutil.DebounceInterval)
 
 			case <-debounce:
 				debounce = nil
-				regenerateFromSource(cwd, output)
+				regenerateFromSource(opts)
 
 			case _, ok := <-watcher.Errors:
 				if !ok {
@@ -88,11 +107,26 @@ func (r *Router) startWatcher() {
 	}()
 }
 
+// absPath resolves a path to absolute. Returns "" for empty input.
+func absPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if filepath.IsAbs(p) {
+		return p
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return abs
+}
+
 // regenerateFromSource uses static analysis to read Go source files and
-// regenerate TypeScript types. If the source has errors, the previous
-// TypeScript file is preserved.
-func regenerateFromSource(dir, output string) {
-	result, err := analysis.Analyze([]string{"."}, dir)
+// regenerate TypeScript types (and optionally Zod schemas). If the source
+// has errors, the previous files are preserved.
+func regenerateFromSource(opts watchOpts) {
+	result, err := analysis.Analyze([]string{"."}, opts.dir)
 	if err != nil {
 		// Source is broken — keep previous types.
 		log.Printf("trpcgo: source has errors, keeping previous types")
@@ -104,28 +138,42 @@ func regenerateFromSource(dir, output string) {
 	}
 
 	var buf bytes.Buffer
-	if _, err := codegen.Generate(&buf, result, result.TypeMetas); err != nil {
+	genResult, err := codegen.Generate(&buf, result, result.TypeMetas)
+	if err != nil {
 		log.Printf("trpcgo: codegen failed: %v", err)
 		return
 	}
 
-	generated := buf.Bytes()
+	writeIfChanged(opts.output, buf.Bytes(), "types")
 
-	// Avoid unnecessary writes (which would trigger Vite HMR for nothing).
-	existing, _ := os.ReadFile(output)
-	if bytes.Equal(existing, generated) {
+	// Generate Zod schemas if configured.
+	if opts.zodOutput != "" && genResult != nil {
+		var zodBuf bytes.Buffer
+		if err := codegen.WriteZodSchemas(&zodBuf, genResult.Procs, genResult.Defs, opts.zodStyle); err != nil {
+			log.Printf("trpcgo: zod codegen failed: %v", err)
+			return
+		}
+		writeIfChanged(opts.zodOutput, zodBuf.Bytes(), "zod schemas")
+	}
+}
+
+// writeIfChanged writes data to path only if it differs from the existing
+// file contents. This avoids unnecessary writes that would trigger Vite HMR.
+func writeIfChanged(path string, data []byte, label string) {
+	existing, _ := os.ReadFile(path)
+	if bytes.Equal(existing, data) {
 		return
 	}
 
-	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		log.Printf("trpcgo: failed to create output directory: %v", err)
 		return
 	}
 
-	if err := os.WriteFile(output, generated, 0o644); err != nil {
-		log.Printf("trpcgo: failed to write types: %v", err)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		log.Printf("trpcgo: failed to write %s: %v", label, err)
 		return
 	}
 
-	log.Printf("trpcgo: types regenerated → %s", output)
+	log.Printf("trpcgo: %s regenerated → %s", label, path)
 }
