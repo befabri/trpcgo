@@ -1,6 +1,8 @@
 package trpcgo
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -114,13 +116,46 @@ func (r *Router) Handler(basePath string) http.Handler {
 	// Pre-compute middleware chains for each procedure.
 	r.mu.Lock()
 	for _, proc := range r.procedures {
-		handler := proc.handler
-		if r.opts.validator != nil && proc.inputType != nil {
-			handler = withValidation(handler, r.opts.validator, proc.inputType)
-		}
-		proc.wrappedHandler = applyMiddleware(handler, r.middleware, proc.middleware)
+		proc.wrappedHandler = applyMiddleware(proc.handler, r.middleware, proc.middleware)
 	}
 	r.mu.Unlock()
 
 	return &httpHandler{router: r, basePath: basePath}
+}
+
+// executeProcedure decodes the raw JSON input, validates it, and calls the handler.
+// This is the single execution path shared by Handler() and RawCall.
+func (r *Router) executeProcedure(ctx context.Context, proc *procedure, raw json.RawMessage) (any, error) {
+	// Decode the raw input into the registered type.
+	var input any
+	if proc.inputType != nil {
+		ptr := reflect.New(proc.inputType)
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, ptr.Interface()); err != nil {
+				return nil, NewError(CodeParseError, "failed to parse input")
+			}
+		}
+		input = ptr.Elem().Interface()
+	}
+
+	// Validate the decoded struct.
+	if r.opts.validator != nil && proc.inputType != nil && input != nil {
+		t := proc.inputType
+		for t.Kind() == reflect.Ptr {
+			t = t.Elem()
+		}
+		if t.Kind() == reflect.Struct {
+			if err := r.opts.validator(input); err != nil {
+				return nil, WrapError(CodeBadRequest, "input validation failed", err)
+			}
+		}
+	}
+
+	// Use pre-computed chain if available, otherwise build on the fly.
+	handler := proc.wrappedHandler
+	if handler == nil {
+		handler = applyMiddleware(proc.handler, r.middleware, proc.middleware)
+	}
+
+	return handler(ctx, input)
 }

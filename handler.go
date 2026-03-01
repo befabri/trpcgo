@@ -153,8 +153,8 @@ func (h *httpHandler) executeCall(ctx context.Context, r *http.Request, call par
 		return formatError(&h.router.opts, err, call.path, ctx, proc.typ), HTTPStatusFromCode(err.Code)
 	}
 
-	// Execute with pre-computed middleware chain.
-	result, err := proc.wrappedHandler(ctx, call.input)
+	// Decode, validate, and execute through middleware chain.
+	result, err := h.router.executeProcedure(ctx, proc, call.input)
 	if err != nil {
 		trpcErr, ok := errors.AsType[*Error](err)
 		if h.router.opts.onError != nil {

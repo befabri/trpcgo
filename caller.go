@@ -23,16 +23,6 @@ func (r *Router) RawCall(ctx context.Context, path string, input json.RawMessage
 		return nil, NewError(CodeBadRequest, "subscriptions are not supported via RawCall")
 	}
 
-	// Use pre-computed chain if Handler() was called, otherwise build on the fly.
-	handler := proc.wrappedHandler
-	if handler == nil {
-		h := proc.handler
-		if r.opts.validator != nil && proc.inputType != nil {
-			h = withValidation(h, r.opts.validator, proc.inputType)
-		}
-		handler = applyMiddleware(h, r.middleware, proc.middleware)
-	}
-
 	// Inject procedure metadata into context.
 	ctx = withProcedureMeta(ctx, ProcedureMeta{
 		Path: path,
@@ -40,7 +30,7 @@ func (r *Router) RawCall(ctx context.Context, path string, input json.RawMessage
 		Meta: proc.meta,
 	})
 
-	return handler(ctx, input)
+	return r.executeProcedure(ctx, proc, input)
 }
 
 // Call invokes a typed procedure by path, running the full middleware chain.

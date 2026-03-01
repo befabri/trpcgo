@@ -611,13 +611,13 @@ func TestMiddlewareOrdering(t *testing.T) {
 
 	router := trpcgo.NewRouter()
 	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
+		return func(ctx context.Context, input any) (any, error) {
 			calls = append(calls, "global-1")
 			return next(ctx, input)
 		}
 	})
 	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
+		return func(ctx context.Context, input any) (any, error) {
 			calls = append(calls, "global-2")
 			return next(ctx, input)
 		}
@@ -627,7 +627,7 @@ func TestMiddlewareOrdering(t *testing.T) {
 		calls = append(calls, "handler")
 		return "ok", nil
 	}, trpcgo.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
+		return func(ctx context.Context, input any) (any, error) {
 			calls = append(calls, "per-proc")
 			return next(ctx, input)
 		}
@@ -657,7 +657,7 @@ func TestMiddlewareShortCircuit(t *testing.T) {
 
 	router := trpcgo.NewRouter()
 	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
+		return func(ctx context.Context, input any) (any, error) {
 			return nil, trpcgo.NewError(trpcgo.CodeUnauthorized, "denied by middleware")
 		}
 	})
@@ -688,7 +688,7 @@ func TestMiddlewareContextPropagation(t *testing.T) {
 
 	router := trpcgo.NewRouter()
 	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
+		return func(ctx context.Context, input any) (any, error) {
 			return next(context.WithValue(ctx, ctxKey("user"), "admin"), input)
 		}
 	})
@@ -1522,7 +1522,7 @@ func TestChain(t *testing.T) {
 
 	makeMW := func(name string) trpcgo.Middleware {
 		return func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-			return func(ctx context.Context, input json.RawMessage) (any, error) {
+			return func(ctx context.Context, input any) (any, error) {
 				// Append to execution trace in context.
 				prev, _ := ctx.Value(ctxKey("trace")).([]string)
 				ctx = context.WithValue(ctx, ctxKey("trace"), append(prev, name))
@@ -1534,7 +1534,7 @@ func TestChain(t *testing.T) {
 	t.Run("left to right ordering", func(t *testing.T) {
 		combined := trpcgo.Chain(makeMW("a"), makeMW("b"), makeMW("c"))
 
-		handler := combined(func(ctx context.Context, input json.RawMessage) (any, error) {
+		handler := combined(func(ctx context.Context, input any) (any, error) {
 			trace, _ := ctx.Value(ctxKey("trace")).([]string)
 			return trace, nil
 		})
@@ -1558,7 +1558,7 @@ func TestChain(t *testing.T) {
 	t.Run("single middleware", func(t *testing.T) {
 		combined := trpcgo.Chain(makeMW("only"))
 
-		handler := combined(func(ctx context.Context, input json.RawMessage) (any, error) {
+		handler := combined(func(ctx context.Context, input any) (any, error) {
 			trace, _ := ctx.Value(ctxKey("trace")).([]string)
 			return trace, nil
 		})
@@ -1576,7 +1576,7 @@ func TestChain(t *testing.T) {
 	t.Run("empty chain is passthrough", func(t *testing.T) {
 		combined := trpcgo.Chain()
 
-		handler := combined(func(ctx context.Context, input json.RawMessage) (any, error) {
+		handler := combined(func(ctx context.Context, input any) (any, error) {
 			return "reached", nil
 		})
 
@@ -1591,14 +1591,14 @@ func TestChain(t *testing.T) {
 
 	t.Run("short circuit stops chain", func(t *testing.T) {
 		blocker := func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-			return func(ctx context.Context, input json.RawMessage) (any, error) {
+			return func(ctx context.Context, input any) (any, error) {
 				return nil, trpcgo.NewError(trpcgo.CodeUnauthorized, "blocked")
 			}
 		}
 		afterBlocker := makeMW("should-not-run")
 
 		combined := trpcgo.Chain(blocker, afterBlocker)
-		handler := combined(func(ctx context.Context, input json.RawMessage) (any, error) {
+		handler := combined(func(ctx context.Context, input any) (any, error) {
 			t.Error("handler should not be reached after short circuit")
 			return nil, nil
 		})
@@ -1611,19 +1611,19 @@ func TestChain(t *testing.T) {
 
 	t.Run("context propagates through chain", func(t *testing.T) {
 		setUser := func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-			return func(ctx context.Context, input json.RawMessage) (any, error) {
+			return func(ctx context.Context, input any) (any, error) {
 				return next(context.WithValue(ctx, ctxKey("user"), "admin"), input)
 			}
 		}
 		setRole := func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-			return func(ctx context.Context, input json.RawMessage) (any, error) {
+			return func(ctx context.Context, input any) (any, error) {
 				user := ctx.Value(ctxKey("user")).(string)
 				return next(context.WithValue(ctx, ctxKey("role"), user+"-superuser"), input)
 			}
 		}
 
 		combined := trpcgo.Chain(setUser, setRole)
-		handler := combined(func(ctx context.Context, input json.RawMessage) (any, error) {
+		handler := combined(func(ctx context.Context, input any) (any, error) {
 			return ctx.Value(ctxKey("role")), nil
 		})
 
@@ -2157,15 +2157,15 @@ func TestLastEventId(t *testing.T) {
 func TestLastEventIdNotMergedForQueries(t *testing.T) {
 	r := trpcgo.NewRouter()
 
-	var rawInput json.RawMessage
+	var capturedInput any
 	trpcgo.Query(r, "user.get", func(ctx context.Context, input GetUserInput) (User, error) {
 		return User{ID: input.ID, Name: "Alice"}, nil
 	})
 
-	// Register a raw handler to capture input.
+	// Capture the decoded input from middleware.
 	r.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
-			rawInput = append(json.RawMessage(nil), input...)
+		return func(ctx context.Context, input any) (any, error) {
+			capturedInput = input
 			return next(ctx, input)
 		}
 	})
@@ -2181,8 +2181,10 @@ func TestLastEventIdNotMergedForQueries(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if strings.Contains(string(rawInput), "lastEventId") {
-		t.Errorf("lastEventId should not be merged for queries, got input: %s", rawInput)
+	// The decoded input is GetUserInput — marshal to JSON to verify no lastEventId.
+	data, _ := json.Marshal(capturedInput)
+	if strings.Contains(string(data), "lastEventId") {
+		t.Errorf("lastEventId should not be merged for queries, got input: %s", data)
 	}
 }
 
@@ -2491,7 +2493,7 @@ func TestProcedureMeta(t *testing.T) {
 
 	router := trpcgo.NewRouter()
 	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
+		return func(ctx context.Context, input any) (any, error) {
 			pm, ok := trpcgo.GetProcedureMeta(ctx)
 			if !ok {
 				t.Error("expected ProcedureMeta in context")
@@ -2529,7 +2531,7 @@ func TestProcedureMetaNil(t *testing.T) {
 
 	router := trpcgo.NewRouter()
 	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
+		return func(ctx context.Context, input any) (any, error) {
 			pm, _ := trpcgo.GetProcedureMeta(ctx)
 			gotMeta = pm
 			return next(ctx, input)
@@ -2557,7 +2559,7 @@ func TestProcedureMetaMutation(t *testing.T) {
 
 	router := trpcgo.NewRouter()
 	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
+		return func(ctx context.Context, input any) (any, error) {
 			pm, _ := trpcgo.GetProcedureMeta(ctx)
 			gotType = pm.Type
 			return next(ctx, input)
@@ -2773,7 +2775,7 @@ func TestMergeRoutersWithGlobalMiddleware(t *testing.T) {
 
 	merged := trpcgo.NewRouter()
 	merged.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
+		return func(ctx context.Context, input any) (any, error) {
 			calls = append(calls, "global-mw")
 			return next(ctx, input)
 		}
@@ -2864,7 +2866,7 @@ func TestRawCallRunsMiddleware(t *testing.T) {
 
 	router := trpcgo.NewRouter()
 	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
+		return func(ctx context.Context, input any) (any, error) {
 			return next(context.WithValue(ctx, ctxKey("user"), "admin"), input)
 		}
 	})
@@ -2890,7 +2892,7 @@ func TestRawCallWithProcedureMeta(t *testing.T) {
 
 	router := trpcgo.NewRouter()
 	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
+		return func(ctx context.Context, input any) (any, error) {
 			pm, _ := trpcgo.GetProcedureMeta(ctx)
 			gotMeta = pm
 			return next(ctx, input)
@@ -2981,7 +2983,7 @@ func TestProcedureMetaSubscriptionType(t *testing.T) {
 
 	router := trpcgo.NewRouter()
 	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
+		return func(ctx context.Context, input any) (any, error) {
 			pm, _ := trpcgo.GetProcedureMeta(ctx)
 			gotType = pm.Type
 			return next(ctx, input)
@@ -3020,7 +3022,7 @@ func TestProcedureOptionUsePlusWithMeta(t *testing.T) {
 		return "ok", nil
 	},
 		trpcgo.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-			return func(ctx context.Context, input json.RawMessage) (any, error) {
+			return func(ctx context.Context, input any) (any, error) {
 				mwCalled = true
 				return next(ctx, input)
 			}
@@ -3051,7 +3053,7 @@ func TestProcedureMetaIsolationInBatch(t *testing.T) {
 
 	router := trpcgo.NewRouter(trpcgo.WithBatching(true))
 	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
+		return func(ctx context.Context, input any) (any, error) {
 			pm, _ := trpcgo.GetProcedureMeta(ctx)
 			mu.Lock()
 			metas[pm.Path] = pm.Meta
@@ -3206,7 +3208,7 @@ func TestMergePreservesPerProcMiddleware(t *testing.T) {
 	trpcgo.VoidQuery(sub, "guarded", func(ctx context.Context) (string, error) {
 		return "ok", nil
 	}, trpcgo.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
-		return func(ctx context.Context, input json.RawMessage) (any, error) {
+		return func(ctx context.Context, input any) (any, error) {
 			mwCalled = true
 			return next(ctx, input)
 		}

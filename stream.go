@@ -33,17 +33,9 @@ type tracked interface {
 func (e TrackedEvent[T]) trackID() string { return e.ID }
 func (e TrackedEvent[T]) trackData() any  { return e.Data }
 
-// wrapStreamHandler adapts a function that returns a receive channel into a HandlerFunc.
-// Used for subscription procedures that stream data via SSE.
-func wrapStreamHandler[I any, O any](fn func(ctx context.Context, input I) (<-chan O, error)) HandlerFunc {
-	return func(ctx context.Context, rawInput json.RawMessage) (any, error) {
-		var input I
-		if len(rawInput) > 0 {
-			if err := json.Unmarshal(rawInput, &input); err != nil {
-				return nil, NewError(CodeParseError, "failed to parse input")
-			}
-		}
-		ch, err := fn(ctx, input)
+func makeStreamHandler[I any, O any](fn func(ctx context.Context, input I) (<-chan O, error)) HandlerFunc {
+	return func(ctx context.Context, input any) (any, error) {
+		ch, err := fn(ctx, input.(I))
 		if err != nil {
 			return nil, err
 		}
@@ -51,9 +43,8 @@ func wrapStreamHandler[I any, O any](fn func(ctx context.Context, input I) (<-ch
 	}
 }
 
-// wrapVoidStreamHandler adapts a function with no input that returns a receive channel.
-func wrapVoidStreamHandler[O any](fn func(ctx context.Context) (<-chan O, error)) HandlerFunc {
-	return func(ctx context.Context, _ json.RawMessage) (any, error) {
+func makeVoidStreamHandler[O any](fn func(ctx context.Context) (<-chan O, error)) HandlerFunc {
+	return func(ctx context.Context, _ any) (any, error) {
 		ch, err := fn(ctx)
 		if err != nil {
 			return nil, err
