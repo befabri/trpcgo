@@ -10,7 +10,6 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/trpcgo/trpcgo/internal/analysis"
 	"github.com/trpcgo/trpcgo/internal/codegen"
-	"github.com/trpcgo/trpcgo/internal/typemap"
 )
 
 // startWatcher watches .go files in the current working directory and
@@ -58,6 +57,9 @@ func (r *Router) startWatcher() {
 	go func() {
 		defer watcher.Close()
 
+		// Run static analysis immediately to enrich reflect-generated types.
+		regenerateFromSource(cwd, output)
+
 		var debounce <-chan time.Time
 		for {
 			select {
@@ -90,20 +92,19 @@ func (r *Router) startWatcher() {
 // regenerate TypeScript types. If the source has errors, the previous
 // TypeScript file is preserved.
 func regenerateFromSource(dir, output string) {
-	procedures, err := analysis.Analyze([]string{"."}, dir)
+	result, err := analysis.Analyze([]string{"."}, dir)
 	if err != nil {
 		// Source is broken — keep previous types.
 		log.Printf("trpcgo: source has errors, keeping previous types")
 		return
 	}
 
-	if len(procedures) == 0 {
+	if len(result.Procedures) == 0 {
 		return
 	}
 
-	mapper := typemap.NewMapper()
 	var buf bytes.Buffer
-	if err := codegen.Generate(&buf, procedures, mapper); err != nil {
+	if err := codegen.Generate(&buf, result, result.TypeMetas); err != nil {
 		log.Printf("trpcgo: codegen failed: %v", err)
 		return
 	}

@@ -8,10 +8,24 @@ import (
 	"strings"
 )
 
-// TypeDef represents a TypeScript interface definition.
+// TypeDefKind distinguishes what kind of TypeScript declaration to emit.
+type TypeDefKind int
+
+const (
+	TypeDefInterface TypeDefKind = iota // export interface Foo { ... }
+	TypeDefUnion                        // export type Status = "active" | "inactive"
+	TypeDefAlias                        // export type UserRole = string
+)
+
+// TypeDef represents a top-level TypeScript type declaration.
 type TypeDef struct {
-	Name   string
-	Fields []Field
+	Name         string
+	Kind         TypeDefKind
+	Comment      string   // Go doc comment → JSDoc
+	TypeParams   []string // Generic type parameter names: ["T", "U"]
+	Fields       []Field  // Kind == TypeDefInterface
+	UnionMembers []string // Kind == TypeDefUnion (TS-formatted values)
+	AliasOf      string   // Kind == TypeDefAlias (e.g., "string")
 }
 
 // Field represents a field in a TypeScript interface.
@@ -19,22 +33,31 @@ type Field struct {
 	Name     string
 	Type     string
 	Optional bool
+	Readonly bool   // from tstype:",readonly"
+	Required bool   // from tstype:",required" (overrides optional)
+	Comment  string // field doc comment → JSDoc
 }
 
 // Mapper converts Go types to TypeScript type strings and collects interface definitions.
 type Mapper struct {
-	defs map[string]TypeDef
-	seen map[string]bool // prevent infinite recursion
+	defs  map[string]TypeDef
+	seen  map[string]bool
+	metas map[string]TypeMeta // AST metadata keyed by types.Object.Id()
 }
 
-func NewMapper() *Mapper {
+// NewMapper creates a Mapper. Pass nil for metas if no AST metadata is available.
+func NewMapper(metas map[string]TypeMeta) *Mapper {
+	if metas == nil {
+		metas = make(map[string]TypeMeta)
+	}
 	return &Mapper{
-		defs: make(map[string]TypeDef),
-		seen: make(map[string]bool),
+		defs:  make(map[string]TypeDef),
+		seen:  make(map[string]bool),
+		metas: metas,
 	}
 }
 
-// Defs returns all collected TypeScript interface definitions, sorted by name.
+// Defs returns all collected TypeScript type definitions, sorted by name.
 func (m *Mapper) Defs() []TypeDef {
 	var result []TypeDef
 	for _, d := range m.defs {
@@ -72,11 +95,57 @@ func (m *Mapper) convert(t types.Type) string {
 		// For named struct types, generate an interface definition.
 		underlying := t.Underlying()
 		if _, ok := underlying.(*types.Struct); ok {
+			// Generic instantiation: Foo[string, int] → Foo<string, number>
+			if t.TypeArgs() != nil && t.TypeArgs().Len() > 0 {
+				var args []string
+				for i := 0; i < t.TypeArgs().Len(); i++ {
+					args = append(args, m.convert(t.TypeArgs().At(i)))
+				}
+				m.resolveGenericStruct(name, t.Origin())
+				return fmt.Sprintf("%s<%s>", name, strings.Join(args, ", "))
+			}
+
+			// Generic definition: Foo[T any] — extract type params.
+			if t.TypeParams() != nil && t.TypeParams().Len() > 0 {
+				m.resolveGenericStruct(name, t)
+				return name
+			}
+
 			m.resolveStruct(name, t)
 			return name
 		}
-		// For other named types (type aliases, named basics), resolve underlying.
+
+		// Named type with non-struct underlying (e.g., `type Status string`).
+		// Check metadata for const groups (→ union) or alias.
+		key := obj.Id()
+		if meta, ok := m.metas[key]; ok {
+			if len(meta.ConstValues) > 0 {
+				m.registerUnion(name, meta)
+				return name
+			}
+			if meta.IsAlias {
+				m.registerAlias(name, underlying, meta)
+				return name
+			}
+		}
+
+		// For other named types, resolve underlying.
 		return m.convert(underlying)
+
+	case *types.Alias:
+		// Go type alias (type X = Y) — resolve to the aliased type.
+		// Check metadata for alias registration (e.g., to emit `export type X = string`).
+		obj := t.Obj()
+		name := obj.Name()
+		key := obj.Id()
+		if meta, ok := m.metas[key]; ok && meta.IsAlias {
+			m.registerAlias(name, t.Rhs(), meta)
+			return name
+		}
+		return m.convert(t.Rhs())
+
+	case *types.TypeParam:
+		return t.Obj().Name()
 
 	case *types.Pointer:
 		return m.convert(t.Elem())
@@ -131,6 +200,12 @@ func basicToTS(t *types.Basic) string {
 	}
 }
 
+// resolveStruct registers a named struct type as a TypeScript interface.
+//
+// Known limitation: types are keyed by short name, not package-qualified name.
+// If two packages define a type with the same name (e.g., both have "User"),
+// only the first one encountered is emitted. Fixing this requires type renaming
+// in the TypeScript output (e.g., "PkgA_User" vs "PkgB_User").
 func (m *Mapper) resolveStruct(name string, named *types.Named) {
 	if m.seen[name] {
 		return
@@ -138,18 +213,69 @@ func (m *Mapper) resolveStruct(name string, named *types.Named) {
 	m.seen[name] = true
 
 	st := named.Underlying().(*types.Struct)
-	def := TypeDef{Name: name}
-	m.collectFields(st, &def.Fields)
+	meta := m.metas[named.Obj().Id()]
+	def := TypeDef{Name: name, Kind: TypeDefInterface, Comment: meta.Comment}
+	m.collectFields(st, &def.Fields, meta.FieldComments)
 	m.defs[name] = def
 }
 
-func (m *Mapper) collectFields(st *types.Struct, fields *[]Field) {
+func (m *Mapper) resolveGenericStruct(name string, named *types.Named) {
+	if m.seen[name] {
+		return
+	}
+	m.seen[name] = true
+
+	var params []string
+	for i := 0; i < named.TypeParams().Len(); i++ {
+		params = append(params, named.TypeParams().At(i).Obj().Name())
+	}
+
+	st := named.Underlying().(*types.Struct)
+	meta := m.metas[named.Obj().Id()]
+	def := TypeDef{Name: name, Kind: TypeDefInterface, Comment: meta.Comment, TypeParams: params}
+	m.collectFields(st, &def.Fields, meta.FieldComments)
+	m.defs[name] = def
+}
+
+func (m *Mapper) registerUnion(name string, meta TypeMeta) {
+	if m.seen[name] {
+		return
+	}
+	m.seen[name] = true
+	m.defs[name] = TypeDef{
+		Name:         name,
+		Kind:         TypeDefUnion,
+		Comment:      meta.Comment,
+		UnionMembers: meta.ConstValues,
+	}
+}
+
+func (m *Mapper) registerAlias(name string, underlying types.Type, meta TypeMeta) {
+	if m.seen[name] {
+		return
+	}
+	m.seen[name] = true
+	m.defs[name] = TypeDef{
+		Name:    name,
+		Kind:    TypeDefAlias,
+		Comment: meta.Comment,
+		AliasOf: m.convert(underlying),
+	}
+}
+
+func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, fieldComments map[int]string) {
 	for i := 0; i < st.NumFields(); i++ {
 		field := st.Field(i)
 		tag := st.Tag(i)
-		jsonName, omitempty, skip := parseJSONTag(tag)
+		jsonName, omitempty, skip := ParseJSONTag(tag)
 
 		if skip {
+			continue
+		}
+
+		// Check tstype tag for skip.
+		tstag, hasTSTag := ParseTSTypeTag(tag)
+		if hasTSTag && tstag.Type == "-" {
 			continue
 		}
 
@@ -159,9 +285,10 @@ func (m *Mapper) collectFields(st *types.Struct, fields *[]Field) {
 			if ptr, ok := embType.(*types.Pointer); ok {
 				embType = ptr.Elem()
 			}
+			embType = types.Unalias(embType)
 			if named, ok := embType.(*types.Named); ok {
 				if embSt, ok := named.Underlying().(*types.Struct); ok {
-					m.collectFields(embSt, fields)
+					m.collectFields(embSt, fields, nil)
 					continue
 				}
 			}
@@ -178,11 +305,32 @@ func (m *Mapper) collectFields(st *types.Struct, fields *[]Field) {
 		tsType := m.convert(field.Type())
 		optional := omitempty || isPointer(field.Type())
 
-		*fields = append(*fields, Field{
+		f := Field{
 			Name:     jsonName,
 			Type:     tsType,
 			Optional: optional,
-		})
+		}
+
+		// Apply tstype tag overrides.
+		if hasTSTag {
+			if tstag.Type != "" {
+				f.Type = tstag.Type
+			}
+			f.Readonly = tstag.Readonly
+			if tstag.Required {
+				f.Required = true
+				f.Optional = false
+			}
+		}
+
+		// Apply field comment from metadata.
+		if fieldComments != nil {
+			if comment, ok := fieldComments[i]; ok {
+				f.Comment = comment
+			}
+		}
+
+		*fields = append(*fields, f)
 	}
 }
 
@@ -197,19 +345,33 @@ func (m *Mapper) inlineStruct(st *types.Struct) string {
 			continue
 		}
 		tag := st.Tag(i)
-		jsonName, omitempty, skip := parseJSONTag(tag)
+		jsonName, omitempty, skip := ParseJSONTag(tag)
 		if skip {
+			continue
+		}
+		tstag, hasTSTag := ParseTSTypeTag(tag)
+		if hasTSTag && tstag.Type == "-" {
 			continue
 		}
 		if jsonName == "" {
 			jsonName = field.Name()
 		}
 		tsType := m.convert(field.Type())
+		if hasTSTag && tstag.Type != "" {
+			tsType = tstag.Type
+		}
 		opt := ""
 		if omitempty || isPointer(field.Type()) {
 			opt = "?"
 		}
-		parts = append(parts, fmt.Sprintf("%s%s: %s", jsonName, opt, tsType))
+		if hasTSTag && tstag.Required {
+			opt = ""
+		}
+		prefix := ""
+		if hasTSTag && tstag.Readonly {
+			prefix = "readonly "
+		}
+		parts = append(parts, fmt.Sprintf("%s%s%s: %s", prefix, jsonName, opt, tsType))
 	}
 	if len(parts) == 0 {
 		return "Record<string, never>"
@@ -217,7 +379,7 @@ func (m *Mapper) inlineStruct(st *types.Struct) string {
 	return "{ " + strings.Join(parts, "; ") + " }"
 }
 
-func parseJSONTag(rawTag string) (name string, omitempty bool, skip bool) {
+func ParseJSONTag(rawTag string) (name string, omitempty bool, skip bool) {
 	tag := reflect.StructTag(rawTag)
 	jsonTag, ok := tag.Lookup("json")
 	if !ok {

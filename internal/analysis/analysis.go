@@ -3,8 +3,12 @@ package analysis
 import (
 	"fmt"
 	"go/ast"
+	"go/constant"
+	"go/token"
 	"go/types"
+	"strings"
 
+	"github.com/trpcgo/trpcgo/internal/typemap"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -18,8 +22,15 @@ type Procedure struct {
 	OutputType types.Type
 }
 
-// Analyze loads the given Go package patterns and finds all tRPC procedure registrations.
-func Analyze(patterns []string, dir string) ([]Procedure, error) {
+// Result contains the full output of analysis.
+type Result struct {
+	Procedures []Procedure
+	TypeMetas  map[string]typemap.TypeMeta
+}
+
+// Analyze loads the given Go package patterns and finds all tRPC procedure registrations,
+// along with type metadata (const groups, type aliases, comments).
+func Analyze(patterns []string, dir string) (*Result, error) {
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedTypes | packages.NeedSyntax |
 			packages.NeedTypesInfo | packages.NeedImports | packages.NeedDeps,
@@ -38,6 +49,7 @@ func Analyze(patterns []string, dir string) ([]Procedure, error) {
 	}
 
 	var procedures []Procedure
+	metas := make(map[string]typemap.TypeMeta)
 
 	for _, pkg := range pkgs {
 		for _, file := range pkg.Syntax {
@@ -52,9 +64,133 @@ func Analyze(patterns []string, dir string) ([]Procedure, error) {
 				return true
 			})
 		}
+
+		// Extract type metadata from AST.
+		extractConstGroups(pkg, metas)
+		extractTypeInfo(pkg, metas)
 	}
 
-	return procedures, nil
+	return &Result{Procedures: procedures, TypeMetas: metas}, nil
+}
+
+// extractConstGroups scans const declarations and groups constants by their named type.
+// This enables generating TypeScript union types like: type Status = "active" | "inactive"
+func extractConstGroups(pkg *packages.Package, metas map[string]typemap.TypeMeta) {
+	for _, file := range pkg.Syntax {
+		for _, decl := range file.Decls {
+			genDecl, ok := decl.(*ast.GenDecl)
+			if !ok || genDecl.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range genDecl.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, name := range vs.Names {
+					obj := pkg.TypesInfo.Defs[name]
+					if obj == nil {
+						continue
+					}
+					c, ok := obj.(*types.Const)
+					if !ok {
+						continue
+					}
+					// Only group constants with named types.
+					named, ok := c.Type().(*types.Named)
+					if !ok {
+						continue
+					}
+					// Only basic underlying types (string, int, etc.).
+					if _, ok := named.Underlying().(*types.Basic); !ok {
+						continue
+					}
+					key := named.Obj().Id()
+					meta := metas[key]
+					meta.ConstValues = append(meta.ConstValues, constToTSLiteral(c))
+					metas[key] = meta
+				}
+			}
+		}
+	}
+}
+
+// extractTypeInfo scans type declarations for aliases and comments.
+func extractTypeInfo(pkg *packages.Package, metas map[string]typemap.TypeMeta) {
+	for _, file := range pkg.Syntax {
+		for _, decl := range file.Decls {
+			genDecl, ok := decl.(*ast.GenDecl)
+			if !ok || genDecl.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range genDecl.Specs {
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				obj := pkg.TypesInfo.Defs[ts.Name]
+				if obj == nil {
+					continue
+				}
+				key := obj.Id()
+				meta := metas[key]
+
+				// Detect type aliases and defined basic types.
+				if ts.Assign.IsValid() {
+					// `type X = string` (alias syntax)
+					meta.IsAlias = true
+				} else if tn, ok := obj.(*types.TypeName); ok {
+					// `type X string` (defined type) — treat as alias if basic underlying and no consts.
+					if _, isBasic := tn.Type().Underlying().(*types.Basic); isBasic {
+						if len(meta.ConstValues) == 0 {
+							meta.IsAlias = true
+						}
+					}
+				}
+
+				// Extract doc comment.
+				doc := ts.Doc
+				if doc == nil && len(genDecl.Specs) == 1 {
+					doc = genDecl.Doc
+				}
+				if doc != nil {
+					meta.Comment = strings.TrimSpace(doc.Text())
+				}
+
+				// Extract field comments for struct types.
+				if st, ok := ts.Type.(*ast.StructType); ok && st.Fields != nil {
+					fieldComments := make(map[int]string)
+					idx := 0
+					for _, field := range st.Fields.List {
+						n := len(field.Names)
+						if n == 0 {
+							n = 1 // embedded field
+						}
+						if field.Doc != nil {
+							comment := strings.TrimSpace(field.Doc.Text())
+							for j := 0; j < n; j++ {
+								fieldComments[idx+j] = comment
+							}
+						}
+						idx += n
+					}
+					if len(fieldComments) > 0 {
+						meta.FieldComments = fieldComments
+					}
+				}
+
+				metas[key] = meta
+			}
+		}
+	}
+}
+
+func constToTSLiteral(c *types.Const) string {
+	val := c.Val()
+	if val.Kind() == constant.String {
+		return fmt.Sprintf("%q", constant.StringVal(val))
+	}
+	return val.ExactString()
 }
 
 // funcInfo describes what we know about a top-level registration function.
@@ -75,7 +211,6 @@ var registrationFuncs = map[string]funcInfo{
 }
 
 func extractProcedure(call *ast.CallExpr, info *types.Info) (Procedure, bool) {
-	// Resolve the function name, unwrapping type parameters (IndexExpr/IndexListExpr).
 	funcName, pkgPath := resolveFuncCall(call.Fun, info)
 	if pkgPath != trpcgoPkgPath {
 		return Procedure{}, false
@@ -86,21 +221,17 @@ func extractProcedure(call *ast.CallExpr, info *types.Info) (Procedure, bool) {
 		return Procedure{}, false
 	}
 
-	// Call signature: trpcgo.Query(router, path, fn, ...middleware)
-	// Need at least 3 args: router, path, fn.
 	if len(call.Args) < 3 {
 		return Procedure{}, false
 	}
 
-	// Second argument is the procedure path (string literal).
 	pathLit, ok := call.Args[1].(*ast.BasicLit)
 	if !ok {
 		return Procedure{}, false
 	}
 	path := pathLit.Value
-	path = path[1 : len(path)-1] // strip quotes
+	path = path[1 : len(path)-1]
 
-	// Third argument is the handler function.
 	fnType := exprType(info, call.Args[2])
 	if fnType == nil {
 		return Procedure{}, false
@@ -113,8 +244,6 @@ func extractProcedure(call *ast.CallExpr, info *types.Info) (Procedure, bool) {
 	var inputType, outputType types.Type
 
 	if fi.hasInput {
-		// func(ctx context.Context, input I) (O, error) or
-		// func(ctx context.Context, input I) (<-chan O, error)
 		if sig.Params().Len() < 2 || sig.Results().Len() < 1 {
 			return Procedure{}, false
 		}
@@ -130,8 +259,6 @@ func extractProcedure(call *ast.CallExpr, info *types.Info) (Procedure, bool) {
 			outputType = resultType
 		}
 	} else {
-		// func(ctx context.Context) (O, error) or
-		// func(ctx context.Context) (<-chan O, error)
 		if sig.Results().Len() < 1 {
 			return Procedure{}, false
 		}
@@ -155,13 +282,7 @@ func extractProcedure(call *ast.CallExpr, info *types.Info) (Procedure, bool) {
 	}, true
 }
 
-// resolveFuncCall extracts the function name and package path from a call expression.
-// Handles:
-//   - trpcgo.Query(...)            → ("Query", "github.com/trpcgo/trpcgo")
-//   - trpcgo.Query[I, O](...)      → ("Query", "github.com/trpcgo/trpcgo")
-//   - Query(...)                   → ("Query", <local package or dot import>)
 func resolveFuncCall(expr ast.Expr, info *types.Info) (name string, pkgPath string) {
-	// Unwrap type parameter expressions.
 	for {
 		switch e := expr.(type) {
 		case *ast.IndexExpr:
@@ -176,7 +297,6 @@ func resolveFuncCall(expr ast.Expr, info *types.Info) (name string, pkgPath stri
 
 	switch fn := expr.(type) {
 	case *ast.SelectorExpr:
-		// trpcgo.Query — check if X is a package identifier.
 		ident, ok := fn.X.(*ast.Ident)
 		if !ok {
 			return "", ""
@@ -192,7 +312,6 @@ func resolveFuncCall(expr ast.Expr, info *types.Info) (name string, pkgPath stri
 		return fn.Sel.Name, pkgName.Imported().Path()
 
 	case *ast.Ident:
-		// Direct call (dot import or same package).
 		obj := info.ObjectOf(fn)
 		if obj == nil {
 			return "", ""
@@ -206,23 +325,19 @@ func resolveFuncCall(expr ast.Expr, info *types.Info) (name string, pkgPath stri
 	return "", ""
 }
 
-// exprType returns the Go type of an AST expression using type info.
 func exprType(info *types.Info, expr ast.Expr) types.Type {
 	if tv, ok := info.Types[expr]; ok {
 		return tv.Type
 	}
-	// For simple identifiers referring to functions/variables, use ObjectOf.
 	if ident, ok := expr.(*ast.Ident); ok {
 		if obj := info.ObjectOf(ident); obj != nil {
 			return obj.Type()
 		}
 	}
-	// For selector expressions (e.g., svc.GetUserById), check Selections.
 	if sel, ok := expr.(*ast.SelectorExpr); ok {
 		if s, ok := info.Selections[sel]; ok {
 			return s.Type()
 		}
-		// Could also be a qualified identifier.
 		if obj := info.ObjectOf(sel.Sel); obj != nil {
 			return obj.Type()
 		}

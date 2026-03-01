@@ -11,7 +11,6 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/trpcgo/trpcgo/internal/analysis"
 	"github.com/trpcgo/trpcgo/internal/codegen"
-	"github.com/trpcgo/trpcgo/internal/typemap"
 )
 
 func main() {
@@ -99,16 +98,14 @@ func main() {
 }
 
 func generate(patterns []string, dir, output string) error {
-	procedures, err := analysis.Analyze(patterns, dir)
+	result, err := analysis.Analyze(patterns, dir)
 	if err != nil {
 		return fmt.Errorf("analysis: %w", err)
 	}
 
-	if len(procedures) == 0 {
+	if len(result.Procedures) == 0 {
 		fmt.Fprintln(os.Stderr, "Warning: no tRPC procedure registrations found")
 	}
-
-	mapper := typemap.NewMapper()
 
 	var w *os.File
 	if output != "" {
@@ -121,5 +118,5 @@ func generate(patterns []string, dir, output string) error {
 		w = os.Stdout
 	}
 
-	return codegen.Generate(w, procedures, mapper)
+	return codegen.Generate(w, result, result.TypeMetas)
 }
