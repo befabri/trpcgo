@@ -105,7 +105,7 @@ func extractConstGroups(pkg *packages.Package, metas map[string]typemap.TypeMeta
 					if _, ok := named.Underlying().(*types.Basic); !ok {
 						continue
 					}
-					key := named.Obj().Id()
+					key := typemap.TypeID(named.Obj())
 					meta := metas[key]
 					meta.ConstValues = append(meta.ConstValues, constToTSLiteral(c))
 					metas[key] = meta
@@ -132,7 +132,7 @@ func extractTypeInfo(pkg *packages.Package, metas map[string]typemap.TypeMeta) {
 				if obj == nil {
 					continue
 				}
-				key := obj.Id()
+				key := typemap.TypeID(obj)
 				meta := metas[key]
 
 				// Detect type aliases and defined basic types.

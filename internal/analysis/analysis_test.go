@@ -4,10 +4,27 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/trpcgo/trpcgo/internal/analysis"
+	"github.com/trpcgo/trpcgo/internal/typemap"
 )
+
+// findMeta finds a TypeMeta by the short type name (suffix after last ".").
+func findMeta(metas map[string]typemap.TypeMeta, shortName string) (typemap.TypeMeta, bool) {
+	for key, meta := range metas {
+		// Key is "pkgpath.Name" — extract the name part.
+		if idx := strings.LastIndexByte(key, '.'); idx >= 0 {
+			if key[idx+1:] == shortName {
+				return meta, true
+			}
+		} else if key == shortName {
+			return meta, true
+		}
+	}
+	return typemap.TypeMeta{}, false
+}
 
 func testdataDir(name string) string {
 	_, thisFile, _, _ := runtime.Caller(0)
@@ -75,7 +92,7 @@ func TestAnalyzeEnhanced(t *testing.T) {
 	}
 
 	t.Run("const group Status", func(t *testing.T) {
-		meta, ok := result.TypeMetas["Status"]
+		meta, ok := findMeta(result.TypeMetas, "Status")
 		if !ok {
 			t.Fatal("no metadata for Status")
 		}
@@ -95,7 +112,7 @@ func TestAnalyzeEnhanced(t *testing.T) {
 	})
 
 	t.Run("const group Priority", func(t *testing.T) {
-		meta, ok := result.TypeMetas["Priority"]
+		meta, ok := findMeta(result.TypeMetas, "Priority")
 		if !ok {
 			t.Fatal("no metadata for Priority")
 		}
@@ -115,7 +132,7 @@ func TestAnalyzeEnhanced(t *testing.T) {
 	})
 
 	t.Run("type alias UserRole", func(t *testing.T) {
-		meta, ok := result.TypeMetas["UserRole"]
+		meta, ok := findMeta(result.TypeMetas, "UserRole")
 		if !ok {
 			t.Fatal("no metadata for UserRole")
 		}
@@ -128,7 +145,7 @@ func TestAnalyzeEnhanced(t *testing.T) {
 	})
 
 	t.Run("type comment on User", func(t *testing.T) {
-		meta, ok := result.TypeMetas["User"]
+		meta, ok := findMeta(result.TypeMetas, "User")
 		if !ok {
 			t.Fatal("no metadata for User")
 		}
@@ -138,7 +155,7 @@ func TestAnalyzeEnhanced(t *testing.T) {
 	})
 
 	t.Run("field comments on User", func(t *testing.T) {
-		meta := result.TypeMetas["User"]
+		meta, _ := findMeta(result.TypeMetas, "User")
 		if len(meta.FieldComments) == 0 {
 			t.Fatal("no field comments")
 		}
@@ -153,14 +170,14 @@ func TestAnalyzeEnhanced(t *testing.T) {
 	})
 
 	t.Run("comment on Status type", func(t *testing.T) {
-		meta := result.TypeMetas["Status"]
+		meta, _ := findMeta(result.TypeMetas, "Status")
 		if meta.Comment != "Status represents the account status." {
 			t.Errorf("Status comment = %q", meta.Comment)
 		}
 	})
 
 	t.Run("comment on Paginated type", func(t *testing.T) {
-		meta, ok := result.TypeMetas["Paginated"]
+		meta, ok := findMeta(result.TypeMetas, "Paginated")
 		if !ok {
 			t.Fatal("no metadata for Paginated")
 		}
@@ -170,10 +187,10 @@ func TestAnalyzeEnhanced(t *testing.T) {
 	})
 
 	t.Run("no const values for non-const types", func(t *testing.T) {
-		for _, key := range []string{"User", "GetUserInput", "CreateUserInput", "Paginated"} {
-			meta := result.TypeMetas[key]
+		for _, name := range []string{"User", "GetUserInput", "CreateUserInput", "Paginated"} {
+			meta, _ := findMeta(result.TypeMetas, name)
 			if len(meta.ConstValues) > 0 {
-				t.Errorf("%s should have no const values, got %v", key, meta.ConstValues)
+				t.Errorf("%s should have no const values, got %v", name, meta.ConstValues)
 			}
 		}
 	})

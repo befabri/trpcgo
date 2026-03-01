@@ -9,6 +9,7 @@ import (
 
 	"github.com/trpcgo/trpcgo/internal/analysis"
 	"github.com/trpcgo/trpcgo/internal/codegen"
+	"github.com/trpcgo/trpcgo/internal/typemap"
 )
 
 func testdataDir(name string) string {
@@ -24,7 +25,7 @@ func generateFromFixture(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := codegen.Generate(&buf, result, result.TypeMetas); err != nil {
+	if _, err := codegen.Generate(&buf, result, result.TypeMetas); err != nil {
 		t.Fatal(err)
 	}
 	return buf.String()
@@ -224,6 +225,396 @@ func TestGenerateEnhanced(t *testing.T) {
 		second := generateFromFixture(t, "enhanced")
 		if output != second {
 			t.Error("generating twice should produce identical output")
+		}
+	})
+}
+
+func TestGenerateEnhancedDiveArray(t *testing.T) {
+	output := generateFromFixture(t, "enhanced")
+
+	// CreateUserInput should have tags field as string[].
+	if !containsLine(output, "tags: string[];") {
+		t.Errorf("missing tags field in CreateUserInput.\nOutput:\n%s", output)
+	}
+
+	// The TS interface output is type-level only — dive doesn't affect it.
+	// Verify that validate tags don't leak into the interface output.
+	if strings.Contains(output, "dive") {
+		t.Errorf("validate tag 'dive' should not appear in TS output.\nOutput:\n%s", output)
+	}
+	if strings.Contains(output, "validate") {
+		t.Errorf("validate tags should not appear in TS output.\nOutput:\n%s", output)
+	}
+}
+
+func TestZodSchemaFromEnhanced(t *testing.T) {
+	dir := testdataDir("enhanced")
+	result, err := analysis.Analyze([]string{"."}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	genResult, err := codegen.Generate(&buf, result, result.TypeMetas)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var zodBuf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&zodBuf, genResult.Procs, genResult.Defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	zodOutput := zodBuf.String()
+
+	t.Run("import line", func(t *testing.T) {
+		if !strings.Contains(zodOutput, `import { z } from "zod";`) {
+			t.Errorf("missing Zod import line.\nOutput:\n%s", zodOutput)
+		}
+	})
+
+	t.Run("CreateUserInputSchema present", func(t *testing.T) {
+		if !strings.Contains(zodOutput, "export const CreateUserInputSchema = z.object(") {
+			t.Errorf("missing CreateUserInputSchema.\nOutput:\n%s", zodOutput)
+		}
+	})
+
+	t.Run("dive array element constraints", func(t *testing.T) {
+		// tags field: validate:"required,min=1,dive,min=1,max=50"
+		// Expected: z.array(z.string().min(1).max(50)).min(1)
+		if !strings.Contains(zodOutput, "z.array(z.string().min(1).max(50)).min(1)") {
+			t.Errorf("missing dive array with element constraints.\nOutput:\n%s", zodOutput)
+		}
+	})
+
+	t.Run("email field as z.email()", func(t *testing.T) {
+		if !strings.Contains(zodOutput, "z.email()") {
+			t.Errorf("email field should use z.email() top-level format.\nOutput:\n%s", zodOutput)
+		}
+	})
+}
+
+func TestZodMiniOutput(t *testing.T) {
+	dir := testdataDir("enhanced")
+	result, err := analysis.Analyze([]string{"."}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	genResult, err := codegen.Generate(&buf, result, result.TypeMetas)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var zodBuf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&zodBuf, genResult.Procs, genResult.Defs, typemap.ZodMini); err != nil {
+		t.Fatal(err)
+	}
+	zodOutput := zodBuf.String()
+
+	t.Run("mini import line", func(t *testing.T) {
+		if !strings.Contains(zodOutput, `import * as z from "zod/mini";`) {
+			t.Errorf("missing Zod Mini import line.\nOutput:\n%s", zodOutput)
+		}
+	})
+
+	t.Run("standard import absent", func(t *testing.T) {
+		if strings.Contains(zodOutput, `import { z } from "zod";`) {
+			t.Errorf("standard Zod import should not appear in Mini output.\nOutput:\n%s", zodOutput)
+		}
+	})
+
+	t.Run("schemas still present", func(t *testing.T) {
+		if !strings.Contains(zodOutput, "CreateUserInputSchema") {
+			t.Errorf("missing CreateUserInputSchema in Mini output.\nOutput:\n%s", zodOutput)
+		}
+	})
+
+	// Compare with standard output to verify they differ.
+	var stdBuf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&stdBuf, genResult.Procs, genResult.Defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	stdOutput := stdBuf.String()
+
+	t.Run("mini differs from standard", func(t *testing.T) {
+		if zodOutput == stdOutput {
+			t.Error("Mini output should differ from Standard output")
+		}
+	})
+}
+
+func TestZodDiveArrayDirect(t *testing.T) {
+	// Test dive array Zod output directly by constructing a minimal proc + def set.
+	// This tests the codegen fieldToZod path without depending on the full analysis pipeline.
+	procs := []codegen.ProcEntry{
+		{Path: "items.create", ProcType: "mutation", InputTS: "CreateItemInput", OutputTS: "Item"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "CreateItemInput",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{
+					Name:   "name",
+					Type:   "string",
+					GoKind: "string",
+					Validate: []typemap.ValidateRule{
+						{Tag: "required"},
+						{Tag: "min", Param: "1"},
+						{Tag: "max", Param: "100"},
+					},
+				},
+				{
+					Name:   "tags",
+					Type:   "string[]",
+					GoKind: "slice",
+					Validate: []typemap.ValidateRule{
+						{Tag: "required"},
+						{Tag: "min", Param: "1"},
+						{Tag: "max", Param: "10"},
+					},
+					ElementValidate: []typemap.ValidateRule{
+						{Tag: "min", Param: "2"},
+						{Tag: "max", Param: "64"},
+					},
+					ElementGoKind: "string",
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	// Element constraints (min=2, max=64) applied inside z.array().
+	// Container constraints (min=1, max=10) applied after z.array().
+	want := "z.array(z.string().min(2).max(64)).min(1).max(10)"
+	if !strings.Contains(output, want) {
+		t.Errorf("missing dive array output.\nwant substring: %s\nOutput:\n%s", want, output)
+	}
+
+	// Name field should have standard string constraints.
+	if !strings.Contains(output, "z.string().min(1).max(100)") {
+		t.Errorf("missing name field constraints.\nOutput:\n%s", output)
+	}
+}
+
+func TestZodDiveArrayStructElement(t *testing.T) {
+	// When dive target is a struct, element constraints don't apply — just use schema ref.
+	procs := []codegen.ProcEntry{
+		{Path: "orders.create", ProcType: "mutation", InputTS: "CreateOrderInput", OutputTS: "Order"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "CreateOrderInput",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{
+					Name:   "items",
+					Type:   "ItemInput[]",
+					GoKind: "slice",
+					Validate: []typemap.ValidateRule{
+						{Tag: "required"},
+						{Tag: "min", Param: "1"},
+					},
+					ElementValidate: []typemap.ValidateRule{},
+					ElementGoKind:   "struct",
+				},
+			},
+		},
+		{
+			Name: "ItemInput",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{Name: "sku", Type: "string", GoKind: "string"},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	// Struct elements use schema reference, not inline constraints.
+	if !strings.Contains(output, "z.array(ItemInputSchema).min(1)") {
+		t.Errorf("missing struct element array.\nOutput:\n%s", output)
+	}
+
+	// ItemInputSchema should be emitted before CreateOrderInputSchema (topo sort).
+	itemIdx := strings.Index(output, "ItemInputSchema = z.object")
+	createIdx := strings.Index(output, "CreateOrderInputSchema = z.object")
+	if itemIdx < 0 || createIdx < 0 {
+		t.Fatalf("missing schemas.\nOutput:\n%s", output)
+	}
+	if itemIdx > createIdx {
+		t.Errorf("ItemInputSchema should be emitted before CreateOrderInputSchema (dependency order)")
+	}
+}
+
+func TestZodDiveArrayNoElementRules(t *testing.T) {
+	// Array with dive but no element rules — should use plain element ref.
+	procs := []codegen.ProcEntry{
+		{Path: "items.create", ProcType: "mutation", InputTS: "Input", OutputTS: "Output"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "Input",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{
+					Name:            "ids",
+					Type:            "string[]",
+					GoKind:          "slice",
+					Validate:        []typemap.ValidateRule{{Tag: "required"}},
+					ElementValidate: nil,
+					ElementGoKind:   "string",
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	// No element rules → z.array(z.string()), no element-level constraints.
+	if !strings.Contains(output, "z.array(z.string())") {
+		t.Errorf("missing plain array without element constraints.\nOutput:\n%s", output)
+	}
+}
+
+func TestZodMiniDiveArray(t *testing.T) {
+	// Verify Mini style produces different output for dive arrays.
+	procs := []codegen.ProcEntry{
+		{Path: "items.create", ProcType: "mutation", InputTS: "Input", OutputTS: "Output"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "Input",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{
+					Name:   "tags",
+					Type:   "string[]",
+					GoKind: "slice",
+					Validate: []typemap.ValidateRule{
+						{Tag: "min", Param: "1"},
+					},
+					ElementValidate: []typemap.ValidateRule{
+						{Tag: "min", Param: "2"},
+						{Tag: "max", Param: "50"},
+					},
+					ElementGoKind: "string",
+				},
+			},
+		},
+	}
+
+	var stdBuf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&stdBuf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	var miniBuf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&miniBuf, procs, defs, typemap.ZodMini); err != nil {
+		t.Fatal(err)
+	}
+
+	stdOutput := stdBuf.String()
+	miniOutput := miniBuf.String()
+
+	// Standard: element constraints use method chains.
+	if !strings.Contains(stdOutput, "z.array(z.string().min(2).max(50)).min(1)") {
+		t.Errorf("standard output wrong.\nOutput:\n%s", stdOutput)
+	}
+
+	// Mini: element constraints use .check() syntax.
+	if !strings.Contains(miniOutput, "z.string().check(z.minLength(2), z.maxLength(50))") {
+		t.Errorf("mini output missing element .check() syntax.\nOutput:\n%s", miniOutput)
+	}
+
+	// Mini import.
+	if !strings.Contains(miniOutput, `"zod/mini"`) {
+		t.Errorf("mini output missing zod/mini import.\nOutput:\n%s", miniOutput)
+	}
+}
+
+func TestRouterInputsOutputs(t *testing.T) {
+	output := generateFromFixture(t, "basic")
+
+	t.Run("RouterInputs is present", func(t *testing.T) {
+		if !strings.Contains(output, "export type RouterInputs = {") {
+			t.Fatalf("output missing RouterInputs declaration.\nOutput:\n%s", output)
+		}
+	})
+
+	t.Run("RouterOutputs is present", func(t *testing.T) {
+		if !strings.Contains(output, "export type RouterOutputs = {") {
+			t.Fatalf("output missing RouterOutputs declaration.\nOutput:\n%s", output)
+		}
+	})
+
+	t.Run("RouterInputs has user namespace", func(t *testing.T) {
+		// Extract the RouterInputs block.
+		idx := strings.Index(output, "export type RouterInputs = {")
+		if idx < 0 {
+			t.Fatal("RouterInputs not found")
+		}
+		// Get from declaration to end of output (safe slice).
+		chunk := output[idx:]
+		if !strings.Contains(chunk, "user:") {
+			t.Errorf("RouterInputs missing user namespace.\nChunk:\n%s", chunk)
+		}
+	})
+
+	t.Run("RouterInputs contains procedure input types", func(t *testing.T) {
+		// Extract the section between RouterInputs and RouterOutputs.
+		inputIdx := strings.Index(output, "export type RouterInputs = {")
+		outputIdx := strings.Index(output, "export type RouterOutputs = {")
+		if inputIdx < 0 {
+			t.Fatal("RouterInputs not found")
+		}
+		end := len(output)
+		if outputIdx > inputIdx {
+			end = outputIdx
+		}
+		chunk := output[inputIdx:end]
+		// user.getById has input GetUserByIdInput.
+		if !strings.Contains(chunk, "getById: GetUserByIdInput") {
+			t.Errorf("RouterInputs missing getById input.\nChunk:\n%s", chunk)
+		}
+		// user.createUser has input CreateUserInput.
+		if !strings.Contains(chunk, "createUser: CreateUserInput") {
+			t.Errorf("RouterInputs missing createUser input.\nChunk:\n%s", chunk)
+		}
+		// user.listUsers has void input.
+		if !strings.Contains(chunk, "listUsers: void") {
+			t.Errorf("RouterInputs missing listUsers void input.\nChunk:\n%s", chunk)
+		}
+	})
+
+	t.Run("RouterOutputs contains procedure output types", func(t *testing.T) {
+		idx := strings.Index(output, "export type RouterOutputs = {")
+		if idx < 0 {
+			t.Fatal("RouterOutputs not found")
+		}
+		chunk := output[idx:]
+		// user.getById returns User.
+		if !strings.Contains(chunk, "getById: User") {
+			t.Errorf("RouterOutputs missing getById output.\nChunk:\n%s", chunk)
+		}
+		// user.listUsers returns User[].
+		if !strings.Contains(chunk, "listUsers: User[]") {
+			t.Errorf("RouterOutputs missing listUsers output.\nChunk:\n%s", chunk)
+		}
+		// user.createUser returns User.
+		if !strings.Contains(chunk, "createUser: User") {
+			t.Errorf("RouterOutputs missing createUser output.\nChunk:\n%s", chunk)
 		}
 	})
 }

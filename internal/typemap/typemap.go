@@ -19,6 +19,9 @@ const (
 
 // TypeDef represents a top-level TypeScript type declaration.
 type TypeDef struct {
+	ID       string // fully-qualified: "github.com/foo/models.User"
+	PkgPath  string // "github.com/foo/models"
+	PkgName  string // "models"
 	Name         string
 	Kind         TypeDefKind
 	Comment      string   // Go doc comment → JSDoc
@@ -30,19 +33,118 @@ type TypeDef struct {
 
 // Field represents a field in a TypeScript interface.
 type Field struct {
-	Name     string
-	Type     string
-	Optional bool
-	Readonly bool   // from tstype:",readonly"
-	Required bool   // from tstype:",required" (overrides optional)
-	Comment  string // field doc comment → JSDoc
+	Name            string
+	Type            string
+	GoKind          string          // Go kind for Zod: "string", "int", "int32", "float64", etc.
+	Optional        bool
+	Readonly        bool            // from tstype:",readonly"
+	Required        bool            // from tstype:",required" (overrides optional)
+	Comment         string          // field doc comment → JSDoc
+	Validate        []ValidateRule  // parsed validate tag rules (before dive)
+	ElementValidate []ValidateRule  // parsed validate tag rules after dive (for slice elements)
+	ElementGoKind   string          // Go kind of slice/array element type
 }
 
 // Mapper converts Go types to TypeScript type strings and collects interface definitions.
 type Mapper struct {
-	defs  map[string]TypeDef
-	seen  map[string]bool
-	metas map[string]TypeMeta // AST metadata keyed by types.Object.Id()
+	defs     map[string]TypeDef   // key = TypeID (fully-qualified)
+	seen     map[string]bool      // key = TypeID (fully-qualified)
+	names    map[string]string    // TypeID → short name (for display name resolution)
+	metas    map[string]TypeMeta  // AST metadata keyed by TypeID
+	resolved map[string]string    // cached: TypeID → display name
+}
+
+// TypeID returns a fully-qualified identifier for a types.Object.
+// Unlike types.Object.Id(), this always includes the package path,
+// even for exported names.
+func TypeID(obj types.Object) string {
+	if pkg := obj.Pkg(); pkg != nil {
+		return pkg.Path() + "." + obj.Name()
+	}
+	return obj.Name()
+}
+
+// tokenDelim is the delimiter used to wrap type IDs in token strings.
+// The § character cannot appear in valid Go identifiers or TS type strings.
+const tokenDelim = "§"
+
+// typeToken creates a resolvable token string for a named type.
+// Tokens preserve type identity through string composition (arrays, generics, etc.).
+func (m *Mapper) typeToken(id, shortName string) string {
+	m.names[id] = shortName
+	m.resolved = nil // invalidate cache
+	return tokenDelim + id + tokenDelim
+}
+
+// resolveTokens replaces all §id§ tokens in s with display names.
+func resolveTokens(s string, display map[string]string) string {
+	if !strings.Contains(s, tokenDelim) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for {
+		start := strings.Index(s, tokenDelim)
+		if start < 0 {
+			b.WriteString(s)
+			break
+		}
+		b.WriteString(s[:start])
+		s = s[start+len(tokenDelim):]
+		end := strings.Index(s, tokenDelim)
+		if end < 0 {
+			// Malformed token — write delimiter and continue.
+			b.WriteString(tokenDelim)
+			continue
+		}
+		id := s[:end]
+		if name, ok := display[id]; ok {
+			b.WriteString(name)
+		} else {
+			// Unknown token — keep as-is for debugging.
+			b.WriteString(id)
+		}
+		s = s[end+len(tokenDelim):]
+	}
+	return b.String()
+}
+
+// displayNames computes the mapping from TypeID → display name.
+// If no collisions exist, display names equal short names.
+// On collision, names are prefixed with the title-cased package name.
+func (m *Mapper) displayNames() map[string]string {
+	if m.resolved != nil {
+		return m.resolved
+	}
+	// Group IDs by short name.
+	counts := map[string][]string{} // shortName → [IDs]
+	for id, name := range m.names {
+		counts[name] = append(counts[name], id)
+	}
+	result := make(map[string]string, len(m.names))
+	for id, shortName := range m.names {
+		if len(counts[shortName]) > 1 {
+			// Collision — prefix with title-cased package name.
+			def, ok := m.defs[id]
+			if ok && def.PkgName != "" {
+				// Title-case the first letter of package name.
+				prefix := strings.ToUpper(def.PkgName[:1]) + def.PkgName[1:]
+				result[id] = prefix + shortName
+			} else {
+				result[id] = shortName
+			}
+		} else {
+			result[id] = shortName
+		}
+	}
+	m.resolved = result
+	return result
+}
+
+// Resolve resolves type tokens in a string to display names.
+// Used by codegen to resolve ProcEntry InputTS/OutputTS.
+func (m *Mapper) Resolve(s string) string {
+	return resolveTokens(s, m.displayNames())
 }
 
 // NewMapper creates a Mapper. Pass nil for metas if no AST metadata is available.
@@ -53,14 +155,29 @@ func NewMapper(metas map[string]TypeMeta) *Mapper {
 	return &Mapper{
 		defs:  make(map[string]TypeDef),
 		seen:  make(map[string]bool),
+		names: make(map[string]string),
 		metas: metas,
 	}
 }
 
 // Defs returns all collected TypeScript type definitions, sorted by name.
+// All type tokens in field types and alias types are resolved to display names.
 func (m *Mapper) Defs() []TypeDef {
+	display := m.displayNames()
 	var result []TypeDef
 	for _, d := range m.defs {
+		// Resolve display name.
+		if name, ok := display[d.ID]; ok {
+			d.Name = name
+		}
+		// Resolve tokens in field types.
+		for i := range d.Fields {
+			d.Fields[i].Type = resolveTokens(d.Fields[i].Type, display)
+		}
+		// Resolve tokens in alias target.
+		if d.AliasOf != "" {
+			d.AliasOf = resolveTokens(d.AliasOf, display)
+		}
 		result = append(result, d)
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -80,6 +197,7 @@ func (m *Mapper) convert(t types.Type) string {
 	case *types.Named:
 		obj := t.Obj()
 		name := obj.Name()
+		id := TypeID(obj)
 
 		// Check for well-known types.
 		if obj.Pkg() != nil {
@@ -109,31 +227,31 @@ func (m *Mapper) convert(t types.Type) string {
 				for i := 0; i < t.TypeArgs().Len(); i++ {
 					args = append(args, m.convert(t.TypeArgs().At(i)))
 				}
-				m.resolveGenericStruct(name, t.Origin())
-				return fmt.Sprintf("%s<%s>", name, strings.Join(args, ", "))
+				originID := TypeID(t.Origin().Obj())
+				m.resolveGenericStruct(originID, name, t.Origin())
+				return fmt.Sprintf("%s<%s>", m.typeToken(originID, name), strings.Join(args, ", "))
 			}
 
 			// Generic definition: Foo[T any] — extract type params.
 			if t.TypeParams() != nil && t.TypeParams().Len() > 0 {
-				m.resolveGenericStruct(name, t)
-				return name
+				m.resolveGenericStruct(id, name, t)
+				return m.typeToken(id, name)
 			}
 
-			m.resolveStruct(name, t)
-			return name
+			m.resolveStruct(id, name, t)
+			return m.typeToken(id, name)
 		}
 
 		// Named type with non-struct underlying (e.g., `type Status string`).
 		// Check metadata for const groups (→ union) or alias.
-		key := obj.Id()
-		if meta, ok := m.metas[key]; ok {
+		if meta, ok := m.metas[id]; ok {
 			if len(meta.ConstValues) > 0 {
-				m.registerUnion(name, meta)
-				return name
+				m.registerUnion(id, name, meta, obj)
+				return m.typeToken(id, name)
 			}
 			if meta.IsAlias {
-				m.registerAlias(name, underlying, meta)
-				return name
+				m.registerAlias(id, name, underlying, meta, obj)
+				return m.typeToken(id, name)
 			}
 		}
 
@@ -145,10 +263,10 @@ func (m *Mapper) convert(t types.Type) string {
 		// Check metadata for alias registration (e.g., to emit `export type X = string`).
 		obj := t.Obj()
 		name := obj.Name()
-		key := obj.Id()
-		if meta, ok := m.metas[key]; ok && meta.IsAlias {
-			m.registerAlias(name, t.Rhs(), meta)
-			return name
+		id := TypeID(obj)
+		if meta, ok := m.metas[id]; ok && meta.IsAlias {
+			m.registerAlias(id, name, t.Rhs(), meta, obj)
+			return m.typeToken(id, name)
 		}
 		return m.convert(t.Rhs())
 
@@ -209,29 +327,31 @@ func basicToTS(t *types.Basic) string {
 }
 
 // resolveStruct registers a named struct type as a TypeScript interface.
-//
-// Known limitation: types are keyed by short name, not package-qualified name.
-// If two packages define a type with the same name (e.g., both have "User"),
-// only the first one encountered is emitted. Fixing this requires type renaming
-// in the TypeScript output (e.g., "PkgA_User" vs "PkgB_User").
-func (m *Mapper) resolveStruct(name string, named *types.Named) {
-	if m.seen[name] {
+func (m *Mapper) resolveStruct(id, name string, named *types.Named) {
+	if m.seen[id] {
 		return
 	}
-	m.seen[name] = true
+	m.seen[id] = true
 
 	st := named.Underlying().(*types.Struct)
-	meta := m.metas[named.Obj().Id()]
-	def := TypeDef{Name: name, Kind: TypeDefInterface, Comment: meta.Comment}
+	meta := m.metas[id]
+	def := TypeDef{
+		ID:      id,
+		PkgPath: pkgPath(named.Obj()),
+		PkgName: pkgName(named.Obj()),
+		Name:    name,
+		Kind:    TypeDefInterface,
+		Comment: meta.Comment,
+	}
 	m.collectFields(st, &def.Fields, meta.FieldComments)
-	m.defs[name] = def
+	m.defs[id] = def
 }
 
-func (m *Mapper) resolveGenericStruct(name string, named *types.Named) {
-	if m.seen[name] {
+func (m *Mapper) resolveGenericStruct(id, name string, named *types.Named) {
+	if m.seen[id] {
 		return
 	}
-	m.seen[name] = true
+	m.seen[id] = true
 
 	var params []string
 	for i := 0; i < named.TypeParams().Len(); i++ {
@@ -239,18 +359,29 @@ func (m *Mapper) resolveGenericStruct(name string, named *types.Named) {
 	}
 
 	st := named.Underlying().(*types.Struct)
-	meta := m.metas[named.Obj().Id()]
-	def := TypeDef{Name: name, Kind: TypeDefInterface, Comment: meta.Comment, TypeParams: params}
+	meta := m.metas[id]
+	def := TypeDef{
+		ID:         id,
+		PkgPath:    pkgPath(named.Obj()),
+		PkgName:    pkgName(named.Obj()),
+		Name:       name,
+		Kind:       TypeDefInterface,
+		Comment:    meta.Comment,
+		TypeParams: params,
+	}
 	m.collectFields(st, &def.Fields, meta.FieldComments)
-	m.defs[name] = def
+	m.defs[id] = def
 }
 
-func (m *Mapper) registerUnion(name string, meta TypeMeta) {
-	if m.seen[name] {
+func (m *Mapper) registerUnion(id, name string, meta TypeMeta, obj types.Object) {
+	if m.seen[id] {
 		return
 	}
-	m.seen[name] = true
-	m.defs[name] = TypeDef{
+	m.seen[id] = true
+	m.defs[id] = TypeDef{
+		ID:           id,
+		PkgPath:      pkgPath(obj),
+		PkgName:      pkgName(obj),
 		Name:         name,
 		Kind:         TypeDefUnion,
 		Comment:      meta.Comment,
@@ -258,17 +389,34 @@ func (m *Mapper) registerUnion(name string, meta TypeMeta) {
 	}
 }
 
-func (m *Mapper) registerAlias(name string, underlying types.Type, meta TypeMeta) {
-	if m.seen[name] {
+func (m *Mapper) registerAlias(id, name string, underlying types.Type, meta TypeMeta, obj types.Object) {
+	if m.seen[id] {
 		return
 	}
-	m.seen[name] = true
-	m.defs[name] = TypeDef{
+	m.seen[id] = true
+	m.defs[id] = TypeDef{
+		ID:      id,
+		PkgPath: pkgPath(obj),
+		PkgName: pkgName(obj),
 		Name:    name,
 		Kind:    TypeDefAlias,
 		Comment: meta.Comment,
 		AliasOf: m.convert(underlying),
 	}
+}
+
+func pkgPath(obj types.Object) string {
+	if pkg := obj.Pkg(); pkg != nil {
+		return pkg.Path()
+	}
+	return ""
+}
+
+func pkgName(obj types.Object) string {
+	if pkg := obj.Pkg(); pkg != nil {
+		return pkg.Name()
+	}
+	return ""
 }
 
 func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, fieldComments map[int]string) {
@@ -316,7 +464,26 @@ func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, fieldComments 
 		f := Field{
 			Name:     jsonName,
 			Type:     tsType,
+			GoKind:   goKind(field.Type()),
 			Optional: optional,
+		}
+
+		// Parse validate tag and split at dive boundary.
+		allRules := ParseValidateTag(tag)
+		sliceRules, elemRules := SplitAtDive(allRules)
+		f.Validate = sliceRules
+		f.ElementValidate = elemRules
+
+		// Extract element Go kind for slice/array fields.
+		if f.GoKind == "slice" || f.GoKind == "array" {
+			f.ElementGoKind = sliceElementGoKind(field.Type())
+		}
+
+		for _, rule := range f.Validate {
+			if rule.Tag == "required" {
+				f.Optional = false
+				break
+			}
 		}
 
 		// Apply tstype tag overrides.
@@ -409,4 +576,102 @@ func ParseJSONTag(rawTag string) (name string, omitempty bool, skip bool) {
 func isPointer(t types.Type) bool {
 	_, ok := t.(*types.Pointer)
 	return ok
+}
+
+// goKind returns a Go kind string for Zod type discrimination.
+// Dereferences pointers and resolves named types to their underlying basic kind.
+func goKind(t types.Type) string {
+	// Unwrap pointers.
+	for {
+		if ptr, ok := t.(*types.Pointer); ok {
+			t = ptr.Elem()
+		} else {
+			break
+		}
+	}
+
+	// Check for well-known types first.
+	if named, ok := t.(*types.Named); ok {
+		if obj := named.Obj(); obj.Pkg() != nil {
+			fullPath := obj.Pkg().Path() + "." + obj.Name()
+			switch fullPath {
+			case "time.Time":
+				return "time.Time"
+			case "encoding/json.RawMessage":
+				return "json.RawMessage"
+			}
+		}
+	}
+
+	// Resolve to underlying type.
+	switch u := t.Underlying().(type) {
+	case *types.Basic:
+		switch u.Kind() {
+		case types.String:
+			return "string"
+		case types.Bool:
+			return "bool"
+		case types.Int:
+			return "int"
+		case types.Int8:
+			return "int8"
+		case types.Int16:
+			return "int16"
+		case types.Int32:
+			return "int32"
+		case types.Int64:
+			return "int64"
+		case types.Uint:
+			return "uint"
+		case types.Uint8:
+			return "uint8"
+		case types.Uint16:
+			return "uint16"
+		case types.Uint32:
+			return "uint32"
+		case types.Uint64:
+			return "uint64"
+		case types.Float32:
+			return "float32"
+		case types.Float64:
+			return "float64"
+		default:
+			return "unknown"
+		}
+	case *types.Slice:
+		// []byte is special.
+		if basic, ok := u.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
+			return "[]byte"
+		}
+		return "slice"
+	case *types.Array:
+		return "array"
+	case *types.Map:
+		return "map"
+	case *types.Struct:
+		return "struct"
+	case *types.Interface:
+		return "interface"
+	default:
+		return "unknown"
+	}
+}
+
+// sliceElementGoKind extracts the Go kind of a slice or array's element type.
+func sliceElementGoKind(t types.Type) string {
+	// Unwrap pointers.
+	for {
+		if ptr, ok := t.(*types.Pointer); ok {
+			t = ptr.Elem()
+		} else {
+			break
+		}
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Slice:
+		return goKind(u.Elem())
+	case *types.Array:
+		return goKind(u.Elem())
+	}
+	return ""
 }

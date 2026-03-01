@@ -62,8 +62,9 @@ type GetUserInput struct {
 }
 
 type CreateUserInput struct {
-	Name  string `json:"name"`
-	Email string `json:"email"`
+	Name  string   `json:"name" validate:"required,min=1,max=100"`
+	Email string   `json:"email" validate:"required,email"`
+	Tags  []string `json:"tags" validate:"required,min=1,dive,min=1,max=50"`
 }
 
 func getUser(ctx context.Context, input GetUserInput) (User, error) {
