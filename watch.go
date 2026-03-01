@@ -104,7 +104,7 @@ func regenerateFromSource(dir, output string) {
 	}
 
 	var buf bytes.Buffer
-	if err := codegen.Generate(&buf, result, result.TypeMetas); err != nil {
+	if _, err := codegen.Generate(&buf, result, result.TypeMetas); err != nil {
 		log.Printf("trpcgo: codegen failed: %v", err)
 		return
 	}

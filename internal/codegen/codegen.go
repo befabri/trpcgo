@@ -18,8 +18,15 @@ type ProcEntry struct {
 	OutputTS string
 }
 
+// GenerateResult holds the output of a generation pass, allowing
+// the caller to also generate Zod schemas from the same data.
+type GenerateResult struct {
+	Procs []ProcEntry
+	Defs  []typemap.TypeDef
+}
+
 // Generate writes the TypeScript AppRouter definition to w using static analysis results.
-func Generate(w io.Writer, result *analysis.Result, metas map[string]typemap.TypeMeta) error {
+func Generate(w io.Writer, result *analysis.Result, metas map[string]typemap.TypeMeta) (*GenerateResult, error) {
 	mapper := typemap.NewMapper(metas)
 
 	var procs []ProcEntry
@@ -38,7 +45,17 @@ func Generate(w io.Writer, result *analysis.Result, metas map[string]typemap.Typ
 		})
 	}
 
-	return WriteAppRouter(w, procs, mapper.Defs())
+	// Resolve type tokens in proc types (handles collision renaming).
+	for i := range procs {
+		procs[i].InputTS = mapper.Resolve(procs[i].InputTS)
+		procs[i].OutputTS = mapper.Resolve(procs[i].OutputTS)
+	}
+
+	defs := mapper.Defs()
+	if err := WriteAppRouter(w, procs, defs); err != nil {
+		return nil, err
+	}
+	return &GenerateResult{Procs: procs, Defs: defs}, nil
 }
 
 // WriteAppRouter writes the complete TypeScript AppRouter file given
@@ -120,8 +137,88 @@ type $Subscription<TInput, TOutput> = $Procedure<"subscription", TInput, TOutput
   createCaller: any;
 };
 `)
+	fmt.Fprintln(w)
+
+	// RouterInputs / RouterOutputs.
+	writeRouterIO(w, procs)
 
 	return nil
+}
+
+// writeRouterIO emits RouterInputs and RouterOutputs type aliases
+// matching tRPC's inferRouterInputs<T> / inferRouterOutputs<T>.
+func writeRouterIO(w io.Writer, procs []ProcEntry) {
+	if len(procs) == 0 {
+		return
+	}
+
+	inputTree := buildIOTree(procs, true)
+	outputTree := buildIOTree(procs, false)
+
+	fmt.Fprint(w, "export type RouterInputs = ")
+	writeIOTree(w, inputTree, 0)
+	fmt.Fprintln(w, ";")
+	fmt.Fprintln(w)
+
+	fmt.Fprint(w, "export type RouterOutputs = ")
+	writeIOTree(w, outputTree, 0)
+	fmt.Fprintln(w, ";")
+}
+
+type ioNode struct {
+	children map[string]*ioNode
+	isLeaf   bool
+	tsType   string
+}
+
+func buildIOTree(procs []ProcEntry, isInput bool) *ioNode {
+	root := &ioNode{children: make(map[string]*ioNode)}
+	for _, p := range procs {
+		parts := strings.Split(p.Path, ".")
+		node := root
+		for i, part := range parts {
+			if node.children == nil {
+				node.children = make(map[string]*ioNode)
+			}
+			child, ok := node.children[part]
+			if !ok {
+				child = &ioNode{children: make(map[string]*ioNode)}
+				node.children[part] = child
+			}
+			if i == len(parts)-1 {
+				child.isLeaf = true
+				if isInput {
+					child.tsType = p.InputTS
+				} else {
+					child.tsType = p.OutputTS
+				}
+			}
+			node = child
+		}
+	}
+	return root
+}
+
+func writeIOTree(w io.Writer, node *ioNode, indent int) {
+	keys := make([]string, 0, len(node.children))
+	for k := range node.children {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	prefix := strings.Repeat("  ", indent)
+	fmt.Fprintln(w, "{")
+	for _, key := range keys {
+		child := node.children[key]
+		if child.isLeaf {
+			fmt.Fprintf(w, "%s  %s: %s;\n", prefix, key, child.tsType)
+		} else {
+			fmt.Fprintf(w, "%s  %s: ", prefix, key)
+			writeIOTree(w, child, indent+1)
+			fmt.Fprintln(w, ";")
+		}
+	}
+	fmt.Fprintf(w, "%s}", prefix)
 }
 
 func writeJSDoc(w io.Writer, comment, indent string) {

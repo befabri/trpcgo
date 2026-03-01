@@ -26,3 +26,4 @@ routeTree.gen.ts
 .DS_Store
 Thumbs.db
 trpc/
+zod/

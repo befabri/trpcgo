@@ -11,7 +11,16 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/trpcgo/trpcgo/internal/analysis"
 	"github.com/trpcgo/trpcgo/internal/codegen"
+	"github.com/trpcgo/trpcgo/internal/typemap"
 )
+
+type generateOptions struct {
+	patterns []string
+	dir      string
+	output   string
+	zod      string
+	zodMini  bool
+}
 
 func main() {
 	if len(os.Args) < 2 || os.Args[1] != "generate" {
@@ -25,6 +34,8 @@ func main() {
 	dir := fs.String("dir", ".", "working directory for package resolution")
 	watch := fs.Bool("watch", false, "watch Go files and regenerate on change")
 	fs.BoolVar(watch, "w", false, "watch Go files and regenerate on change")
+	zodOutput := fs.String("zod", "", "output path for Zod 4 validation schemas")
+	zodMini := fs.Bool("zod-mini", false, "generate zod/mini functional syntax")
 	fs.Parse(os.Args[2:])
 
 	patterns := fs.Args()
@@ -32,8 +43,16 @@ func main() {
 		patterns = []string{"."}
 	}
 
+	opts := generateOptions{
+		patterns: patterns,
+		dir:      *dir,
+		output:   *output,
+		zod:      *zodOutput,
+		zodMini:  *zodMini,
+	}
+
 	// Run once.
-	if err := generate(patterns, *dir, *output); err != nil {
+	if err := generate(opts); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -82,7 +101,7 @@ func main() {
 		case <-debounce:
 			debounce = nil
 			log.Println("Change detected, regenerating...")
-			if err := generate(patterns, *dir, *output); err != nil {
+			if err := generate(opts); err != nil {
 				log.Printf("Error: %v", err)
 			} else {
 				log.Println("Done.")
@@ -97,8 +116,8 @@ func main() {
 	}
 }
 
-func generate(patterns []string, dir, output string) error {
-	result, err := analysis.Analyze(patterns, dir)
+func generate(opts generateOptions) error {
+	result, err := analysis.Analyze(opts.patterns, opts.dir)
 	if err != nil {
 		return fmt.Errorf("analysis: %w", err)
 	}
@@ -108,8 +127,8 @@ func generate(patterns []string, dir, output string) error {
 	}
 
 	var w *os.File
-	if output != "" {
-		w, err = os.Create(output)
+	if opts.output != "" {
+		w, err = os.Create(opts.output)
 		if err != nil {
 			return fmt.Errorf("creating output file: %w", err)
 		}
@@ -118,5 +137,28 @@ func generate(patterns []string, dir, output string) error {
 		w = os.Stdout
 	}
 
-	return codegen.Generate(w, result, result.TypeMetas)
+	genResult, err := codegen.Generate(w, result, result.TypeMetas)
+	if err != nil {
+		return err
+	}
+
+	// Generate Zod schemas if requested.
+	if opts.zod != "" && genResult != nil {
+		style := typemap.ZodStandard
+		if opts.zodMini {
+			style = typemap.ZodMini
+		}
+
+		zodFile, err := os.Create(opts.zod)
+		if err != nil {
+			return fmt.Errorf("creating zod output file: %w", err)
+		}
+		defer zodFile.Close()
+
+		if err := codegen.WriteZodSchemas(zodFile, genResult.Procs, genResult.Defs, style); err != nil {
+			return fmt.Errorf("writing zod schemas: %w", err)
+		}
+	}
+
+	return nil
 }
