@@ -132,17 +132,17 @@ func (h *httpHandler) executeCall(ctx context.Context, r *http.Request, call par
 	result, err := proc.wrappedHandler(ctx, call.input)
 	if err != nil {
 		trpcErr, ok := errors.AsType[*Error](err)
+		if h.router.opts.onError != nil {
+			// Pass the original error so the server can log it.
+			callbackErr := trpcErr
+			if !ok {
+				callbackErr = WrapError(CodeInternalServerError, "internal server error", err)
+			}
+			h.router.opts.onError(ctx, callbackErr, call.path)
+		}
 		if !ok {
 			// Never leak internal error details to clients.
 			trpcErr = NewError(CodeInternalServerError, "internal server error")
-		}
-		if h.router.opts.onError != nil {
-			// Pass the original error so the server can log it.
-			originalErr, _ := errors.AsType[*Error](err)
-			if originalErr == nil {
-				originalErr = WrapError(CodeInternalServerError, "internal server error", err)
-			}
-			h.router.opts.onError(ctx, originalErr, call.path)
 		}
 		return newErrorEnvelope(trpcErr, call.path), HTTPStatusFromCode(trpcErr.Code)
 	}
