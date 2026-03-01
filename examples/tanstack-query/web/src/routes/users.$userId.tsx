@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { trpc } from "../trpc";
 import { Spinner } from "./-components/spinner";
 import { RoleBadge, StatusBadge } from "./-components/badges";
+import { GetUserByIdInputSchema } from "../../gen/zod";
 
 export const Route = createFileRoute("/users/$userId")({
   component: UserDetailComponent,
@@ -9,9 +10,12 @@ export const Route = createFileRoute("/users/$userId")({
 
 function UserDetailComponent() {
   const { userId } = Route.useParams();
-  const { data: user, isLoading, error } = trpc.user.getUserById.useQuery({
-    id: userId,
-  });
+
+  const validated = GetUserByIdInputSchema.safeParse({ id: userId });
+  const { data: user, isLoading, error } = trpc.user.getUserById.useQuery(
+    { id: userId },
+    { enabled: validated.success },
+  );
 
   if (isLoading) {
     return (
@@ -22,9 +26,31 @@ function UserDetailComponent() {
   }
 
   if (error) {
+    // The server's error formatter adds a timestamp to the error shape.
+    // tRPC exposes error.data (the "data" field) and error.shape (the full shape).
+    const data = error.data as
+      | { code: string; httpStatus: number }
+      | undefined;
+    const shape = error.shape as
+      | { timestamp?: string }
+      | undefined;
     return (
-      <div className="p-4 text-red-600">
-        {error.message}
+      <div className="p-4 space-y-2">
+        <p className="text-red-600 font-medium">{error.message}</p>
+        {data && (
+          <dl className="text-xs text-gray-500 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+            <dt className="font-semibold">Code</dt>
+            <dd className="font-mono">{data.code}</dd>
+            <dt className="font-semibold">HTTP</dt>
+            <dd>{data.httpStatus}</dd>
+            {shape?.timestamp && (
+              <>
+                <dt className="font-semibold">Timestamp</dt>
+                <dd className="font-mono">{shape.timestamp}</dd>
+              </>
+            )}
+          </dl>
+        )}
       </div>
     );
   }

@@ -1,4 +1,4 @@
-//go:generate go tool trpcgo generate -o ../web/gen/trpc.ts
+//go:generate go tool trpcgo generate -o ../web/gen/trpc.ts --zod ../web/gen/zod.ts
 
 package main
 
@@ -8,12 +8,18 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-playground/validator/v10"
 	"github.com/trpcgo/trpcgo"
 )
+
+type ctxKey int
+
+const contextKeyRequestID ctxKey = iota
 
 // Types — this is the source of truth for both Go and TypeScript.
 // The codegen tool reads these definitions and generates a TypeScript
@@ -102,35 +108,123 @@ type PaginatedList[T any] struct {
 }
 
 type GetUserByIdInput struct {
-	ID string `json:"id"`
+	ID string `json:"id" validate:"required"`
 }
 
 // CreateUserInput contains the fields needed to create a new user.
 type CreateUserInput struct {
 	// The user's display name.
-	Name string `json:"name"`
+	Name string `json:"name" validate:"required,min=1,max=100"`
 	// The user's email address.
-	Email Email `json:"email"`
+	Email Email `json:"email" validate:"required,email"`
 	// The role to assign. Defaults to "viewer" on the server.
-	Role Role `json:"role,omitempty"`
+	Role Role `json:"role,omitempty" validate:"omitempty,oneof=admin editor viewer"`
 	// Optional biography.
-	Bio *string `json:"bio,omitempty"`
+	Bio *string `json:"bio,omitempty" validate:"omitempty,max=500"`
 }
 
 // ListUsersInput provides pagination parameters.
 type ListUsersInput struct {
-	Page    int `json:"page"`
-	PerPage int `json:"perPage"`
+	Page    int `json:"page" validate:"required,min=1"`
+	PerPage int `json:"perPage" validate:"required,min=1,max=100"`
+}
+
+// HealthInfo is returned by the health check VoidQuery.
+type HealthInfo struct {
+	// Whether the service is operational.
+	OK bool `json:"ok"`
+	// How long the server has been running.
+	Uptime string `json:"uptime"`
+	// Number of registered users.
+	UserCount int `json:"userCount"`
+}
+
+// ResetResult is returned by the reset VoidMutation.
+type ResetResult struct {
+	// Confirmation message.
+	Message string `json:"message"`
+	// How many users exist after reset.
+	UserCount int `json:"userCount"`
+}
+
+// Middleware
+
+// requestTimer is a global middleware that logs how long each procedure takes.
+func requestTimer(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+	return func(ctx context.Context, input any) (any, error) {
+		meta, _ := trpcgo.GetProcedureMeta(ctx)
+		start := time.Now()
+		result, err := next(ctx, input)
+		log.Printf("[%s] %s took %s", meta.Type, meta.Path, time.Since(start))
+		return result, err
+	}
+}
+
+// logMutation is a per-procedure middleware that logs mutation inputs.
+func logMutation(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+	return func(ctx context.Context, input any) (any, error) {
+		meta, _ := trpcgo.GetProcedureMeta(ctx)
+		log.Printf("mutation %s called with %+v", meta.Path, input)
+		return next(ctx, input)
+	}
+}
+
+// requireRequestID is a per-procedure middleware that rejects calls without
+// an X-Request-ID header (set via WithContextCreator).
+func requireRequestID(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+	return func(ctx context.Context, input any) (any, error) {
+		if ctx.Value(contextKeyRequestID) == nil {
+			return nil, trpcgo.NewError(trpcgo.CodeBadRequest, "X-Request-ID header required")
+		}
+		return next(ctx, input)
+	}
 }
 
 // Handlers
 
 type userService struct {
-	users  []User
-	nextID int
+	mu       sync.RWMutex
+	users    []User
+	nextID   int
+	startedAt time.Time
+
+	// Subscription broadcast: listeners register a channel, CreateUser pushes to all.
+	subsMu sync.Mutex
+	subs   []chan User
+}
+
+func (s *userService) addSubscriber(ch chan User) {
+	s.subsMu.Lock()
+	s.subs = append(s.subs, ch)
+	s.subsMu.Unlock()
+}
+
+func (s *userService) removeSubscriber(ch chan User) {
+	s.subsMu.Lock()
+	for i, sub := range s.subs {
+		if sub == ch {
+			s.subs = append(s.subs[:i], s.subs[i+1:]...)
+			break
+		}
+	}
+	s.subsMu.Unlock()
+}
+
+func (s *userService) broadcast(user User) {
+	s.subsMu.Lock()
+	defer s.subsMu.Unlock()
+	for _, ch := range s.subs {
+		select {
+		case ch <- user:
+		default:
+			// Slow consumer, skip.
+		}
+	}
 }
 
 func (s *userService) GetUserById(ctx context.Context, input GetUserByIdInput) (User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, u := range s.users {
 		if u.ID == input.ID {
 			return u, nil
@@ -140,6 +234,8 @@ func (s *userService) GetUserById(ctx context.Context, input GetUserByIdInput) (
 }
 
 func (s *userService) ListUsers(ctx context.Context, input ListUsersInput) (PaginatedList[User], error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	total := len(s.users)
 	page := input.Page
 	perPage := input.PerPage
@@ -168,6 +264,19 @@ func (s *userService) ListUsers(ctx context.Context, input ListUsersInput) (Pagi
 }
 
 func (s *userService) CreateUser(ctx context.Context, input CreateUserInput) (User, error) {
+	user := s.insertUser(input)
+
+	// Broadcast to subscription listeners (outside the lock).
+	s.broadcast(user)
+
+	return user, nil
+}
+
+// insertUser holds the write lock for the minimum scope needed.
+func (s *userService) insertUser(input CreateUserInput) User {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.nextID++
 	now := time.Now()
 
@@ -197,7 +306,65 @@ func (s *userService) CreateUser(ctx context.Context, input CreateUserInput) (Us
 		},
 	}
 	s.users = append(s.users, user)
-	return user, nil
+	return user
+}
+
+// ServerHealth is a VoidQuery — no input required.
+func (s *userService) ServerHealth(ctx context.Context) (HealthInfo, error) {
+	s.mu.RLock()
+	count := len(s.users)
+	s.mu.RUnlock()
+	return HealthInfo{
+		OK:        true,
+		Uptime:    time.Since(s.startedAt).Round(time.Second).String(),
+		UserCount: count,
+	}, nil
+}
+
+// ResetDemo is a VoidMutation — no input, resets data to initial seed.
+// Uses Call internally to demonstrate the server-side caller.
+func (s *userService) ResetDemo(router *trpcgo.Router) func(ctx context.Context) (ResetResult, error) {
+	return func(ctx context.Context) (ResetResult, error) {
+		s.mu.Lock()
+		s.users = s.users[:0]
+		s.nextID = 0
+		s.mu.Unlock()
+
+		// Use the server-side caller (Call) to re-seed via the createUser procedure.
+		// This runs the full middleware chain including validation.
+		seedUsers := []CreateUserInput{
+			{Name: "Alice", Email: "alice@example.com", Role: RoleAdmin},
+			{Name: "Bob", Email: "bob@example.com", Role: RoleEditor},
+		}
+		for _, input := range seedUsers {
+			if _, err := trpcgo.Call[CreateUserInput, User](router, ctx, "user.createUser", input); err != nil {
+				return ResetResult{}, fmt.Errorf("seeding user %s: %w", input.Name, err)
+			}
+		}
+
+		s.mu.RLock()
+		count := len(s.users)
+		s.mu.RUnlock()
+
+		return ResetResult{
+			Message:   "Demo data reset to initial state",
+			UserCount: count,
+		}, nil
+	}
+}
+
+// OnUserCreated is a VoidSubscribe — streams new users as they are created.
+func (s *userService) OnUserCreated(ctx context.Context) (<-chan User, error) {
+	ch := make(chan User, 8)
+	s.addSubscriber(ch)
+
+	go func() {
+		<-ctx.Done()
+		s.removeSubscriber(ch)
+		close(ch)
+	}()
+
+	return ch, nil
 }
 
 func main() {
@@ -206,15 +373,16 @@ func main() {
 	bobAvatar := "https://api.dicebear.com/9.x/initials/svg?seed=Bob"
 
 	svc := &userService{
-		nextID: 2,
+		startedAt: time.Now(),
+		nextID:    2,
 		users: []User{
 			{
-				ID:     "1",
-				Name:   "Alice",
-				Email:  "alice@example.com",
-				Role:   RoleAdmin,
-				Status: StatusActive,
-				Bio:    &aliceBio,
+				ID:        "1",
+				Name:      "Alice",
+				Email:     "alice@example.com",
+				Role:      RoleAdmin,
+				Status:    StatusActive,
+				Bio:       &aliceBio,
 				AvatarURL: &aliceAvatar,
 				Preferences: map[string]any{
 					"theme":         "dark",
@@ -253,17 +421,64 @@ func main() {
 		},
 	}
 
+	validate := validator.New()
+
 	router := trpcgo.NewRouter(
 		trpcgo.WithBatching(true),
+		trpcgo.WithDev(true),
+		trpcgo.WithMethodOverride(true),
+		trpcgo.WithValidator(validate.Struct),
 		trpcgo.WithTypeOutput("../web/gen/trpc.ts"),
+		trpcgo.WithZodOutput("../web/gen/zod.ts"),
+		trpcgo.WithSSEPingInterval(5*time.Second),
+		trpcgo.WithSSEMaxDuration(10*time.Minute),
+		trpcgo.WithSSEReconnectAfterInactivity(30*time.Second),
+		trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+			return map[string]any{
+				"error": map[string]any{
+					"code":      input.Shape.Error.Code,
+					"message":   input.Shape.Error.Message,
+					"data":      input.Shape.Error.Data,
+					"timestamp": time.Now().UTC().Format(time.RFC3339),
+				},
+			}
+		}),
+		trpcgo.WithContextCreator(func(r *http.Request) context.Context {
+			ctx := r.Context()
+			reqID := r.Header.Get("X-Request-ID")
+			if reqID != "" {
+				ctx = context.WithValue(ctx, contextKeyRequestID, reqID)
+			}
+			return ctx
+		}),
 		trpcgo.WithOnError(func(ctx context.Context, err *trpcgo.Error, path string) {
 			log.Printf("tRPC error on %q: %v", path, err)
 		}),
 	)
 
+	// Global middleware: runs on every procedure.
+	router.Use(requestTimer)
+
+	// Queries
 	trpcgo.Query(router, "user.getUserById", svc.GetUserById)
 	trpcgo.Query(router, "user.listUsers", svc.ListUsers)
-	trpcgo.Mutation(router, "user.createUser", svc.CreateUser)
+
+	// VoidQuery — no input
+	trpcgo.VoidQuery(router, "system.health", svc.ServerHealth)
+
+	// Mutation with per-procedure middleware (Use) and metadata (WithMeta)
+	trpcgo.Mutation(router, "user.createUser", svc.CreateUser,
+		trpcgo.Use(logMutation),
+		trpcgo.WithMeta(map[string]string{"action": "write"}),
+	)
+
+	// VoidMutation — no input, uses Call internally for server-side caller demo
+	trpcgo.VoidMutation(router, "system.resetDemo", svc.ResetDemo(router),
+		trpcgo.Use(requireRequestID),
+	)
+
+	// VoidSubscribe — SSE subscription, streams new users in real-time
+	trpcgo.VoidSubscribe(router, "user.onCreated", svc.OnUserCreated)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -274,7 +489,7 @@ func main() {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
 			if r.Method == "OPTIONS" {
 				w.WriteHeader(204)
 				return

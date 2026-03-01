@@ -19,6 +19,16 @@ export interface GetUserByIdInput {
   id: string;
 }
 
+/** HealthInfo is returned by the health check VoidQuery. */
+export interface HealthInfo {
+  /** Whether the service is operational. */
+  ok: boolean;
+  /** How long the server has been running. */
+  uptime: string;
+  /** Number of registered users. */
+  userCount: number;
+}
+
 /** ListUsersInput provides pagination parameters. */
 export interface ListUsersInput {
   page: number;
@@ -35,6 +45,14 @@ export interface PaginatedList<T> {
   page: number;
   /** Number of items per page. */
   perPage: number;
+}
+
+/** ResetResult is returned by the reset VoidMutation. */
+export interface ResetResult {
+  /** Confirmation message. */
+  message: string;
+  /** How many users exist after reset. */
+  userCount: number;
 }
 
 /** Role represents a user's permission level. */
@@ -88,10 +106,15 @@ type $Subscription<TInput, TOutput> = $Procedure<"subscription", TInput, TOutput
 
 // Router record matching tRPC's internal structure
 type AppRouterRecord = {
+  system: {
+    health: $Query<void, HealthInfo>;
+    resetDemo: $Mutation<void, ResetResult>;
+  };
   user: {
     createUser: $Mutation<CreateUserInput, User>;
     getUserById: $Query<GetUserByIdInput, User>;
     listUsers: $Query<ListUsersInput, PaginatedList<User>>;
+    onCreated: $Subscription<void, User>;
   };
 };
 
@@ -121,4 +144,30 @@ export type AppRouter = {
     lazy: Record<string, never>;
   };
   createCaller: any;
+};
+
+export type RouterInputs = {
+  system: {
+    health: void;
+    resetDemo: void;
+  };
+  user: {
+    createUser: CreateUserInput;
+    getUserById: GetUserByIdInput;
+    listUsers: ListUsersInput;
+    onCreated: void;
+  };
+};
+
+export type RouterOutputs = {
+  system: {
+    health: HealthInfo;
+    resetDemo: ResetResult;
+  };
+  user: {
+    createUser: User;
+    getUserById: User;
+    listUsers: PaginatedList<User>;
+    onCreated: User;
+  };
 };
