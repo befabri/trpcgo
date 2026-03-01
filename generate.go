@@ -40,7 +40,6 @@ func (r *Router) GenerateTS(outputPath string) error {
 // convertProcedures converts reflect-based procedure registrations to
 // codegen ProcEntry and typemap TypeDef slices.
 func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
-	// Collect procedures sorted by path.
 	type procInfo struct {
 		path       string
 		typ        ProcedureType
@@ -56,7 +55,6 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 	}
 	sort.Slice(procs, func(i, j int) bool { return procs[i].path < procs[j].path })
 
-	// Collect interface definitions via reflect-based conversion.
 	defs := map[string]*reflectDef{}
 
 	var entries []codegen.ProcEntry
@@ -85,15 +83,20 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 	for i, d := range sortedDefs {
 		fields := make([]typemap.Field, len(d.fields))
 		for j, f := range d.fields {
-			fields[j] = typemap.Field{Name: f.name, Type: f.tsType, Optional: f.optional}
+			fields[j] = typemap.Field{
+				Name:     f.name,
+				Type:     f.tsType,
+				Optional: f.optional,
+				Readonly: f.readonly,
+				Required: f.required,
+			}
 		}
-		typeDefs[i] = typemap.TypeDef{Name: d.name, Fields: fields}
+		typeDefs[i] = typemap.TypeDef{Name: d.name, Kind: typemap.TypeDefInterface, Fields: fields}
 	}
 
 	return entries, typeDefs
 }
 
-// reflectDef is a collected TypeScript interface definition from reflect types.
 type reflectDef struct {
 	name   string
 	fields []reflectField
@@ -103,14 +106,18 @@ type reflectField struct {
 	name     string
 	tsType   string
 	optional bool
+	readonly bool
+	required bool
 }
 
-// goTypeToTS converts a reflect.Type to its TypeScript representation,
-// collecting struct definitions into defs as a side effect.
 func goTypeToTS(t reflect.Type, defs map[string]*reflectDef) string {
-	// Unwrap pointer.
 	for t.Kind() == reflect.Ptr {
 		t = t.Elem()
+	}
+
+	// Well-known types that need special handling regardless of Kind.
+	if t.PkgPath() == "encoding/json" && t.Name() == "RawMessage" {
+		return "unknown"
 	}
 
 	switch t.Kind() {
@@ -124,7 +131,6 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef) string {
 		return "number"
 
 	case reflect.Slice:
-		// []byte → base64 string in JSON.
 		if t.Elem().Kind() == reflect.Uint8 {
 			return "string"
 		}
@@ -144,14 +150,12 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef) string {
 
 	case reflect.Struct:
 		name := t.Name()
-		// time.Time → string.
 		if t.PkgPath() == "time" && name == "Time" {
 			return "string"
 		}
 		if name == "" {
 			return inlineStructTS(t, defs)
 		}
-		// Use PkgPath+Name as key to avoid collisions across packages.
 		key := t.PkgPath() + "." + name
 		if _, ok := defs[key]; !ok {
 			resolveStructTS(t, defs)
@@ -169,7 +173,6 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef) string {
 func resolveStructTS(t reflect.Type, defs map[string]*reflectDef) {
 	name := t.Name()
 	key := t.PkgPath() + "." + name
-	// Prevent infinite recursion.
 	defs[key] = &reflectDef{name: name}
 
 	var fields []reflectField
@@ -181,12 +184,16 @@ func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]refl
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 
-		tag := f.Tag.Get("json")
-		if tag == "-" {
+		jsonName, omitempty, skip := typemap.ParseJSONTag(string(f.Tag))
+		if skip {
 			continue
 		}
 
-		jsonName, omitempty := parseJSONFieldTag(tag)
+		// Check tstype tag for skip.
+		tstag, hasTSTag := typemap.ParseTSTypeTag(string(f.Tag))
+		if hasTSTag && tstag.Type == "-" {
+			continue
+		}
 
 		// Embedded struct: flatten fields.
 		if f.Anonymous && jsonName == "" {
@@ -211,7 +218,21 @@ func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]refl
 		tsType := goTypeToTS(f.Type, defs)
 		optional := omitempty || f.Type.Kind() == reflect.Ptr
 
-		*fields = append(*fields, reflectField{name: jsonName, tsType: tsType, optional: optional})
+		rf := reflectField{name: jsonName, tsType: tsType, optional: optional}
+
+		// Apply tstype tag overrides.
+		if hasTSTag {
+			if tstag.Type != "" {
+				rf.tsType = tstag.Type
+			}
+			rf.readonly = tstag.Readonly
+			if tstag.Required {
+				rf.required = true
+				rf.optional = false
+			}
+		}
+
+		*fields = append(*fields, rf)
 	}
 }
 
@@ -225,20 +246,33 @@ func inlineStructTS(t reflect.Type, defs map[string]*reflectDef) string {
 		if !f.IsExported() {
 			continue
 		}
-		tag := f.Tag.Get("json")
-		if tag == "-" {
+		jsonName, omitempty, skip := typemap.ParseJSONTag(string(f.Tag))
+		if skip {
 			continue
 		}
-		jsonName, omitempty := parseJSONFieldTag(tag)
+		tstag, hasTSTag := typemap.ParseTSTypeTag(string(f.Tag))
+		if hasTSTag && tstag.Type == "-" {
+			continue
+		}
 		if jsonName == "" {
 			jsonName = f.Name
 		}
 		tsType := goTypeToTS(f.Type, defs)
+		if hasTSTag && tstag.Type != "" {
+			tsType = tstag.Type
+		}
 		opt := ""
 		if omitempty || f.Type.Kind() == reflect.Ptr {
 			opt = "?"
 		}
-		parts = append(parts, fmt.Sprintf("%s%s: %s", jsonName, opt, tsType))
+		if hasTSTag && tstag.Required {
+			opt = ""
+		}
+		prefix := ""
+		if hasTSTag && tstag.Readonly {
+			prefix = "readonly "
+		}
+		parts = append(parts, fmt.Sprintf("%s%s%s: %s", prefix, jsonName, opt, tsType))
 	}
 	if len(parts) == 0 {
 		return "Record<string, never>"
@@ -246,16 +280,3 @@ func inlineStructTS(t reflect.Type, defs map[string]*reflectDef) string {
 	return "{ " + strings.Join(parts, "; ") + " }"
 }
 
-func parseJSONFieldTag(tag string) (name string, omitempty bool) {
-	if tag == "" {
-		return "", false
-	}
-	parts := strings.Split(tag, ",")
-	name = parts[0]
-	for _, p := range parts[1:] {
-		if p == "omitempty" {
-			omitempty = true
-		}
-	}
-	return name, omitempty
-}
