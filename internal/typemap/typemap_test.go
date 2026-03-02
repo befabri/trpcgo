@@ -314,9 +314,9 @@ func TestParseValidateTag(t *testing.T) {
 
 func TestZodTypeString(t *testing.T) {
 	tests := []struct {
-		name string
+		name  string
 		field Field
-		want string
+		want  string
 	}{
 		{
 			name: "email validate produces z.email()",
@@ -517,13 +517,13 @@ func TestCollisionInFieldRef(t *testing.T) {
 
 	// Convert a slice of auth.User — should produce "AuthUser[]" after resolution.
 	sliceType := types.NewSlice(authUser)
-	resolved := m.Resolve(m.Convert(sliceType))
+	m.Resolve(m.Convert(sliceType))
 
 	// Also convert models.User to trigger collision.
 	m.Convert(modelsUser)
 
 	// Re-resolve after both are known.
-	resolved = m.Resolve(m.Convert(sliceType))
+	resolved := m.Resolve(m.Convert(sliceType))
 	if resolved != "AuthUser[]" {
 		t.Errorf("Resolve(Convert([]auth.User)) = %q, want %q", resolved, "AuthUser[]")
 	}

@@ -39,9 +39,9 @@ func ParseValidateTag(rawTag string) []ValidateRule {
 			continue
 		}
 		rule := ValidateRule{}
-		if idx := strings.IndexByte(p, '='); idx >= 0 {
-			rule.Tag = p[:idx]
-			rule.Param = p[idx+1:]
+		if before, after, ok := strings.Cut(p, "="); ok {
+			rule.Tag = before
+			rule.Param = after
 		} else {
 			rule.Tag = p
 		}

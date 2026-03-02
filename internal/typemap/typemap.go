@@ -20,9 +20,9 @@ const (
 
 // TypeDef represents a top-level TypeScript type declaration.
 type TypeDef struct {
-	ID       string // fully-qualified: "github.com/foo/models.User"
-	PkgPath  string // "github.com/foo/models"
-	PkgName  string // "models"
+	ID           string // fully-qualified: "github.com/foo/models.User"
+	PkgPath      string // "github.com/foo/models"
+	PkgName      string // "models"
 	Name         string
 	Kind         TypeDefKind
 	Comment      string   // Go doc comment → JSDoc
@@ -36,7 +36,7 @@ type TypeDef struct {
 type Field struct {
 	Name              string
 	Type              string
-	GoKind            string         // Go kind for Zod: "string", "int", "int32", "float64", etc.
+	GoKind            string // Go kind for Zod: "string", "int", "int32", "float64", etc.
 	Optional          bool
 	Readonly          bool           // from tstype:",readonly"
 	Required          bool           // from tstype:",required" (overrides optional)
@@ -49,11 +49,11 @@ type Field struct {
 
 // Mapper converts Go types to TypeScript type strings and collects interface definitions.
 type Mapper struct {
-	defs     map[string]TypeDef   // key = TypeID (fully-qualified)
-	seen     map[string]bool      // key = TypeID (fully-qualified)
-	names    map[string]string    // TypeID → short name (for display name resolution)
-	metas    map[string]TypeMeta  // AST metadata keyed by TypeID
-	resolved map[string]string    // cached: TypeID → display name
+	defs     map[string]TypeDef  // key = TypeID (fully-qualified)
+	seen     map[string]bool     // key = TypeID (fully-qualified)
+	names    map[string]string   // TypeID → short name (for display name resolution)
+	metas    map[string]TypeMeta // AST metadata keyed by TypeID
+	resolved map[string]string   // cached: TypeID → display name
 }
 
 // TypeID returns a fully-qualified identifier for a types.Object.
@@ -226,8 +226,8 @@ func (m *Mapper) convert(t types.Type) string {
 			// Generic instantiation: Foo[string, int] → Foo<string, number>
 			if t.TypeArgs() != nil && t.TypeArgs().Len() > 0 {
 				var args []string
-				for i := 0; i < t.TypeArgs().Len(); i++ {
-					args = append(args, m.convert(t.TypeArgs().At(i)))
+				for t0 := range t.TypeArgs().Types() {
+					args = append(args, m.convert(t0))
 				}
 				originID := TypeID(t.Origin().Obj())
 				m.resolveGenericStruct(originID, name, t.Origin())
@@ -356,8 +356,8 @@ func (m *Mapper) resolveGenericStruct(id, name string, named *types.Named) {
 	m.seen[id] = true
 
 	var params []string
-	for i := 0; i < named.TypeParams().Len(); i++ {
-		params = append(params, named.TypeParams().At(i).Obj().Name())
+	for tparam := range named.TypeParams().TypeParams() {
+		params = append(params, tparam.Obj().Name())
 	}
 
 	st := named.Underlying().(*types.Struct)

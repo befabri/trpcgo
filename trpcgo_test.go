@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -106,7 +107,7 @@ func mustRequest(t *testing.T, server *httptest.Server, method, path string) *ht
 // decodeJSON reads the response body and returns it as a generic map.
 func decodeJSON(t *testing.T, resp *http.Response) map[string]any {
 	t.Helper()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
@@ -121,7 +122,7 @@ func decodeJSON(t *testing.T, resp *http.Response) map[string]any {
 // decodeJSONArray reads the response body as a JSON array.
 func decodeJSONArray(t *testing.T, resp *http.Response) []map[string]any {
 	t.Helper()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
@@ -212,7 +213,7 @@ func TestQuery(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			resp := mustGet(t, server, tt.path)
 			if resp.StatusCode != tt.wantStatus {
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
 			}
 
@@ -234,7 +235,7 @@ func TestQueryWithInput(t *testing.T) {
 	input := url.QueryEscape(`{"id":"42"}`)
 	resp := mustGet(t, server, "/trpc/user.getById?input="+input)
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
@@ -267,7 +268,7 @@ func TestMutation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			resp := mustPost(t, server, "/trpc/user.create", tt.body)
 			if resp.StatusCode != tt.wantStatus {
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
 			}
 
@@ -318,7 +319,7 @@ func TestMethodValidation(t *testing.T) {
 			default:
 				resp = mustRequest(t, server, tt.method, tt.path)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			if resp.StatusCode != tt.wantStatus {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
@@ -337,7 +338,7 @@ func TestMethodOverride(t *testing.T) {
 	// POST to a query should succeed with method override
 	resp := mustPost(t, server, "/trpc/hello", "")
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 200 (method override enabled)", resp.StatusCode)
 	}
 
@@ -393,7 +394,7 @@ func TestErrorResponse(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			resp := mustGet(t, server, tt.path)
 			if resp.StatusCode != tt.wantStatus {
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
 			}
 
@@ -451,7 +452,7 @@ func TestNonTRPCErrorWrappedAs500(t *testing.T) {
 
 	resp := mustGet(t, server, "/trpc/fail")
 	if resp.StatusCode != 500 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 500 for non-trpc error", resp.StatusCode)
 	}
 
@@ -469,7 +470,7 @@ func TestBatchGET(t *testing.T) {
 	input := url.QueryEscape(`{"0":{"id":"1"},"1":{"id":"2"}}`)
 	resp := mustGet(t, server, "/trpc/user.getById,user.getById?batch=1&input="+input)
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
@@ -492,7 +493,7 @@ func TestBatchPOST(t *testing.T) {
 
 	resp := mustPost(t, server, "/trpc/user.create,user.create?batch=1", `{"0":{"name":"Alice"},"1":{"name":"Bob"}}`)
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
@@ -517,7 +518,7 @@ func TestBatchMixedStatus(t *testing.T) {
 	input := url.QueryEscape(`{"0":{"id":"1"},"1":{"id":"404"}}`)
 	resp := mustGet(t, server, "/trpc/user.getById,user.getById?batch=1&input="+input)
 	if resp.StatusCode != 207 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 207 (Multi-Status)", resp.StatusCode)
 	}
 
@@ -540,7 +541,7 @@ func TestBatchAllSameError(t *testing.T) {
 	input := url.QueryEscape(`{"0":{"id":"404"},"1":{"id":"404"}}`)
 	resp := mustGet(t, server, "/trpc/user.getById,user.getById?batch=1&input="+input)
 	if resp.StatusCode != 404 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 404 (all same error → unified status, not 207)", resp.StatusCode)
 	}
 }
@@ -551,7 +552,7 @@ func TestBatchDifferentProcedures(t *testing.T) {
 	input := url.QueryEscape(`{"0":{},"1":{"id":"5"}}`)
 	resp := mustGet(t, server, "/trpc/hello,user.getById?batch=1&input="+input)
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
@@ -575,7 +576,7 @@ func TestBatchWithNotFoundProcedure(t *testing.T) {
 	input := url.QueryEscape(`{"0":{},"1":{}}`)
 	resp := mustGet(t, server, "/trpc/hello,nonexistent?batch=1&input="+input)
 	if resp.StatusCode != 207 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 207", resp.StatusCode)
 	}
 
@@ -598,7 +599,7 @@ func TestBatchDisabled(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/hello,hello?batch=1")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400 (batching disabled)", resp.StatusCode)
 	}
@@ -636,7 +637,7 @@ func TestMiddlewareOrdering(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/test")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -670,7 +671,7 @@ func TestMiddlewareShortCircuit(t *testing.T) {
 
 	resp := mustGet(t, server, "/trpc/secret")
 	if resp.StatusCode != 401 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
 
@@ -700,7 +701,7 @@ func TestMiddlewareContextPropagation(t *testing.T) {
 
 	resp := mustGet(t, server, "/trpc/whoami")
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	if got := resultScalar(t, decodeJSON(t, resp)); got != "admin" {
@@ -728,7 +729,7 @@ func TestOnErrorCallback(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/fail")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -752,7 +753,7 @@ func TestOnErrorNotCalledOnSuccess(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/ok")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if called {
 		t.Error("onError should not be called when procedure succeeds")
@@ -775,7 +776,7 @@ func TestCustomContextCreator(t *testing.T) {
 
 	resp := mustGet(t, server, "/trpc/reqid")
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	if got := resultScalar(t, decodeJSON(t, resp)); got != "req-42" {
@@ -824,7 +825,7 @@ func TestContextCreatorCancellationPropagation(t *testing.T) {
 		}
 	}
 	// Close = client disconnect.
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// The subscription goroutine should be cancelled promptly.
 	select {
@@ -846,7 +847,7 @@ func TestNoBasePath(t *testing.T) {
 
 	resp := mustGet(t, server, "/hello")
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	if got := resultScalar(t, decodeJSON(t, resp)); got != "hi" {
@@ -863,7 +864,7 @@ func TestDeepNestedProcedure(t *testing.T) {
 
 	resp := mustGet(t, server, "/trpc/a.b.c.d.deep")
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	if got := resultScalar(t, decodeJSON(t, resp)); got != "found" {
@@ -885,7 +886,7 @@ func TestContentType(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resp := mustGet(t, server, tt.path)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			ct := resp.Header.Get("Content-Type")
 			if ct != "application/json" {
 				t.Fatalf("Content-Type = %q, want application/json", ct)
@@ -911,7 +912,7 @@ func TestConcurrentRequests(t *testing.T) {
 				failures.Add(1)
 				return
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			if resp.StatusCode != 200 {
 				failures.Add(1)
@@ -1099,7 +1100,7 @@ func TestSubscriptionSSE(t *testing.T) {
 
 	input := url.QueryEscape(`{"count":3}`)
 	resp := mustGet(t, server, "/trpc/counter?input="+input)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -1149,7 +1150,7 @@ func TestSubscriptionVoidStream(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/ticks")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	events := parseSSEEvents(t, resp, 4) // connected + 2 messages + return
 	if len(events) < 4 {
@@ -1173,7 +1174,7 @@ func TestSubscriptionError(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/fail")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Should get a regular JSON error, not SSE
 	if resp.StatusCode != 401 {
@@ -1196,7 +1197,7 @@ func TestSubscriptionCannotBeBatched(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/stream,hello?batch=1&input="+url.QueryEscape(`{"0":{},"1":{}}`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400 (subscriptions cannot be batched)", resp.StatusCode)
@@ -1219,7 +1220,7 @@ func TestSubscriptionPing(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/slow")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Should see: connected, ping(s), message, return
 	events := parseSSEEvents(t, resp, 10)
@@ -1238,8 +1239,8 @@ func TestSubscriptionPing(t *testing.T) {
 
 func TestSubscriptionMaxDuration(t *testing.T) {
 	router := trpcgo.NewRouter(
-		trpcgo.WithSSEMaxDuration(500 * time.Millisecond),
-		trpcgo.WithSSEPingInterval(100 * time.Millisecond),
+		trpcgo.WithSSEMaxDuration(500*time.Millisecond),
+		trpcgo.WithSSEPingInterval(100*time.Millisecond),
 	)
 
 	// Stream that never closes on its own — only maxDuration can stop it.
@@ -1269,7 +1270,7 @@ func TestSubscriptionMaxDuration(t *testing.T) {
 
 	start := time.Now()
 	resp := mustGet(t, server, "/trpc/forever")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -1332,7 +1333,7 @@ func TestSubscriptionTrackedEvents(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/items")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// connected + 2 tracked messages + return = 4 events
 	events := parseSSEEvents(t, resp, 4)
@@ -1388,7 +1389,7 @@ func TestSubscriptionUntrackedEventsHaveNoID(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/plain")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	events := parseSSEEvents(t, resp, 4)
 	if len(events) < 4 {
@@ -1421,7 +1422,7 @@ func TestSubscriptionWireFormat(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/single")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Read all raw lines.
 	var lines []string
@@ -1438,13 +1439,7 @@ func TestSubscriptionWireFormat(t *testing.T) {
 	}
 
 	// Must contain "data: 42" (the actual data).
-	hasData := false
-	for _, line := range lines {
-		if line == "data: 42" {
-			hasData = true
-			break
-		}
-	}
+	hasData := slices.Contains(lines, "data: 42")
 	if !hasData {
 		t.Errorf("missing 'data: 42' line in output:\n%s", strings.Join(lines, "\n"))
 	}
@@ -1482,7 +1477,7 @@ func TestSubscriptionConnectedEventData(t *testing.T) {
 
 		server := newTestServer(t, router.Handler("/trpc"))
 		resp := mustGet(t, server, "/trpc/stream")
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		events := parseSSEEvents(t, resp, 2)
 		if len(events) == 0 || events[0].event != "connected" {
@@ -1511,7 +1506,7 @@ func TestSubscriptionConnectedEventData(t *testing.T) {
 
 		server := newTestServer(t, router.Handler("/trpc"))
 		resp := mustGet(t, server, "/trpc/stream")
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		events := parseSSEEvents(t, resp, 2)
 		if len(events) == 0 || events[0].event != "connected" {
@@ -1548,7 +1543,7 @@ func TestSubscriptionTrackedSerializationError(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/bad")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	events := parseSSEEvents(t, resp, 3)
 
@@ -1954,7 +1949,7 @@ func TestMaxBodySizeEnforced(t *testing.T) {
 	t.Run("within limit succeeds", func(t *testing.T) {
 		resp := mustPost(t, server, "/trpc/echo", `{"data":"hi"}`)
 		if resp.StatusCode != 200 {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			t.Fatalf("status = %d, want 200", resp.StatusCode)
 		}
 		got := resultScalar(t, decodeJSON(t, resp))
@@ -1967,7 +1962,7 @@ func TestMaxBodySizeEnforced(t *testing.T) {
 		largeBody := `{"data":"` + strings.Repeat("x", 100) + `"}`
 		resp := mustPost(t, server, "/trpc/echo", largeBody)
 		if resp.StatusCode != 413 {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			t.Fatalf("status = %d, want 413", resp.StatusCode)
 		}
 		ed := errorData(t, decodeJSON(t, resp))
@@ -1984,10 +1979,10 @@ func TestMaxBodySizeEnforced(t *testing.T) {
 		}
 		resp := mustPost(t, server, "/trpc/echo", body)
 		if resp.StatusCode != 200 {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			t.Fatalf("body at limit: status = %d, want 200 (body len=%d)", resp.StatusCode, len(body))
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	})
 }
 
@@ -2029,7 +2024,7 @@ func TestInternalErrorNotLeaked(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/fail")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 500 {
 		t.Fatalf("status = %d, want 500", resp.StatusCode)
@@ -2126,11 +2121,11 @@ func lastEventIdSubscription(r *trpcgo.Router) <-chan string {
 
 func TestLastEventId(t *testing.T) {
 	tests := []struct {
-		name    string
-		header  string            // Last-Event-Id header value (empty = don't set)
-		query   map[string]string // extra query params
-		input   string            // input query param (JSON, empty = none)
-		wantID  string
+		name   string
+		header string            // Last-Event-Id header value (empty = don't set)
+		query  map[string]string // extra query params
+		input  string            // input query param (JSON, empty = none)
+		wantID string
 	}{
 		{
 			name:   "from header",
@@ -2191,7 +2186,7 @@ func TestLastEventId(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			// Read the captured ID (race-free via channel).
 			id := <-gotID
@@ -2231,7 +2226,7 @@ func TestLastEventIdNotMergedForQueries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// The decoded input is GetUserInput — marshal to JSON to verify no lastEventId.
 	data, _ := json.Marshal(capturedInput)
@@ -2345,7 +2340,7 @@ func TestJSONLBatchResponse(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			if resp.StatusCode != 200 {
 				t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -2392,7 +2387,7 @@ func TestJSONLBatchHeadFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	head, _ := parseJSONLResponse(t, resp)
 
@@ -2435,7 +2430,7 @@ func TestJSONLBatchVaryHeader(t *testing.T) {
 	// Standard batch (no JSONL) should also have Vary header.
 	input := url.QueryEscape(`{"0":{"id":"1"}}`)
 	resp := mustGet(t, server, "/trpc/user.getById?batch=1&input="+input)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if vary := resp.Header.Get("Vary"); vary != "trpc-accept" {
 		t.Errorf("Vary = %q, want trpc-accept", vary)
@@ -2453,7 +2448,7 @@ func TestJSONLBatchWithErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Errorf("JSONL status = %d, want 200 (always 200 for JSONL)", resp.StatusCode)
@@ -2506,7 +2501,7 @@ func TestJSONLBatchConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	_, chunks := parseJSONLResponse(t, resp)
 	if len(chunks) != 2 {
@@ -2561,7 +2556,7 @@ func TestProcedureMeta(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/hello")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if gotMeta.Path != "hello" {
 		t.Errorf("ProcedureMeta.Path = %q, want %q", gotMeta.Path, "hello")
@@ -2596,7 +2591,7 @@ func TestProcedureMetaNil(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/hello")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if gotMeta.Meta != nil {
 		t.Errorf("ProcedureMeta.Meta = %v, want nil", gotMeta.Meta)
@@ -2624,7 +2619,7 @@ func TestProcedureMetaMutation(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustPost(t, server, "/trpc/user.create", `{"name":"Bob"}`)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if gotType != trpcgo.ProcedureMutation {
 		t.Errorf("ProcedureMeta.Type = %q, want %q", gotType, trpcgo.ProcedureMutation)
@@ -2653,7 +2648,7 @@ func TestErrorFormatter(t *testing.T) {
 
 	resp := mustGet(t, server, "/trpc/fail")
 	if resp.StatusCode != 400 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
 
@@ -2691,7 +2686,7 @@ func TestErrorFormatterReceivesContext(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/fail")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if gotVal != "acme" {
 		t.Errorf("error formatter ctx value = %q, want %q", gotVal, "acme")
@@ -2712,7 +2707,7 @@ func TestErrorFormatterNotFound(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/nonexistent")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if gotPath != "nonexistent" {
 		t.Errorf("formatter path = %q, want %q", gotPath, "nonexistent")
@@ -2737,7 +2732,7 @@ func TestMergeRouters(t *testing.T) {
 
 	resp1 := mustGet(t, server, "/trpc/hello")
 	if resp1.StatusCode != 200 {
-		resp1.Body.Close()
+		_ = resp1.Body.Close()
 		t.Fatalf("hello: status = %d, want 200", resp1.StatusCode)
 	}
 	if got := resultScalar(t, decodeJSON(t, resp1)); got != "hello" {
@@ -2746,7 +2741,7 @@ func TestMergeRouters(t *testing.T) {
 
 	resp2 := mustGet(t, server, "/trpc/world")
 	if resp2.StatusCode != 200 {
-		resp2.Body.Close()
+		_ = resp2.Body.Close()
 		t.Fatalf("world: status = %d, want 200", resp2.StatusCode)
 	}
 	if got := resultScalar(t, decodeJSON(t, resp2)); got != "world" {
@@ -2795,7 +2790,7 @@ func TestRouterMergeMethod(t *testing.T) {
 	// sub procedure accessible
 	resp := mustGet(t, server, "/trpc/sub.hello")
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	if got := resultScalar(t, decodeJSON(t, resp)); got != "from sub" {
@@ -2805,7 +2800,7 @@ func TestRouterMergeMethod(t *testing.T) {
 	// main options (method override) apply to merged procedures
 	resp2 := mustPost(t, server, "/trpc/sub.hello", "")
 	if resp2.StatusCode != 200 {
-		resp2.Body.Close()
+		_ = resp2.Body.Close()
 		t.Fatalf("method override status = %d, want 200", resp2.StatusCode)
 	}
 }
@@ -2837,7 +2832,7 @@ func TestMergeRoutersWithGlobalMiddleware(t *testing.T) {
 	server := newTestServer(t, merged.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/a")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if len(calls) != 2 || calls[0] != "global-mw" || calls[1] != "handler-a" {
 		t.Errorf("calls = %v, want [global-mw, handler-a]", calls)
@@ -3020,7 +3015,7 @@ func TestProcedureMetaAccessibleInHandler(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/check")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if gotMeta.Path != "check" {
 		t.Errorf("Path = %q, want %q", gotMeta.Path, "check")
@@ -3056,7 +3051,7 @@ func TestProcedureMetaSubscriptionType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request error: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if gotType != trpcgo.ProcedureSubscription {
 		t.Errorf("ProcedureMeta.Type = %q, want %q", gotType, trpcgo.ProcedureSubscription)
@@ -3085,7 +3080,7 @@ func TestProcedureOptionUsePlusWithMeta(t *testing.T) {
 	server := newTestServer(t, router.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/both")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if !mwCalled {
 		t.Error("per-procedure middleware was not called")
@@ -3124,7 +3119,7 @@ func TestProcedureMetaIsolationInBatch(t *testing.T) {
 
 	// Batch request requires ?batch=1
 	resp := mustGet(t, server, "/trpc/a,b?batch=1")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -3150,7 +3145,7 @@ func TestErrorFormatterReceivesProcedureType(t *testing.T) {
 
 	server := newTestServer(t, router.Handler("/trpc"))
 	resp := mustPost(t, server, "/trpc/fail", `{}`)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if gotType != trpcgo.ProcedureMutation {
 		t.Errorf("ErrorFormatterInput.Type = %q, want %q", gotType, trpcgo.ProcedureMutation)
@@ -3172,7 +3167,7 @@ func TestErrorFormatterOnInternalError(t *testing.T) {
 
 	server := newTestServer(t, router.Handler("/trpc"))
 	resp := mustGet(t, server, "/trpc/panic-ish")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode != 500 {
 		t.Errorf("status = %d, want 500", resp.StatusCode)
@@ -3204,7 +3199,7 @@ func TestErrorFormatterInBatchResponse(t *testing.T) {
 
 	// Batch: ok + fail
 	resp := mustGet(t, server, "/trpc/ok,fail")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if callCount.Load() != 1 {
 		t.Errorf("formatter called %d times, want 1 (only for the failing procedure)", callCount.Load())
@@ -3240,7 +3235,7 @@ func TestErrorFormatterSSESerializedError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request error: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	bodyStr := string(body)
@@ -3271,7 +3266,7 @@ func TestMergePreservesPerProcMiddleware(t *testing.T) {
 
 	server := newTestServer(t, main.Handler("/trpc"))
 	resp := mustGet(t, server, "/trpc/guarded")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if !mwCalled {
 		t.Error("per-procedure middleware from source router was not preserved after merge")
@@ -3293,7 +3288,7 @@ func TestMergePreservesMeta(t *testing.T) {
 
 	server := newTestServer(t, main.Handler("/trpc"))
 	resp := mustGet(t, server, "/trpc/tagged")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if gotMeta != "preserved" {
 		t.Errorf("meta after merge = %v, want %q", gotMeta, "preserved")
@@ -3308,7 +3303,7 @@ func TestMergeEmptyRouters(t *testing.T) {
 	server := newTestServer(t, merged.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/anything")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode != 404 {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
@@ -3456,7 +3451,7 @@ func TestValidatorRejectsInvalidInput(t *testing.T) {
 	input := url.QueryEscape(`{"name":""}`)
 	resp := mustGet(t, server, "/trpc/greet?input="+input)
 	if resp.StatusCode != 400 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
 
@@ -3487,7 +3482,7 @@ func TestValidatorAcceptsValidInput(t *testing.T) {
 	input := url.QueryEscape(`{"name":"Alice"}`)
 	resp := mustGet(t, server, "/trpc/greet?input="+input)
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
@@ -3511,7 +3506,7 @@ func TestValidatorMinMax(t *testing.T) {
 		input := url.QueryEscape(`{"username":"ab"}`)
 		resp := mustGet(t, server, "/trpc/checkUsername?input="+input)
 		if resp.StatusCode != 400 {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			t.Fatalf("status = %d, want 400 for username below min length", resp.StatusCode)
 		}
 
@@ -3527,7 +3522,7 @@ func TestValidatorMinMax(t *testing.T) {
 		input := url.QueryEscape(`{"username":"alice"}`)
 		resp := mustGet(t, server, "/trpc/checkUsername?input="+input)
 		if resp.StatusCode != 200 {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			t.Fatalf("status = %d, want 200 for valid username", resp.StatusCode)
 		}
 
@@ -3543,7 +3538,7 @@ func TestValidatorMinMax(t *testing.T) {
 		input := url.QueryEscape(`{"username":"verylongusername"}`)
 		resp := mustGet(t, server, "/trpc/checkUsername?input="+input)
 		if resp.StatusCode != 400 {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			t.Fatalf("status = %d, want 400 for username above max length", resp.StatusCode)
 		}
 
@@ -3580,10 +3575,10 @@ func TestValidatorWithErrorFormatter(t *testing.T) {
 	input := url.QueryEscape(`{"name":""}`)
 	resp := mustGet(t, server, "/trpc/greet?input="+input)
 	if resp.StatusCode != 400 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// The cause should be the validation error from testValidator.
 	if !strings.Contains(capturedCause, "field Name is required") {
@@ -3604,7 +3599,7 @@ func TestValidatorSkipsNonStruct(t *testing.T) {
 	input := url.QueryEscape(`"hello"`)
 	resp := mustGet(t, server, "/trpc/echo?input="+input)
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 200 (validator should skip primitive input)", resp.StatusCode)
 	}
 
@@ -3673,7 +3668,7 @@ func TestValidatorNotSet(t *testing.T) {
 	input := url.QueryEscape(`{"name":""}`)
 	resp := mustGet(t, server, "/trpc/greet?input="+input)
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 200 (no validator configured, handler should run)", resp.StatusCode)
 	}
 
@@ -3704,7 +3699,7 @@ func TestSetCookieFromHandler(t *testing.T) {
 
 	server := newTestServer(t, router.Handler("/trpc"))
 	resp := mustPost(t, server, "/trpc/auth.login", "")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -3745,7 +3740,7 @@ func TestSetCookieFromMiddleware(t *testing.T) {
 
 	server := newTestServer(t, router.Handler("/trpc"))
 	resp := mustGet(t, server, "/trpc/test")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -3769,7 +3764,7 @@ func TestSetResponseHeader(t *testing.T) {
 
 	server := newTestServer(t, router.Handler("/trpc"))
 	resp := mustGet(t, server, "/trpc/test")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -3794,7 +3789,7 @@ func TestSetCookieOnError(t *testing.T) {
 
 	server := newTestServer(t, router.Handler("/trpc"))
 	resp := mustPost(t, server, "/trpc/auth.logout", "")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 401 {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
@@ -3825,7 +3820,7 @@ func TestSetCookieInBatch(t *testing.T) {
 
 	server := newTestServer(t, router.Handler("/trpc"))
 	resp := mustPost(t, server, "/trpc/noop,auth.login?batch=1", `{"0":null,"1":null}`)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -3863,7 +3858,7 @@ func TestSetCookieInJSONLBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -3901,7 +3896,7 @@ func TestSetCookieInSubscription(t *testing.T) {
 
 	server := newTestServer(t, router.Handler("/trpc"))
 	resp := mustGet(t, server, "/trpc/events")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -3952,17 +3947,18 @@ func TestBatchSizeLimitDefault(t *testing.T) {
 
 	// 11 paths exceeds default limit of 10.
 	paths := strings.Repeat("ping,", 10) + "ping"
-	inputs := "{"
+	var inputs strings.Builder
+	inputs.WriteString("{")
 	for i := range 11 {
 		if i > 0 {
-			inputs += ","
+			inputs.WriteString(",")
 		}
-		inputs += fmt.Sprintf(`"%d":null`, i)
+		fmt.Fprintf(&inputs, `"%d":null`, i)
 	}
-	inputs += "}"
+	inputs.WriteString("}")
 
-	resp := mustPost(t, server, "/trpc/"+paths+"?batch=1", inputs)
-	defer resp.Body.Close()
+	resp := mustPost(t, server, "/trpc/"+paths+"?batch=1", inputs.String())
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
@@ -3983,7 +3979,7 @@ func TestBatchSizeLimitWithinLimit(t *testing.T) {
 
 	// 2 paths is within default limit of 10.
 	resp := mustPost(t, server, "/trpc/ping,ping?batch=1", `{"0":null,"1":null}`)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -4000,7 +3996,7 @@ func TestBatchSizeLimitCustom(t *testing.T) {
 
 	// 3 paths exceeds custom limit of 2.
 	resp := mustPost(t, server, "/trpc/ping,ping,ping?batch=1", `{"0":null,"1":null,"2":null}`)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400 for batch exceeding custom limit", resp.StatusCode)
 	}
@@ -4021,17 +4017,18 @@ func TestBatchSizeLimitDisabled(t *testing.T) {
 
 	// 15 paths with limit disabled should succeed.
 	paths := strings.Repeat("ping,", 14) + "ping"
-	inputs := "{"
+	var inputs strings.Builder
+	inputs.WriteString("{")
 	for i := range 15 {
 		if i > 0 {
-			inputs += ","
+			inputs.WriteString(",")
 		}
-		inputs += fmt.Sprintf(`"%d":null`, i)
+		fmt.Fprintf(&inputs, `"%d":null`, i)
 	}
-	inputs += "}"
+	inputs.WriteString("}")
 
-	resp := mustPost(t, server, "/trpc/"+paths+"?batch=1", inputs)
-	defer resp.Body.Close()
+	resp := mustPost(t, server, "/trpc/"+paths+"?batch=1", inputs.String())
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200 with batch limit disabled", resp.StatusCode)
 	}
@@ -4055,7 +4052,7 @@ func TestBatchSizeLimitJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400 for JSONL batch exceeding limit", resp.StatusCode)
 	}

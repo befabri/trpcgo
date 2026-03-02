@@ -8,11 +8,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/befabri/trpcgo/internal/analysis"
 	"github.com/befabri/trpcgo/internal/codegen"
 	"github.com/befabri/trpcgo/internal/fsutil"
 	"github.com/befabri/trpcgo/internal/typemap"
+	"github.com/fsnotify/fsnotify"
 )
 
 type generateOptions struct {
@@ -37,7 +37,7 @@ func main() {
 	fs.BoolVar(watch, "w", false, "watch Go files and regenerate on change")
 	zodOutput := fs.String("zod", "", "output path for Zod 4 validation schemas")
 	zodMini := fs.Bool("zod-mini", false, "generate zod/mini functional syntax")
-	fs.Parse(os.Args[2:])
+	_ = fs.Parse(os.Args[2:]) // ExitOnError handles parse errors
 
 	patterns := fs.Args()
 	if len(patterns) == 0 {
@@ -74,7 +74,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error creating watcher: %v\n", err)
 		os.Exit(1)
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 
 	if err := fsutil.WatchRecursive(watcher, absDir); err != nil {
 		fmt.Fprintf(os.Stderr, "Error watching %s: %v\n", absDir, err)
@@ -120,7 +120,7 @@ func main() {
 	}
 }
 
-func generate(opts generateOptions) error {
+func generate(opts generateOptions) (err error) {
 	result, err := analysis.Analyze(opts.patterns, opts.dir)
 	if err != nil {
 		return fmt.Errorf("analysis: %w", err)
@@ -136,7 +136,11 @@ func generate(opts generateOptions) error {
 		if err != nil {
 			return fmt.Errorf("creating output file: %w", err)
 		}
-		defer w.Close()
+		defer func() {
+			if cerr := w.Close(); cerr != nil && err == nil {
+				err = fmt.Errorf("closing output file: %w", cerr)
+			}
+		}()
 	} else {
 		w = os.Stdout
 	}
@@ -157,7 +161,11 @@ func generate(opts generateOptions) error {
 		if err != nil {
 			return fmt.Errorf("creating zod output file: %w", err)
 		}
-		defer zodFile.Close()
+		defer func() {
+			if cerr := zodFile.Close(); cerr != nil && err == nil {
+				err = fmt.Errorf("closing zod output file: %w", cerr)
+			}
+		}()
 
 		if err := codegen.WriteZodSchemas(zodFile, genResult.Procs, genResult.Defs, style); err != nil {
 			return fmt.Errorf("writing zod schemas: %w", err)

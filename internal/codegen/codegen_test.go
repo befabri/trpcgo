@@ -33,7 +33,7 @@ func generateFromFixture(t *testing.T, name string) string {
 
 // containsLine checks that at least one line in output contains substr after trimming.
 func containsLine(output, substr string) bool {
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		if strings.Contains(strings.TrimSpace(line), substr) {
 			return true
 		}
@@ -70,7 +70,7 @@ func TestGenerateEnhanced(t *testing.T) {
 			t.Fatalf("missing Status union type.\nOutput:\n%s", output)
 		}
 		// Verify it's a proper union with pipe separators.
-		for _, line := range strings.Split(output, "\n") {
+		for line := range strings.SplitSeq(output, "\n") {
 			if strings.Contains(line, "export type Status = ") {
 				for _, val := range []string{`"active"`, `"pending"`, `"banned"`} {
 					if !strings.Contains(line, val) {
@@ -89,7 +89,7 @@ func TestGenerateEnhanced(t *testing.T) {
 		if !strings.Contains(output, "export type Priority = ") {
 			t.Fatalf("missing Priority union type.\nOutput:\n%s", output)
 		}
-		for _, line := range strings.Split(output, "\n") {
+		for line := range strings.SplitSeq(output, "\n") {
 			if strings.Contains(line, "export type Priority = ") {
 				for _, val := range []string{"1", "2", "3"} {
 					if !strings.Contains(line, val) {
@@ -127,8 +127,8 @@ func TestGenerateEnhanced(t *testing.T) {
 		}
 		// The id field should appear shortly after the comment (within User interface).
 		rest := output[commentIdx:]
-		fieldIdx := strings.Index(rest, "id: string;")
-		if fieldIdx == -1 {
+		found := strings.Contains(rest, "id: string;")
+		if !found {
 			t.Errorf("id field not found after JSDoc comment.\nOutput:\n%s", output)
 		}
 	})

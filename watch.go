@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/befabri/trpcgo/internal/analysis"
 	"github.com/befabri/trpcgo/internal/codegen"
 	"github.com/befabri/trpcgo/internal/fsutil"
 	"github.com/befabri/trpcgo/internal/typemap"
+	"github.com/fsnotify/fsnotify"
 )
 
 // watchOpts holds resolved paths for the watcher goroutine.
@@ -52,7 +52,7 @@ func (r *Router) startWatcher() {
 
 	if err := fsutil.WatchRecursive(watcher, cwd); err != nil {
 		log.Printf("trpcgo: watcher: failed to watch %s: %v", cwd, err)
-		watcher.Close()
+		_ = watcher.Close()
 		return
 	}
 
@@ -71,7 +71,7 @@ func (r *Router) startWatcher() {
 	}
 
 	go func() {
-		defer watcher.Close()
+		defer func() { _ = watcher.Close() }()
 
 		// Run static analysis immediately to enrich reflect-generated types.
 		regenerateFromSource(opts)

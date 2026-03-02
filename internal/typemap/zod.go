@@ -229,8 +229,8 @@ func zodConstraints(f Field, base string) string {
 			parts = append(parts, `.regex(/^[a-zA-Z]*$/)`)
 		case "numeric":
 			parts = append(parts, `.regex(/^[0-9]*$/)`)
-		// Format tags (email, url, uuid, etc.) are handled in zodBaseType.
-		// required, omitempty are handled at the field level.
+			// Format tags (email, url, uuid, etc.) are handled in zodBaseType.
+			// required, omitempty are handled at the field level.
 		}
 	}
 

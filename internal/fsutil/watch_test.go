@@ -3,6 +3,7 @@ package fsutil
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/fsnotify/fsnotify"
@@ -33,7 +34,7 @@ func TestWatchRecursive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 
 	if err := WatchRecursive(watcher, root); err != nil {
 		t.Fatal(err)
@@ -67,7 +68,7 @@ func TestHandleDirEvent_Create(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 
 	if err := watcher.Add(root); err != nil {
 		t.Fatal(err)
@@ -86,13 +87,7 @@ func TestHandleDirEvent_Create(t *testing.T) {
 	})
 
 	// newDir should now be watched.
-	found := false
-	for _, p := range watcher.WatchList() {
-		if p == newDir {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(watcher.WatchList(), newDir)
 	if !found {
 		t.Errorf("expected %q to be added to watcher after HandleDirEvent", newDir)
 	}
@@ -105,7 +100,7 @@ func TestHandleDirEvent_FileIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 
 	if err := watcher.Add(root); err != nil {
 		t.Fatal(err)

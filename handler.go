@@ -95,8 +95,8 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s, ok := results[0].response.(streamer); ok {
 			path := calls[0].path
 			if err := s.writeSSE(ctx, w, sseOptions{
-				pingInterval:              h.router.opts.ssePingInterval,
-				maxDuration:               h.router.opts.sseMaxDuration,
+				pingInterval:               h.router.opts.ssePingInterval,
+				maxDuration:                h.router.opts.sseMaxDuration,
 				reconnectAfterInactivityMs: h.router.opts.sseReconnectAfterInactivityMs,
 				isDev:                      h.router.opts.isDev,
 				formatError: func(sseErr *Error) any {
@@ -119,7 +119,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		applyResponseMetadata(ctx, w)
 		w.WriteHeader(results[0].status)
-		w.Write(data)
+		_, _ = w.Write(data)
 		return
 	}
 
@@ -138,7 +138,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	statusCode := determineBatchStatus(results)
 	applyResponseMetadata(ctx, w)
 	w.WriteHeader(statusCode)
-	w.Write(data)
+	_, _ = w.Write(data)
 }
 
 func (h *httpHandler) executeCall(ctx context.Context, r *http.Request, call parsedRequest) (any, int) {
@@ -309,8 +309,8 @@ func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWrite
 	w.Header().Set("Vary", "trpc-accept")
 	applyResponseMetadata(ctx, w)
 	w.WriteHeader(http.StatusOK)
-	w.Write(headData)
-	w.Write([]byte("\n"))
+	_, _ = w.Write(headData)
+	_, _ = w.Write([]byte("\n"))
 	flusher.Flush()
 
 	// Execute all calls concurrently.
@@ -332,8 +332,8 @@ func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWrite
 		// [chunkId, FULFILLED(0), [[envelope]]]
 		chunk := []any{res.index, 0, []any{[]any{res.response}}}
 		chunkData, _ := json.Marshal(chunk)
-		w.Write(chunkData)
-		w.Write([]byte("\n"))
+		_, _ = w.Write(chunkData)
+		_, _ = w.Write([]byte("\n"))
 		flusher.Flush()
 	}
 }
@@ -356,5 +356,5 @@ func (h *httpHandler) writeErrorResponse(w http.ResponseWriter, err *Error, path
 		applyResponseMetadata(ctx, w)
 	}
 	w.WriteHeader(status)
-	w.Write(data)
+	_, _ = w.Write(data)
 }

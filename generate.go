@@ -111,7 +111,7 @@ type reflectField struct {
 }
 
 func goTypeToTS(t reflect.Type, defs map[string]*reflectDef) string {
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 
@@ -191,8 +191,7 @@ func resolveStructTS(t reflect.Type, defs map[string]*reflectDef) {
 }
 
 func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]reflectField) {
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
+	for f := range t.Fields() {
 
 		jsonName, omitempty, skip := typemap.ParseJSONTag(string(f.Tag))
 		if skip {
@@ -208,7 +207,7 @@ func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]refl
 		// Embedded struct: flatten fields.
 		if f.Anonymous && jsonName == "" {
 			ft := f.Type
-			if ft.Kind() == reflect.Ptr {
+			if ft.Kind() == reflect.Pointer {
 				ft = ft.Elem()
 			}
 			if ft.Kind() == reflect.Struct {
@@ -226,7 +225,7 @@ func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]refl
 		}
 
 		tsType := goTypeToTS(f.Type, defs)
-		optional := omitempty || f.Type.Kind() == reflect.Ptr
+		optional := omitempty || f.Type.Kind() == reflect.Pointer
 
 		rf := reflectField{name: jsonName, tsType: tsType, optional: optional}
 
@@ -251,8 +250,8 @@ func inlineStructTS(t reflect.Type, defs map[string]*reflectDef) string {
 		return "Record<string, never>"
 	}
 	var parts []string
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
+	for f := range t.Fields() {
+
 		if !f.IsExported() {
 			continue
 		}
@@ -272,7 +271,7 @@ func inlineStructTS(t reflect.Type, defs map[string]*reflectDef) string {
 			tsType = tstag.Type
 		}
 		opt := ""
-		if omitempty || f.Type.Kind() == reflect.Ptr {
+		if omitempty || f.Type.Kind() == reflect.Pointer {
 			opt = "?"
 		}
 		if hasTSTag && tstag.Required {
@@ -289,4 +288,3 @@ func inlineStructTS(t reflect.Type, defs map[string]*reflectDef) string {
 	}
 	return "{ " + strings.Join(parts, "; ") + " }"
 }
-

@@ -64,8 +64,8 @@ type streamer interface {
 }
 
 type sseOptions struct {
-	pingInterval              time.Duration
-	maxDuration               time.Duration
+	pingInterval               time.Duration
+	maxDuration                time.Duration
 	reconnectAfterInactivityMs int
 	isDev                      bool
 	formatError                func(*Error) any
@@ -164,13 +164,13 @@ type sseClientOptions struct {
 // writeSSENamedEvent writes an SSE event with an explicit event type
 // (connected, ping, return, serialized-error).
 func writeSSENamedEvent(w http.ResponseWriter, event string, data []byte) {
-	fmt.Fprintf(w, "event: %s\n", event)
+	_, _ = fmt.Fprintf(w, "event: %s\n", event)
 	if len(data) > 0 {
-		fmt.Fprintf(w, "data: %s\n", data)
+		_, _ = fmt.Fprintf(w, "data: %s\n", data)
 	} else {
-		fmt.Fprint(w, "data: \n")
+		_, _ = fmt.Fprint(w, "data: \n")
 	}
-	fmt.Fprint(w, "\n")
+	_, _ = fmt.Fprint(w, "\n")
 }
 
 // writeSSEData writes a data-only SSE message (no event type field).
@@ -178,9 +178,9 @@ func writeSSENamedEvent(w http.ResponseWriter, event string, data []byte) {
 // "message" event type. If id is non-empty, an id field is included
 // for tracked event reconnection support.
 func writeSSEData(w http.ResponseWriter, data []byte, id string) {
-	fmt.Fprintf(w, "data: %s\n", data)
+	_, _ = fmt.Fprintf(w, "data: %s\n", data)
 	if id != "" {
-		fmt.Fprintf(w, "id: %s\n", id)
+		_, _ = fmt.Fprintf(w, "id: %s\n", id)
 	}
-	fmt.Fprint(w, "\n")
+	_, _ = fmt.Fprint(w, "\n")
 }
