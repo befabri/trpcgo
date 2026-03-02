@@ -18,15 +18,64 @@ func ZodType(f Field, style ZodStyle) string {
 	base := zodBaseType(f)
 	constraints := zodConstraints(f, base)
 
+	// validate:"omitempty" means "skip validation when zero value".
+	// Zod equivalent: .or(z.literal(<zero>)) to accept the zero value
+	// alongside the constrained type.
+	omitemptyLit := zodOmitemptyLiteral(f, base, constraints)
+
 	if style == ZodMini {
-		return zodMini(base, constraints, f.Optional)
+		return zodMini(base, constraints, f.Optional, omitemptyLit)
 	}
 
 	result := base + constraints
+	if omitemptyLit != "" {
+		result += ".or(" + omitemptyLit + ")"
+	}
 	if f.Optional {
 		result += ".optional()"
 	}
 	return result
+}
+
+// zodOmitemptyLiteral returns the zero-value literal (e.g. z.literal("")) for
+// .or() wrapping when validate:"omitempty" is set, or "" if no wrapping needed.
+// Note: omitempty and optional are orthogonal — optional handles undefined (nil
+// pointer), .or() handles the Go zero value ("" for strings, 0 for ints).
+func zodOmitemptyLiteral(f Field, base, constraints string) string {
+	if !f.ValidateOmitempty {
+		return ""
+	}
+	// Only needed when constraints reject the zero value.
+	// Plain z.string() already accepts ""; plain z.int() already accepts 0.
+	// Format bases (z.email(), z.url(), etc.) inherently reject empty strings.
+	if constraints == "" && !isFormatBase(base) {
+		return ""
+	}
+	return zodZeroLiteral(base)
+}
+
+// isFormatBase returns true if the Zod base type is a format constructor
+// that inherently rejects empty/zero values (e.g. z.email() rejects "").
+func isFormatBase(base string) bool {
+	if isStringBase(base) && base != "z.string()" {
+		return true
+	}
+	return strings.HasPrefix(base, "z.enum(")
+}
+
+// zodZeroLiteral returns the Zod literal for the zero value of the given base type.
+func zodZeroLiteral(base string) string {
+	if isStringBase(base) || strings.HasPrefix(base, "z.enum(") {
+		return `z.literal("")`
+	}
+	switch base {
+	case "z.int()", "z.int32()", "z.int64()", "z.uint32()", "z.uint64()",
+		"z.float32()", "z.float64()", "z.number()":
+		return "z.literal(0)"
+	case "z.boolean()":
+		return "z.literal(false)"
+	}
+	return ""
 }
 
 // ZodBaseForTSType converts a TypeScript type string to its Zod 4 base type.
@@ -189,8 +238,9 @@ func zodConstraints(f Field, base string) string {
 }
 
 // zodMini generates Zod Mini functional syntax.
-func zodMini(base string, constraints string, optional bool) string {
-	if constraints == "" && !optional {
+// omitemptyLit is the zero-value literal for .or() wrapping (empty string if not needed).
+func zodMini(base string, constraints string, optional bool, omitemptyLit string) string {
+	if constraints == "" && !optional && omitemptyLit == "" {
 		return base
 	}
 
@@ -245,6 +295,10 @@ func zodMini(base string, constraints string, optional bool) string {
 	inner := base
 	if len(checks) > 0 {
 		inner = fmt.Sprintf("%s.check(%s)", base, strings.Join(checks, ", "))
+	}
+
+	if omitemptyLit != "" {
+		inner += ".or(" + omitemptyLit + ")"
 	}
 
 	if optional {

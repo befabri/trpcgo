@@ -75,19 +75,44 @@ func writeZodSchema(w io.Writer, def typemap.TypeDef, cycles map[string]map[stri
 
 func writeZodObject(w io.Writer, def typemap.TypeDef, cycles map[string]map[string]bool, style typemap.ZodStyle) {
 	schemaName := def.Name + "Schema"
-	fmt.Fprintf(w, "export const %s = z.object({\n", schemaName)
+	isCyclic := len(cycles[def.Name]) > 0
+
+	if isCyclic {
+		// Cyclic types must use z.lazy() so the schema can reference itself.
+		// A type annotation is required because z.lazy can't infer the type.
+		fmt.Fprintf(w, "export const %s: z.ZodType<%s> = z.lazy(() => z.object({\n", schemaName, def.Name)
+	} else {
+		fmt.Fprintf(w, "export const %s = z.object({\n", schemaName)
+	}
 
 	for _, f := range def.Fields {
 		zodType := fieldToZod(f, cycles[def.Name], style)
-		fmt.Fprintf(w, "  %s: %s,\n", f.Name, zodType)
+		fmt.Fprintf(w, "  %s: %s,\n", typemap.QuotePropName(f.Name), zodType)
 	}
 
-	fmt.Fprintln(w, "});")
+	if isCyclic {
+		fmt.Fprintln(w, "}));")
+	} else {
+		fmt.Fprintln(w, "});")
+	}
 }
 
 func writeZodEnum(w io.Writer, def typemap.TypeDef) {
 	schemaName := def.Name + "Schema"
-	// Union members are already quoted strings like `"active"`.
+
+	// z.enum() only accepts string literals. For non-string unions (integers),
+	// emit z.union([z.literal(1), z.literal(2), ...]) instead.
+	// We check the first member: Go const groups are homogeneous, so all
+	// members share the same underlying type (all strings or all ints).
+	if len(def.UnionMembers) > 0 && !strings.HasPrefix(def.UnionMembers[0], `"`) {
+		literals := make([]string, len(def.UnionMembers))
+		for i, m := range def.UnionMembers {
+			literals[i] = "z.literal(" + m + ")"
+		}
+		fmt.Fprintf(w, "export const %s = z.union([%s]);\n", schemaName, strings.Join(literals, ", "))
+		return
+	}
+
 	fmt.Fprintf(w, "export const %s = z.enum([%s]);\n", schemaName, strings.Join(def.UnionMembers, ", "))
 }
 
@@ -193,13 +218,8 @@ func fieldToZod(f typemap.Field, cyclicFields map[string]bool, style typemap.Zod
 	refName := stripGenericArgs(tsType)
 	ref := refName + "Schema"
 
-	if cyclicFields != nil && cyclicFields[refName] {
-		// Getter syntax for recursive types (Zod 4).
-		// This is handled at the object level, but for field-level we return
-		// a lazy reference that the caller wraps in a getter.
-		// For now, emit as direct reference — the caller handles getter wrapping.
-		ref = refName + "Schema"
-	}
+	// Cyclic references work because the parent schema uses z.lazy(),
+	// which defers evaluation until runtime. The ref is just the schema name.
 
 	if f.Optional {
 		if style == typemap.ZodMini {
@@ -288,7 +308,10 @@ func transitiveReachable(roots map[string]bool, defs map[string]typemap.TypeDef)
 // Returns cycle info for types that need getter syntax.
 func topologicalSort(reachable map[string]bool, defs map[string]typemap.TypeDef) EmitPlan {
 	// Build adjacency: type → types it depends on.
+	// Self-references are tracked separately since they aren't graph edges
+	// but still require z.lazy() wrapping.
 	deps := make(map[string][]string)
+	selfRefs := make(map[string]bool)
 	for name := range reachable {
 		def, ok := defs[name]
 		if !ok {
@@ -297,7 +320,12 @@ func topologicalSort(reachable map[string]bool, defs map[string]typemap.TypeDef)
 		if def.Kind == typemap.TypeDefInterface {
 			for _, f := range def.Fields {
 				for _, ref := range extractTypeRefs(f.Type) {
-					if reachable[ref] && ref != name {
+					if !reachable[ref] {
+						continue
+					}
+					if ref == name {
+						selfRefs[name] = true
+					} else {
 						deps[name] = append(deps[name], ref)
 					}
 				}
@@ -350,6 +378,14 @@ func topologicalSort(reachable map[string]bool, defs map[string]typemap.TypeDef)
 
 	for _, name := range names {
 		dfs(name)
+	}
+
+	// Merge self-references into cycles map.
+	for name := range selfRefs {
+		if cycles[name] == nil {
+			cycles[name] = make(map[string]bool)
+		}
+		cycles[name][name] = true
 	}
 
 	return EmitPlan{Order: order, Cycles: cycles}

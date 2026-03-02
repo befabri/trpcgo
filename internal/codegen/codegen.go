@@ -228,7 +228,7 @@ func writeInterface(w io.Writer, def typemap.TypeDef) {
 		if f.Readonly {
 			prefix = "readonly "
 		}
-		fmt.Fprintf(w, "  %s%s%s: %s;\n", prefix, f.Name, opt, f.Type)
+		fmt.Fprintf(w, "  %s%s%s: %s;\n", prefix, typemap.QuotePropName(f.Name), opt, f.Type)
 	}
 	fmt.Fprintln(w, "}")
 }
@@ -291,10 +291,16 @@ func writeTreeNodes[L any](w io.Writer, node *treeNode[L], indent int, renderLea
 	fmt.Fprintln(w, "{")
 	for _, key := range keys {
 		child := node.children[key]
-		if child.isLeaf {
-			fmt.Fprintf(w, "%s  %s: %s;\n", prefix, key, renderLeaf(child.leaf))
+		qk := typemap.QuotePropName(key)
+		if child.isLeaf && len(child.children) > 0 {
+			// Path is both a leaf and a namespace — emit intersection type.
+			fmt.Fprintf(w, "%s  %s: %s & ", prefix, qk, renderLeaf(child.leaf))
+			writeTreeNodes(w, child, indent+1, renderLeaf)
+			fmt.Fprintln(w, ";")
+		} else if child.isLeaf {
+			fmt.Fprintf(w, "%s  %s: %s;\n", prefix, qk, renderLeaf(child.leaf))
 		} else {
-			fmt.Fprintf(w, "%s  %s: ", prefix, key)
+			fmt.Fprintf(w, "%s  %s: ", prefix, qk)
 			writeTreeNodes(w, child, indent+1, renderLeaf)
 			fmt.Fprintln(w, ";")
 		}

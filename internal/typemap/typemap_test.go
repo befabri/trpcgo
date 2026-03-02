@@ -844,6 +844,177 @@ func TestCollectFieldsDiveOnNonSlice(t *testing.T) {
 	}
 }
 
+func TestZodTypeOmitempty(t *testing.T) {
+	tests := []struct {
+		name  string
+		field Field
+		style ZodStyle
+		want  string
+	}{
+		{
+			name: "string omitempty+len standard — allows empty string",
+			field: Field{
+				Name:              "code",
+				Type:              "string",
+				GoKind:            "string",
+				ValidateOmitempty: true,
+				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "len", Param: "6"}},
+			},
+			style: ZodStandard,
+			want:  `z.string().length(6).or(z.literal(""))`,
+		},
+		{
+			name: "string omitempty+len mini — allows empty string",
+			field: Field{
+				Name:              "code",
+				Type:              "string",
+				GoKind:            "string",
+				ValidateOmitempty: true,
+				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "len", Param: "6"}},
+			},
+			style: ZodMini,
+			want:  `z.string().check(z.length(6)).or(z.literal(""))`,
+		},
+		{
+			name: "string omitempty+email format — allows empty string",
+			field: Field{
+				Name:              "email",
+				Type:              "string",
+				GoKind:            "string",
+				ValidateOmitempty: true,
+				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "email"}},
+			},
+			style: ZodStandard,
+			want:  `z.email().or(z.literal(""))`,
+		},
+		{
+			name: "string omitempty only — no wrapping needed",
+			field: Field{
+				Name:              "nickname",
+				Type:              "string",
+				GoKind:            "string",
+				ValidateOmitempty: true,
+				Validate:          []ValidateRule{{Tag: "omitempty"}},
+			},
+			style: ZodStandard,
+			want:  "z.string()",
+		},
+		{
+			name: "int omitempty+gt — allows zero",
+			field: Field{
+				Name:              "priority",
+				Type:              "number",
+				GoKind:            "int",
+				ValidateOmitempty: true,
+				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "gt", Param: "0"}},
+			},
+			style: ZodStandard,
+			want:  "z.int().gt(0).or(z.literal(0))",
+		},
+		{
+			name: "int omitempty+gte mini — allows zero",
+			field: Field{
+				Name:              "score",
+				Type:              "number",
+				GoKind:            "int",
+				ValidateOmitempty: true,
+				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "gte", Param: "1"}},
+			},
+			style: ZodMini,
+			want:  "z.int().check(z.gte(1)).or(z.literal(0))",
+		},
+		{
+			name: "omitempty+optional standard — both .or() and .optional()",
+			field: Field{
+				Name:              "code",
+				Type:              "string",
+				GoKind:            "string",
+				Optional:          true,
+				ValidateOmitempty: true,
+				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "len", Param: "6"}},
+			},
+			style: ZodStandard,
+			want:  `z.string().length(6).or(z.literal("")).optional()`,
+		},
+		{
+			name: "omitempty+optional mini — .or() inside z.optional()",
+			field: Field{
+				Name:              "code",
+				Type:              "string",
+				GoKind:            "string",
+				Optional:          true,
+				ValidateOmitempty: true,
+				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "len", Param: "6"}},
+			},
+			style: ZodMini,
+			want:  `z.optional(z.string().check(z.length(6)).or(z.literal("")))`,
+		},
+		{
+			name: "omitempty+email mini — allows empty string",
+			field: Field{
+				Name:              "email",
+				Type:              "string",
+				GoKind:            "string",
+				ValidateOmitempty: true,
+				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "email"}},
+			},
+			style: ZodMini,
+			want:  `z.email().or(z.literal(""))`,
+		},
+		{
+			name: "string omitempty+min+max standard",
+			field: Field{
+				Name:              "name",
+				Type:              "string",
+				GoKind:            "string",
+				ValidateOmitempty: true,
+				Validate: []ValidateRule{
+					{Tag: "omitempty"},
+					{Tag: "min", Param: "3"},
+					{Tag: "max", Param: "50"},
+				},
+			},
+			style: ZodStandard,
+			want:  `z.string().min(3).max(50).or(z.literal(""))`,
+		},
+		{
+			name: "string omitempty+uuid format — allows empty",
+			field: Field{
+				Name:              "ref_id",
+				Type:              "string",
+				GoKind:            "string",
+				ValidateOmitempty: true,
+				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "uuid"}},
+			},
+			style: ZodStandard,
+			want:  `z.uuidv4().or(z.literal(""))`,
+		},
+		{
+			name: "no omitempty — unchanged",
+			field: Field{
+				Name:   "code",
+				Type:   "string",
+				GoKind: "string",
+				Validate: []ValidateRule{
+					{Tag: "required"},
+					{Tag: "len", Param: "6"},
+				},
+			},
+			style: ZodStandard,
+			want:  "z.string().length(6)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ZodType(tt.field, tt.style)
+			if got != tt.want {
+				t.Errorf("ZodType() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestZodMiniStyle(t *testing.T) {
 	tests := []struct {
 		name  string

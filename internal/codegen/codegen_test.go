@@ -544,6 +544,388 @@ func TestZodMiniDiveArray(t *testing.T) {
 	}
 }
 
+func TestZodIntegerUnion(t *testing.T) {
+	// Integer unions must use z.union([z.literal(N), ...]) not z.enum().
+	procs := []codegen.ProcEntry{
+		{Path: "task.create", ProcType: "mutation", InputTS: "TaskInput", OutputTS: "void"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "TaskInput",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{Name: "priority", Type: "Priority", GoKind: ""},
+			},
+		},
+		{
+			Name:         "Priority",
+			Kind:         typemap.TypeDefUnion,
+			UnionMembers: []string{"1", "2", "3"},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	// Must use z.union + z.literal for integers.
+	want := "z.union([z.literal(1), z.literal(2), z.literal(3)])"
+	if !strings.Contains(output, want) {
+		t.Errorf("integer union should use z.union([z.literal(N), ...]).\nwant: %s\nOutput:\n%s", want, output)
+	}
+
+	// Must NOT use z.enum for integers.
+	if strings.Contains(output, "z.enum(") {
+		t.Errorf("integer union should not use z.enum().\nOutput:\n%s", output)
+	}
+}
+
+func TestZodStringUnionUnchanged(t *testing.T) {
+	// String unions should still use z.enum().
+	procs := []codegen.ProcEntry{
+		{Path: "user.create", ProcType: "mutation", InputTS: "UserInput", OutputTS: "void"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "UserInput",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{Name: "status", Type: "Status", GoKind: ""},
+			},
+		},
+		{
+			Name:         "Status",
+			Kind:         typemap.TypeDefUnion,
+			UnionMembers: []string{`"active"`, `"pending"`, `"banned"`},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	want := `z.enum(["active", "pending", "banned"])`
+	if !strings.Contains(output, want) {
+		t.Errorf("string union should use z.enum().\nwant: %s\nOutput:\n%s", want, output)
+	}
+}
+
+func TestZodCyclicLazy(t *testing.T) {
+	// Cyclic types must use z.lazy() to avoid referencing the schema before it's defined.
+	procs := []codegen.ProcEntry{
+		{Path: "tree.create", ProcType: "mutation", InputTS: "TreeNode", OutputTS: "void"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "TreeNode",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{Name: "label", Type: "string", GoKind: "string"},
+				{Name: "children", Type: "TreeNode[]", GoKind: "slice"},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	// Must use z.lazy() wrapper.
+	if !strings.Contains(output, "z.lazy(() => z.object(") {
+		t.Errorf("cyclic type should use z.lazy().\nOutput:\n%s", output)
+	}
+
+	// Must have type annotation for type inference.
+	if !strings.Contains(output, "z.ZodType<TreeNode>") {
+		t.Errorf("cyclic type should have z.ZodType<T> annotation.\nOutput:\n%s", output)
+	}
+
+	// Must close with ));
+	if !strings.Contains(output, "}));") {
+		t.Errorf("cyclic type should close z.lazy.\nOutput:\n%s", output)
+	}
+
+	// Self-reference should just use TreeNodeSchema.
+	if !strings.Contains(output, "z.array(TreeNodeSchema)") {
+		t.Errorf("cyclic field should reference TreeNodeSchema.\nOutput:\n%s", output)
+	}
+}
+
+func TestZodNonCyclicUnchanged(t *testing.T) {
+	// Non-cyclic types should NOT use z.lazy().
+	procs := []codegen.ProcEntry{
+		{Path: "user.create", ProcType: "mutation", InputTS: "UserInput", OutputTS: "void"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "UserInput",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{Name: "name", Type: "string", GoKind: "string"},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	if strings.Contains(output, "z.lazy") {
+		t.Errorf("non-cyclic type should not use z.lazy().\nOutput:\n%s", output)
+	}
+	if !strings.Contains(output, "export const UserInputSchema = z.object(") {
+		t.Errorf("non-cyclic type should use plain z.object().\nOutput:\n%s", output)
+	}
+}
+
+func TestZodMutualCycle(t *testing.T) {
+	// Mutual recursion: A references B, B references A.
+	procs := []codegen.ProcEntry{
+		{Path: "item.create", ProcType: "mutation", InputTS: "NodeA", OutputTS: "void"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "NodeA",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{Name: "b", Type: "NodeB", GoKind: ""},
+			},
+		},
+		{
+			Name: "NodeB",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{Name: "a", Type: "NodeA", GoKind: ""},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	// DFS visits NodeA first (sorted), discovers back-edge NodeB→NodeA,
+	// so NodeB gets z.lazy. NodeA is emitted second as plain z.object.
+	if !strings.Contains(output, "NodeBSchema: z.ZodType<NodeB> = z.lazy(") {
+		t.Errorf("NodeB (back-edge) should use z.lazy with type annotation.\nOutput:\n%s", output)
+	}
+	if !strings.Contains(output, "NodeASchema = z.object(") {
+		t.Errorf("NodeA should be plain z.object.\nOutput:\n%s", output)
+	}
+
+	// Exactly one z.lazy and one plain z.object.
+	lazyCount := strings.Count(output, "z.lazy(")
+	objectCount := strings.Count(output, "= z.object(")
+	if lazyCount != 1 || objectCount != 1 {
+		t.Errorf("expected 1 z.lazy + 1 z.object, got %d + %d.\nOutput:\n%s", lazyCount, objectCount, output)
+	}
+}
+
+func TestZodOmitemptyE2E(t *testing.T) {
+	// End-to-end: Go source → analysis → codegen → Zod output.
+	// Uses the omitempty fixture with validate:"omitempty,len=6" and validate:"omitempty,email".
+	dir := testdataDir("omitempty")
+	result, err := analysis.Analyze([]string{"."}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	genResult, err := codegen.Generate(&buf, result, result.TypeMetas)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var zodBuf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&zodBuf, genResult.Procs, genResult.Defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	zodOutput := zodBuf.String()
+
+	t.Run("ConfirmTOTPInputSchema present", func(t *testing.T) {
+		if !strings.Contains(zodOutput, "ConfirmTOTPInputSchema") {
+			t.Fatalf("missing ConfirmTOTPInputSchema.\nOutput:\n%s", zodOutput)
+		}
+	})
+
+	t.Run("omitempty+len fields accept empty strings", func(t *testing.T) {
+		want := `z.string().length(6).or(z.literal(""))`
+		count := strings.Count(zodOutput, want)
+		if count != 2 {
+			t.Errorf("expected %q to appear 2 times (code + current_code), got %d.\nOutput:\n%s", want, count, zodOutput)
+		}
+	})
+
+	t.Run("required field unchanged", func(t *testing.T) {
+		if strings.Contains(zodOutput, `name: z.string().min(1).or(`) {
+			t.Errorf("required name field should not have .or() wrapping.\nOutput:\n%s", zodOutput)
+		}
+	})
+
+	t.Run("omitempty+email allows empty string", func(t *testing.T) {
+		if !strings.Contains(zodOutput, `z.email().or(z.literal(""))`) {
+			t.Errorf("backup_email should have omitempty wrapping on format base.\nOutput:\n%s", zodOutput)
+		}
+	})
+
+	t.Run("required+email unchanged", func(t *testing.T) {
+		// primary_email has validate:"required,email" — no .or() wrapping.
+		// Both emails use z.email(), but only backup_email has .or().
+		orCount := strings.Count(zodOutput, `z.email().or(`)
+		if orCount != 1 {
+			t.Errorf("expected exactly 1 z.email().or() (backup_email), got %d.\nOutput:\n%s", orCount, zodOutput)
+		}
+	})
+
+	t.Run("omitempty+optional pointer field", func(t *testing.T) {
+		// nickname is *string with json:"nickname,omitempty" validate:"omitempty,min=3,max=30"
+		// Should have both .or(z.literal("")) AND .optional().
+		want := `z.string().min(3).max(30).or(z.literal("")).optional()`
+		if !strings.Contains(zodOutput, want) {
+			t.Errorf("nickname should have both .or() and .optional().\nwant: %s\nOutput:\n%s", want, zodOutput)
+		}
+	})
+}
+
+func TestZodOmitemptyDirect(t *testing.T) {
+	// Simulates SetupTOTPRequest: code and current_code have validate:"omitempty,len=6".
+	// Both should accept empty strings alongside 6-char strings.
+	procs := []codegen.ProcEntry{
+		{Path: "auth.setupTotp", ProcType: "mutation", InputTS: "SetupTOTPRequest", OutputTS: "void"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "SetupTOTPRequest",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{
+					Name:              "code",
+					Type:              "string",
+					GoKind:            "string",
+					ValidateOmitempty: true,
+					Validate: []typemap.ValidateRule{
+						{Tag: "omitempty"},
+						{Tag: "len", Param: "6"},
+					},
+				},
+				{
+					Name:              "current_code",
+					Type:              "string",
+					GoKind:            "string",
+					ValidateOmitempty: true,
+					Validate: []typemap.ValidateRule{
+						{Tag: "omitempty"},
+						{Tag: "len", Param: "6"},
+					},
+				},
+				{
+					Name:   "secret",
+					Type:   "string",
+					GoKind: "string",
+					Validate: []typemap.ValidateRule{
+						{Tag: "required"},
+					},
+				},
+			},
+		},
+	}
+
+	t.Run("standard", func(t *testing.T) {
+		var buf bytes.Buffer
+		if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+			t.Fatal(err)
+		}
+		output := buf.String()
+
+		// omitempty fields should accept empty strings.
+		wantOmitempty := `z.string().length(6).or(z.literal(""))`
+		count := strings.Count(output, wantOmitempty)
+		if count != 2 {
+			t.Errorf("expected %q to appear 2 times (code + current_code), got %d.\nOutput:\n%s", wantOmitempty, count, output)
+		}
+
+		// Non-omitempty field should NOT have .or().
+		if strings.Contains(output, `secret: z.string().or(`) {
+			t.Errorf("secret field should not have omitempty .or() wrapping.\nOutput:\n%s", output)
+		}
+	})
+
+	t.Run("mini", func(t *testing.T) {
+		var buf bytes.Buffer
+		if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodMini); err != nil {
+			t.Fatal(err)
+		}
+		output := buf.String()
+
+		wantOmitempty := `z.string().check(z.length(6)).or(z.literal(""))`
+		count := strings.Count(output, wantOmitempty)
+		if count != 2 {
+			t.Errorf("expected %q to appear 2 times, got %d.\nOutput:\n%s", wantOmitempty, count, output)
+		}
+	})
+}
+
+func TestZodOmitemptyFormatBase(t *testing.T) {
+	// Format bases (email, uuid) with omitempty should also allow empty strings.
+	procs := []codegen.ProcEntry{
+		{Path: "user.update", ProcType: "mutation", InputTS: "UpdateInput", OutputTS: "void"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "UpdateInput",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{
+					Name:              "backup_email",
+					Type:              "string",
+					GoKind:            "string",
+					ValidateOmitempty: true,
+					Validate: []typemap.ValidateRule{
+						{Tag: "omitempty"},
+						{Tag: "email"},
+					},
+				},
+				{
+					Name:   "primary_email",
+					Type:   "string",
+					GoKind: "string",
+					Validate: []typemap.ValidateRule{
+						{Tag: "required"},
+						{Tag: "email"},
+					},
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	// backup_email: omitempty + email → z.email().or(z.literal(""))
+	if !strings.Contains(output, `z.email().or(z.literal(""))`) {
+		t.Errorf("backup_email should have omitempty wrapping.\nOutput:\n%s", output)
+	}
+
+	// primary_email: required + email → z.email() (no .or())
+	// Count: z.email() should appear twice (once with .or, once without).
+	emailCount := strings.Count(output, "z.email()")
+	if emailCount != 2 {
+		t.Errorf("expected z.email() 2 times, got %d.\nOutput:\n%s", emailCount, output)
+	}
+}
+
 func TestRouterInputsOutputs(t *testing.T) {
 	output := generateFromFixture(t, "basic")
 
@@ -665,5 +1047,90 @@ func TestWriteAppRouterOnlyEmitsUsedProcTypes(t *testing.T) {
 	}
 	if strings.Contains(output, "$Subscription") {
 		t.Errorf("$Subscription should not be emitted when no subscription procs exist.\nOutput:\n%s", output)
+	}
+}
+
+func TestPropertyQuotingInInterface(t *testing.T) {
+	procs := []codegen.ProcEntry{
+		{Path: "item.get", ProcType: "query", InputTS: "void", OutputTS: "Item"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "Item",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{Name: "normal_name", Type: "string", GoKind: "string"},
+				{Name: "hyphen-name", Type: "string", GoKind: "string"},
+				{Name: "123start", Type: "number", GoKind: "int"},
+				{Name: "has space", Type: "string", GoKind: "string"},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteAppRouter(&buf, procs, defs); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	// Normal identifier — no quotes.
+	if !containsLine(output, "normal_name: string;") {
+		t.Errorf("normal identifier should not be quoted.\nOutput:\n%s", output)
+	}
+
+	// Hyphenated name — must be quoted.
+	if !containsLine(output, `"hyphen-name": string;`) {
+		t.Errorf("hyphenated name should be quoted.\nOutput:\n%s", output)
+	}
+
+	// Starts with digit — must be quoted.
+	if !containsLine(output, `"123start": number;`) {
+		t.Errorf("digit-starting name should be quoted.\nOutput:\n%s", output)
+	}
+
+	// Contains space — must be quoted.
+	if !containsLine(output, `"has space": string;`) {
+		t.Errorf("name with space should be quoted.\nOutput:\n%s", output)
+	}
+}
+
+func TestPropertyQuotingInTreeNodes(t *testing.T) {
+	procs := []codegen.ProcEntry{
+		{Path: "my-ns.get", ProcType: "query", InputTS: "void", OutputTS: "string"},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteAppRouter(&buf, procs, nil); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	// Namespace key with hyphen must be quoted in AppRouterRecord.
+	if !strings.Contains(output, `"my-ns"`) {
+		t.Errorf("hyphenated namespace should be quoted in tree.\nOutput:\n%s", output)
+	}
+}
+
+func TestLeafAndNamespaceCollision(t *testing.T) {
+	// "user" is both a leaf procedure and a namespace containing "user.get".
+	procs := []codegen.ProcEntry{
+		{Path: "user", ProcType: "mutation", InputTS: "string", OutputTS: "string"},
+		{Path: "user.get", ProcType: "query", InputTS: "void", OutputTS: "User"},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteAppRouter(&buf, procs, nil); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	// The "user" node should be an intersection of the leaf type and the namespace.
+	if !strings.Contains(output, "$Mutation<string, string> & {") {
+		t.Errorf("leaf+namespace should emit intersection type.\nOutput:\n%s", output)
+	}
+
+	// The child procedure should still appear.
+	if !strings.Contains(output, "$Query<void, User>") {
+		t.Errorf("child procedure should be emitted within namespace.\nOutput:\n%s", output)
 	}
 }

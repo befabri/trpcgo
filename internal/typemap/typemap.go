@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // TypeDefKind distinguishes what kind of TypeScript declaration to emit.
@@ -33,16 +34,17 @@ type TypeDef struct {
 
 // Field represents a field in a TypeScript interface.
 type Field struct {
-	Name            string
-	Type            string
-	GoKind          string          // Go kind for Zod: "string", "int", "int32", "float64", etc.
-	Optional        bool
-	Readonly        bool            // from tstype:",readonly"
-	Required        bool            // from tstype:",required" (overrides optional)
-	Comment         string          // field doc comment → JSDoc
-	Validate        []ValidateRule  // parsed validate tag rules (before dive)
-	ElementValidate []ValidateRule  // parsed validate tag rules after dive (for slice elements)
-	ElementGoKind   string          // Go kind of slice/array element type
+	Name              string
+	Type              string
+	GoKind            string         // Go kind for Zod: "string", "int", "int32", "float64", etc.
+	Optional          bool
+	Readonly          bool           // from tstype:",readonly"
+	Required          bool           // from tstype:",required" (overrides optional)
+	ValidateOmitempty bool           // validate:"omitempty" — Zod should allow zero values
+	Comment           string         // field doc comment → JSDoc
+	Validate          []ValidateRule // parsed validate tag rules (before dive)
+	ElementValidate   []ValidateRule // parsed validate tag rules after dive (for slice elements)
+	ElementGoKind     string         // Go kind of slice/array element type
 }
 
 // Mapper converts Go types to TypeScript type strings and collects interface definitions.
@@ -482,7 +484,9 @@ func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, fieldComments 
 		for _, rule := range f.Validate {
 			if rule.Tag == "required" {
 				f.Optional = false
-				break
+			}
+			if rule.Tag == "omitempty" {
+				f.ValidateOmitempty = true
 			}
 		}
 
@@ -507,6 +511,26 @@ func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, fieldComments 
 
 		*fields = append(*fields, f)
 	}
+}
+
+// QuotePropName wraps a property name in quotes if it is not a valid
+// JavaScript identifier (e.g. contains hyphens, starts with a digit).
+func QuotePropName(name string) string {
+	if name == "" {
+		return `""`
+	}
+	for i, r := range name {
+		if i == 0 {
+			if !unicode.IsLetter(r) && r != '_' && r != '$' {
+				return fmt.Sprintf("%q", name)
+			}
+		} else {
+			if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '$' {
+				return fmt.Sprintf("%q", name)
+			}
+		}
+	}
+	return name
 }
 
 func (m *Mapper) inlineStruct(st *types.Struct) string {
@@ -546,7 +570,7 @@ func (m *Mapper) inlineStruct(st *types.Struct) string {
 		if hasTSTag && tstag.Readonly {
 			prefix = "readonly "
 		}
-		parts = append(parts, fmt.Sprintf("%s%s%s: %s", prefix, jsonName, opt, tsType))
+		parts = append(parts, fmt.Sprintf("%s%s%s: %s", prefix, QuotePropName(jsonName), opt, tsType))
 	}
 	if len(parts) == 0 {
 		return "Record<string, never>"
