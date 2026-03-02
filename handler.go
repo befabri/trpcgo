@@ -286,6 +286,9 @@ func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWrite
 	}
 
 	// Write headers and head line before executing any handlers.
+	// Note: response metadata from handlers is not applied for JSONL streaming
+	// because headers must be sent before concurrent execution begins. Metadata
+	// set before this point (e.g. from createContext) is still applied.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Transfer-Encoding", "chunked")
 	w.Header().Set("Vary", "trpc-accept")

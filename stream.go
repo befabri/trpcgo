@@ -82,6 +82,7 @@ func (s *sseStream[O]) writeSSE(ctx context.Context, w http.ResponseWriter, opts
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Connection", "keep-alive")
+	applyResponseMetadata(ctx, w)
 	w.WriteHeader(http.StatusOK)
 
 	// Send connected event with client options.

@@ -3652,8 +3652,8 @@ func TestSetCookieFromHandler(t *testing.T) {
 
 	server := newTestServer(t, router.Handler("/trpc"))
 	resp := mustPost(t, server, "/trpc/auth.login", "")
+	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
@@ -3672,8 +3672,6 @@ func TestSetCookieFromHandler(t *testing.T) {
 	if found["logged_in"] != "1" {
 		t.Errorf("logged_in cookie = %q, want %q", found["logged_in"], "1")
 	}
-
-	resp.Body.Close()
 }
 
 func TestSetCookieFromMiddleware(t *testing.T) {
@@ -3695,8 +3693,8 @@ func TestSetCookieFromMiddleware(t *testing.T) {
 
 	server := newTestServer(t, router.Handler("/trpc"))
 	resp := mustGet(t, server, "/trpc/test")
+	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
@@ -3707,7 +3705,6 @@ func TestSetCookieFromMiddleware(t *testing.T) {
 	if cookies[0].Name != "mw_cookie" || cookies[0].Value != "from_middleware" {
 		t.Errorf("cookie = %s=%s, want mw_cookie=from_middleware", cookies[0].Name, cookies[0].Value)
 	}
-	resp.Body.Close()
 }
 
 func TestSetResponseHeader(t *testing.T) {
@@ -3720,15 +3717,14 @@ func TestSetResponseHeader(t *testing.T) {
 
 	server := newTestServer(t, router.Handler("/trpc"))
 	resp := mustGet(t, server, "/trpc/test")
+	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
 	if got := resp.Header.Get("X-Custom"); got != "hello" {
 		t.Errorf("X-Custom = %q, want %q", got, "hello")
 	}
-	resp.Body.Close()
 }
 
 func TestSetCookieOnError(t *testing.T) {
@@ -3746,8 +3742,8 @@ func TestSetCookieOnError(t *testing.T) {
 
 	server := newTestServer(t, router.Handler("/trpc"))
 	resp := mustPost(t, server, "/trpc/auth.logout", "")
+	defer resp.Body.Close()
 	if resp.StatusCode != 401 {
-		resp.Body.Close()
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
 
@@ -3758,7 +3754,6 @@ func TestSetCookieOnError(t *testing.T) {
 	if cookies[0].Name != "session" || cookies[0].MaxAge != -1 {
 		t.Errorf("cookie = %s maxAge=%d, want session maxAge=-1", cookies[0].Name, cookies[0].MaxAge)
 	}
-	resp.Body.Close()
 }
 
 func TestSetCookieInBatch(t *testing.T) {
@@ -3778,8 +3773,8 @@ func TestSetCookieInBatch(t *testing.T) {
 
 	server := newTestServer(t, router.Handler("/trpc"))
 	resp := mustPost(t, server, "/trpc/noop,auth.login?batch=1", `{"0":null,"1":null}`)
+	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
@@ -3790,7 +3785,91 @@ func TestSetCookieInBatch(t *testing.T) {
 	if cookies[0].Name != "token" || cookies[0].Value != "batch_token" {
 		t.Errorf("cookie = %s=%s, want token=batch_token", cookies[0].Name, cookies[0].Value)
 	}
-	resp.Body.Close()
+}
+
+func TestSetCookieInJSONLBatch(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithBatching(true))
+
+	trpcgo.VoidMutation(router, "noop", func(ctx context.Context) (string, error) {
+		return "hi", nil
+	})
+
+	trpcgo.VoidMutation(router, "auth.login", func(ctx context.Context) (string, error) {
+		trpcgo.SetCookie(ctx, &http.Cookie{
+			Name:  "token",
+			Value: "jsonl_token",
+		})
+		return "ok", nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+	req, _ := http.NewRequest("POST", server.URL+"/trpc/noop,auth.login?batch=1",
+		strings.NewReader(`{"0":null,"1":null}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("trpc-accept", "application/jsonl")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// JSONL streaming sends headers before handlers execute, so cookies set
+	// from within handlers cannot be applied — same limitation as tRPC's
+	// httpBatchStreamLink where responseMeta runs with eagerGeneration: true.
+	cookies := resp.Cookies()
+	if len(cookies) != 0 {
+		t.Errorf("got %d cookies, want 0 (JSONL sends headers before handlers run)", len(cookies))
+	}
+
+	_, chunks := parseJSONLResponse(t, resp)
+	if len(chunks) != 2 {
+		t.Fatalf("got %d chunks, want 2", len(chunks))
+	}
+}
+
+func TestSetCookieInSubscription(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	trpcgo.VoidSubscribe(router, "events", func(ctx context.Context) (<-chan string, error) {
+		trpcgo.SetCookie(ctx, &http.Cookie{
+			Name:  "sub_token",
+			Value: "from_subscription",
+		})
+		ch := make(chan string)
+		go func() {
+			defer close(ch)
+			ch <- "hello"
+		}()
+		return ch, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/events")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	cookies := resp.Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("got %d cookies, want 1", len(cookies))
+	}
+	if cookies[0].Name != "sub_token" || cookies[0].Value != "from_subscription" {
+		t.Errorf("cookie = %s=%s, want sub_token=from_subscription", cookies[0].Name, cookies[0].Value)
+	}
+
+	events := parseSSEEvents(t, resp, 3) // connected + message + return
+	if len(events) < 3 {
+		t.Fatalf("got %d events, want 3", len(events))
+	}
+	if events[0].event != "connected" {
+		t.Errorf("events[0] = %q, want connected", events[0].event)
+	}
 }
 
 func TestSetCookieNoopOutsideHandler(t *testing.T) {
