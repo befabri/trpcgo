@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/trpcgo/trpcgo/internal/typemap"
+	"github.com/befabri/trpcgo/internal/typemap"
 )
 
 // WriteZodSchemas writes Zod 4 validation schemas for all procedure input types

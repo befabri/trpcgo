@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/trpcgo/trpcgo/internal/analysis"
-	"github.com/trpcgo/trpcgo/internal/codegen"
-	"github.com/trpcgo/trpcgo/internal/fsutil"
-	"github.com/trpcgo/trpcgo/internal/typemap"
+	"github.com/befabri/trpcgo/internal/analysis"
+	"github.com/befabri/trpcgo/internal/codegen"
+	"github.com/befabri/trpcgo/internal/fsutil"
+	"github.com/befabri/trpcgo/internal/typemap"
 )
 
 // watchOpts holds resolved paths for the watcher goroutine.

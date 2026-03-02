@@ -211,7 +211,7 @@ func (m *Mapper) convert(t types.Type) string {
 
 			// TrackedEvent[T] — unwrap to T for TypeScript output.
 			// The tracking ID is a transport concern, not a type concern.
-			if fullPath == "github.com/trpcgo/trpcgo.TrackedEvent" {
+			if fullPath == "github.com/befabri/trpcgo.TrackedEvent" {
 				if t.TypeArgs() != nil && t.TypeArgs().Len() == 1 {
 					return m.convert(t.TypeArgs().At(0))
 				}

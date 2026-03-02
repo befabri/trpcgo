@@ -3,7 +3,7 @@ package enhanced
 import (
 	"context"
 
-	"github.com/trpcgo/trpcgo"
+	"github.com/befabri/trpcgo"
 )
 
 // Status represents the account status.

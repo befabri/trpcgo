@@ -1,4 +1,4 @@
-module github.com/trpcgo/trpcgo
+module github.com/befabri/trpcgo
 
 go 1.26.0
 

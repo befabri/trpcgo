@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/trpcgo/trpcgo/internal/analysis"
-	"github.com/trpcgo/trpcgo/internal/typemap"
+	"github.com/befabri/trpcgo/internal/analysis"
+	"github.com/befabri/trpcgo/internal/typemap"
 )
 
 // findMeta finds a TypeMeta by the short type name (suffix after last ".").

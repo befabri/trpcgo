@@ -2,13 +2,13 @@ module github.com/trpcgo/example-query
 
 go 1.26.0
 
-replace github.com/trpcgo/trpcgo => ../../..
+replace github.com/befabri/trpcgo => ../../..
 
-tool github.com/trpcgo/trpcgo/cmd/trpcgo
+tool github.com/befabri/trpcgo/cmd/trpcgo
 
 require (
 	github.com/go-chi/chi/v5 v5.2.5
-	github.com/trpcgo/trpcgo v0.0.0-00010101000000-000000000000
+	github.com/befabri/trpcgo v0.0.0-00010101000000-000000000000
 )
 
 require (

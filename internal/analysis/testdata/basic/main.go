@@ -3,7 +3,7 @@ package basic
 import (
 	"context"
 
-	"github.com/trpcgo/trpcgo"
+	"github.com/befabri/trpcgo"
 )
 
 type User struct {

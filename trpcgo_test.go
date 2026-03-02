@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/trpcgo/trpcgo"
+	"github.com/befabri/trpcgo"
 )
 
 // Test models

@@ -9,8 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/trpcgo/trpcgo/internal/codegen"
-	"github.com/trpcgo/trpcgo/internal/typemap"
+	"github.com/befabri/trpcgo/internal/codegen"
+	"github.com/befabri/trpcgo/internal/typemap"
 )
 
 // GenerateTS writes TypeScript type definitions for all registered procedures.
@@ -124,7 +124,7 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef) string {
 	// The tracking ID is a transport concern, not a type concern.
 	// In reflect, generic instantiation names include type args, e.g.
 	// "TrackedEvent[pkg.Foo·1]", so we check with HasPrefix.
-	if t.PkgPath() == "github.com/trpcgo/trpcgo" && strings.HasPrefix(t.Name(), "TrackedEvent[") {
+	if t.PkgPath() == "github.com/befabri/trpcgo" && strings.HasPrefix(t.Name(), "TrackedEvent[") {
 		if dataField, ok := t.FieldByName("Data"); ok {
 			return goTypeToTS(dataField.Type, defs)
 		}

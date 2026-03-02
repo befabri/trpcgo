@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/trpcgo/trpcgo/internal/analysis"
-	"github.com/trpcgo/trpcgo/internal/codegen"
-	"github.com/trpcgo/trpcgo/internal/typemap"
+	"github.com/befabri/trpcgo/internal/analysis"
+	"github.com/befabri/trpcgo/internal/codegen"
+	"github.com/befabri/trpcgo/internal/typemap"
 )
 
 func testdataDir(name string) string {

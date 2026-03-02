@@ -12,11 +12,11 @@ trpcgo is a Go runtime library and code generator that gives you the tRPC develo
 
 ```bash
 # Add to your Go module
-go get github.com/trpcgo/trpcgo@latest
+go get github.com/befabri/trpcgo@latest
 
 # Install the CLI (Go 1.26+ tool directive)
 # In your go.mod:
-tool github.com/trpcgo/trpcgo/cmd/trpcgo
+tool github.com/befabri/trpcgo/cmd/trpcgo
 ```
 
 ## Quick Start
@@ -30,7 +30,7 @@ package main
 
 import (
     "context"
-    "github.com/trpcgo/trpcgo"
+    "github.com/befabri/trpcgo"
 )
 
 type CreateUserInput struct {

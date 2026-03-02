@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/trpcgo/trpcgo/internal/analysis"
-	"github.com/trpcgo/trpcgo/internal/typemap"
+	"github.com/befabri/trpcgo/internal/analysis"
+	"github.com/befabri/trpcgo/internal/typemap"
 )
 
 // ProcEntry is a procedure with pre-converted TypeScript type strings.
