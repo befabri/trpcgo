@@ -107,15 +107,45 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 		})
 	}
 
-	// Convert reflect defs to typemap.TypeDef for the shared writer.
-	sortedDefs := make([]*reflectDef, 0, len(defs))
-	for _, d := range defs {
-		sortedDefs = append(sortedDefs, d)
+	// Resolve type name tokens. goTypeToTS embeds \x00key\x00 tokens for
+	// named types. Resolve them to display names, disambiguating collisions
+	// by prefixing with the title-cased package name (e.g., NpcListInput).
+	display := resolveDisplayNames(defs)
+
+	for i := range entries {
+		entries[i].InputTS = resolveTypeTokens(entries[i].InputTS, display)
+		entries[i].OutputTS = resolveTypeTokens(entries[i].OutputTS, display)
 	}
-	sort.Slice(sortedDefs, func(i, j int) bool { return sortedDefs[i].name < sortedDefs[j].name })
+	for _, d := range defs {
+		for i := range d.fields {
+			d.fields[i].tsType = resolveTypeTokens(d.fields[i].tsType, display)
+		}
+		for i := range d.extends {
+			d.extends[i] = resolveTypeTokens(d.extends[i], display)
+		}
+	}
+
+	// Convert reflect defs to typemap.TypeDef for the shared writer.
+	type defWithKey struct {
+		key string
+		def *reflectDef
+	}
+	sortedDefs := make([]defWithKey, 0, len(defs))
+	for key, d := range defs {
+		sortedDefs = append(sortedDefs, defWithKey{key, d})
+	}
+	sort.Slice(sortedDefs, func(i, j int) bool {
+		return display[sortedDefs[i].key] < display[sortedDefs[j].key]
+	})
 
 	typeDefs := make([]typemap.TypeDef, len(sortedDefs))
-	for i, d := range sortedDefs {
+	for i, dk := range sortedDefs {
+		d := dk.def
+		resolvedName := display[dk.key]
+		if resolvedName == "" {
+			resolvedName = d.name
+		}
+
 		fields := make([]typemap.Field, len(d.fields))
 		for j, f := range d.fields {
 			fields[j] = typemap.Field{
@@ -133,7 +163,7 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 			}
 		}
 		typeDefs[i] = typemap.TypeDef{
-			Name:       d.name,
+			Name:       resolvedName,
 			Kind:       typemap.TypeDefInterface,
 			TypeParams: d.typeParams,
 			Extends:    d.extends,
@@ -146,6 +176,7 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 
 type reflectDef struct {
 	name       string
+	pkgPath    string
 	typeParams []string
 	extends    []string
 	fields     []reflectField
@@ -245,7 +276,7 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Ty
 		if _, ok := defs[key]; !ok {
 			resolveStructTS(t, defs)
 		}
-		return name
+		return "\x00" + key + "\x00"
 
 	case reflect.Interface:
 		return "unknown"
@@ -301,7 +332,7 @@ func handleGenericTS(t reflect.Type, name string, bracketIdx int, defs map[strin
 		}
 	}
 
-	return baseName + "<" + strings.Join(argTSNames, ", ") + ">"
+	return "\x00" + genericKey + "\x00" + "<" + strings.Join(argTSNames, ", ") + ">"
 }
 
 // resolveGenericStructTS registers a generic interface definition.
@@ -309,6 +340,7 @@ func handleGenericTS(t reflect.Type, name string, bracketIdx int, defs map[strin
 func resolveGenericStructTS(t reflect.Type, baseName, key string, paramNames []string, subs map[reflect.Type]string, defs map[string]*reflectDef) {
 	defs[key] = &reflectDef{
 		name:       baseName,
+		pkgPath:    t.PkgPath(),
 		typeParams: paramNames,
 	}
 
@@ -322,7 +354,7 @@ func resolveGenericStructTS(t reflect.Type, baseName, key string, paramNames []s
 func resolveStructTS(t reflect.Type, defs map[string]*reflectDef) {
 	name := t.Name()
 	key := t.PkgPath() + "." + name
-	defs[key] = &reflectDef{name: name}
+	defs[key] = &reflectDef{name: name, pkgPath: t.PkgPath()}
 
 	var fields []reflectField
 	var extends []string
@@ -471,6 +503,68 @@ func inlineStructTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflec
 		return "Record<string, never>"
 	}
 	return "{ " + strings.Join(parts, "; ") + " }"
+}
+
+// resolveDisplayNames computes a mapping from def key (pkgPath.Name) to
+// display name. When no collisions exist, display names equal short names.
+// On collision (multiple packages define the same type name), names are
+// prefixed with the title-cased last segment of the package path.
+func resolveDisplayNames(defs map[string]*reflectDef) map[string]string {
+	// Group keys by short name.
+	byName := map[string][]string{} // shortName → [keys...]
+	for key, d := range defs {
+		byName[d.name] = append(byName[d.name], key)
+	}
+
+	display := make(map[string]string, len(defs))
+	for key, d := range defs {
+		if len(byName[d.name]) > 1 {
+			// Collision — prefix with title-cased package last segment.
+			pkg := d.pkgPath
+			if idx := strings.LastIndexByte(pkg, '/'); idx >= 0 {
+				pkg = pkg[idx+1:]
+			}
+			if len(pkg) > 0 {
+				display[key] = strings.ToUpper(pkg[:1]) + pkg[1:] + d.name
+			} else {
+				display[key] = d.name
+			}
+		} else {
+			display[key] = d.name
+		}
+	}
+	return display
+}
+
+// resolveTypeTokens replaces all \x00key\x00 tokens in s with display names.
+func resolveTypeTokens(s string, display map[string]string) string {
+	if !strings.ContainsRune(s, '\x00') {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for {
+		start := strings.IndexByte(s, '\x00')
+		if start < 0 {
+			b.WriteString(s)
+			break
+		}
+		b.WriteString(s[:start])
+		s = s[start+1:]
+		end := strings.IndexByte(s, '\x00')
+		if end < 0 {
+			b.WriteByte('\x00')
+			continue
+		}
+		key := s[:end]
+		if name, ok := display[key]; ok {
+			b.WriteString(name)
+		} else {
+			b.WriteString(key)
+		}
+		s = s[end+1:]
+	}
+	return b.String()
 }
 
 // reflectGoKind returns a Go kind string for Zod type discrimination.
