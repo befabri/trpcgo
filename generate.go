@@ -64,8 +64,11 @@ func (r *Router) GenerateZod(outputPath string) error {
 		return fmt.Errorf("generating Zod schemas: %w", err)
 	}
 
-	// No typed inputs → nothing to write.
+	// No typed inputs → remove stale file if it exists.
 	if buf.Len() == 0 {
+		if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing stale Zod file: %w", err)
+		}
 		return nil
 	}
 

@@ -321,6 +321,27 @@ type ZodOptionalInput struct {
 	Offset int     `json:"offset"`
 }
 
+// Zod extends fixture types.
+type ZodBase struct {
+	ID string `json:"id" validate:"required"`
+}
+
+type ZodDerived struct {
+	ZodBase `tstype:",extends"`
+	Name    string `json:"name" validate:"required,min=1"`
+}
+
+type ZodMultiBase struct {
+	ZodBase       `tstype:",extends"`
+	ExAuditFields `tstype:",extends"`
+	Title         string `json:"title" validate:"required"`
+}
+
+type ZodPtrExtends struct {
+	*ZodBase `tstype:",extends"`
+	Label    string `json:"label"`
+}
+
 // ---------- helpers ----------
 
 func generateTS(t *testing.T, r *trpcgo.Router) string {
@@ -1989,5 +2010,125 @@ void addr; void nums; void tree; void bools; void base; void user; void doc;
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("tsc structural check failed:\n%s\n\nGenerated TypeScript:\n%s", string(output), ts)
+	}
+}
+
+// ---------- Zod extends tests ----------
+
+func TestGenerateZodExtends(t *testing.T) {
+	t.Run("basic extends uses .extend()", func(t *testing.T) {
+		r := trpcgo.NewRouter()
+		trpcgo.Mutation(r, "create", func(_ context.Context, input ZodDerived) (string, error) {
+			return "", nil
+		})
+		zod := generateZod(t, r)
+		t.Log(zod)
+
+		// Base schema must be emitted.
+		if !strings.Contains(zod, "export const ZodBaseSchema = z.object({") {
+			t.Error("missing ZodBaseSchema")
+		}
+		if !strings.Contains(zod, "id: z.string(),") {
+			t.Error("ZodBaseSchema missing id field")
+		}
+
+		// Derived must use .extend(), not z.object().
+		if !strings.Contains(zod, "export const ZodDerivedSchema = ZodBaseSchema.extend({") {
+			t.Errorf("ZodDerivedSchema should use ZodBaseSchema.extend(), got:\n%s", zod)
+		}
+		if !strings.Contains(zod, "name: z.string().min(1),") {
+			t.Error("ZodDerivedSchema missing name field")
+		}
+
+		// Base schema must appear before derived (topo order).
+		baseIdx := strings.Index(zod, "ZodBaseSchema")
+		derivedIdx := strings.Index(zod, "ZodDerivedSchema")
+		if baseIdx > derivedIdx {
+			t.Error("ZodBaseSchema must appear before ZodDerivedSchema (topo order)")
+		}
+	})
+
+	t.Run("multiple extends uses .merge().extend()", func(t *testing.T) {
+		r := trpcgo.NewRouter()
+		trpcgo.Mutation(r, "create", func(_ context.Context, input ZodMultiBase) (string, error) {
+			return "", nil
+		})
+		zod := generateZod(t, r)
+		t.Log(zod)
+
+		// Must emit both base schemas.
+		if !strings.Contains(zod, "ZodBaseSchema") {
+			t.Error("missing ZodBaseSchema")
+		}
+		if !strings.Contains(zod, "ExAuditFieldsSchema") {
+			t.Error("missing ExAuditFieldsSchema")
+		}
+
+		// Derived uses merge+extend.
+		if !strings.Contains(zod, "ZodBaseSchema.merge(ExAuditFieldsSchema).extend({") {
+			t.Errorf("ZodMultiBaseSchema should use .merge().extend(), got:\n%s", zod)
+		}
+	})
+
+	t.Run("pointer extends uses .partial()", func(t *testing.T) {
+		r := trpcgo.NewRouter()
+		trpcgo.Mutation(r, "create", func(_ context.Context, input ZodPtrExtends) (string, error) {
+			return "", nil
+		})
+		zod := generateZod(t, r)
+		t.Log(zod)
+
+		// Pointer extends without required → Partial<ZodBase> → .partial().extend()
+		if !strings.Contains(zod, "ZodBaseSchema.partial().extend({") {
+			t.Errorf("pointer extends should use .partial().extend(), got:\n%s", zod)
+		}
+		if !strings.Contains(zod, "label: z.string(),") {
+			t.Error("missing own field 'label'")
+		}
+	})
+
+	t.Run("base type reachable only through extends", func(t *testing.T) {
+		// ZodDerived.Fields has no reference to ZodBase — the ONLY
+		// link is through Extends. If transitiveReachable doesn't
+		// walk Extends, ZodBaseSchema won't be emitted.
+		r := trpcgo.NewRouter()
+		trpcgo.Mutation(r, "create", func(_ context.Context, input ZodDerived) (string, error) {
+			return "", nil
+		})
+		zod := generateZod(t, r)
+
+		if !strings.Contains(zod, "export const ZodBaseSchema") {
+			t.Errorf("ZodBase should be reachable through extends, but missing from output:\n%s", zod)
+		}
+	})
+}
+
+func TestGenerateZodStaleFileCleanup(t *testing.T) {
+	dir := t.TempDir()
+	zodOut := filepath.Join(dir, "zod.ts")
+
+	// Step 1: Generate with input types → file exists.
+	r1 := trpcgo.NewRouter()
+	trpcgo.Mutation(r1, "login", func(_ context.Context, input ZodLoginInput) (string, error) {
+		return "", nil
+	})
+	if err := r1.GenerateZod(zodOut); err != nil {
+		t.Fatalf("GenerateZod (with inputs): %v", err)
+	}
+	if _, err := os.ReadFile(zodOut); err != nil {
+		t.Fatalf("Zod file should exist after generation with inputs: %v", err)
+	}
+
+	// Step 2: Generate with NO input types → stale file should be removed.
+	r2 := trpcgo.NewRouter()
+	trpcgo.VoidQuery(r2, "ping", func(_ context.Context) (string, error) {
+		return "pong", nil
+	})
+	if err := r2.GenerateZod(zodOut); err != nil {
+		t.Fatalf("GenerateZod (void inputs): %v", err)
+	}
+
+	if _, err := os.ReadFile(zodOut); err == nil {
+		t.Error("stale Zod file should be removed when all inputs are void")
 	}
 }

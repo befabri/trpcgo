@@ -76,13 +76,22 @@ func writeZodSchema(w io.Writer, def typemap.TypeDef, cycles map[string]map[stri
 func writeZodObject(w io.Writer, def typemap.TypeDef, cycles map[string]map[string]bool, style typemap.ZodStyle) {
 	schemaName := def.Name + "Schema"
 	isCyclic := len(cycles[def.Name]) > 0
+	hasExtends := len(def.Extends) > 0
+
+	// Build the schema expression opener.
+	// Without extends: z.object({...})
+	// With extends: BaseSchema.extend({...})
+	var objectExpr string
+	if hasExtends {
+		objectExpr = extendsBaseExpr(def.Extends) + ".extend({"
+	} else {
+		objectExpr = "z.object({"
+	}
 
 	if isCyclic {
-		// Cyclic types must use z.lazy() so the schema can reference itself.
-		// A type annotation is required because z.lazy can't infer the type.
-		_, _ = fmt.Fprintf(w, "export const %s: z.ZodType<%s> = z.lazy(() => z.object({\n", schemaName, def.Name)
+		_, _ = fmt.Fprintf(w, "export const %s: z.ZodType<%s> = z.lazy(() => %s\n", schemaName, def.Name, objectExpr)
 	} else {
-		_, _ = fmt.Fprintf(w, "export const %s = z.object({\n", schemaName)
+		_, _ = fmt.Fprintf(w, "export const %s = %s\n", schemaName, objectExpr)
 	}
 
 	for _, f := range def.Fields {
@@ -95,6 +104,29 @@ func writeZodObject(w io.Writer, def typemap.TypeDef, cycles map[string]map[stri
 	} else {
 		_, _ = fmt.Fprintln(w, "});")
 	}
+}
+
+// extendsBaseExpr builds the Zod base expression for extends.
+// Single: "BaseSchema" or "BaseSchema.partial()" for Partial<Base>
+// Multiple: "Base1Schema.merge(Base2Schema)"
+func extendsBaseExpr(extends []string) string {
+	parts := make([]string, len(extends))
+	for i, ext := range extends {
+		if after, ok := strings.CutPrefix(ext, "Partial<"); ok {
+			name := strings.TrimSuffix(after, ">")
+			parts[i] = name + "Schema.partial()"
+		} else {
+			parts[i] = ext + "Schema"
+		}
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	result := parts[0]
+	for _, p := range parts[1:] {
+		result += ".merge(" + p + ")"
+	}
+	return result
 }
 
 func writeZodEnum(w io.Writer, def typemap.TypeDef) {
@@ -296,6 +328,12 @@ func transitiveReachable(roots map[string]bool, defs map[string]typemap.TypeDef)
 					visit(ref)
 				}
 			}
+			// Follow extends relationships — base types are dependencies.
+			for _, ext := range def.Extends {
+				for _, ref := range extractTypeRefs(ext) {
+					visit(ref)
+				}
+			}
 		}
 	}
 	for name := range roots {
@@ -326,6 +364,17 @@ func topologicalSort(reachable map[string]bool, defs map[string]typemap.TypeDef)
 					if ref == name {
 						selfRefs[name] = true
 					} else {
+						deps[name] = append(deps[name], ref)
+					}
+				}
+			}
+			// Extends are also dependencies — base schemas must emit first.
+			for _, ext := range def.Extends {
+				for _, ref := range extractTypeRefs(ext) {
+					if !reachable[ref] {
+						continue
+					}
+					if ref != name {
 						deps[name] = append(deps[name], ref)
 					}
 				}

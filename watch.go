@@ -153,7 +153,14 @@ func regenerateFromSource(opts watchOpts) {
 			log.Printf("trpcgo: zod codegen failed: %v", err)
 			return
 		}
-		writeIfChanged(opts.zodOutput, zodBuf.Bytes(), "zod schemas")
+		if zodBuf.Len() == 0 {
+			// No typed inputs — remove stale file if it exists.
+			if err := os.Remove(opts.zodOutput); err == nil {
+				log.Printf("trpcgo: removed %s (no typed inputs)", opts.zodOutput)
+			}
+		} else {
+			writeIfChanged(opts.zodOutput, zodBuf.Bytes(), "zod schemas")
+		}
 	}
 }
 
