@@ -60,6 +60,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.router.opts.createContext != nil {
 		ctx = h.router.opts.createContext(r)
 	}
+	ctx = withResponseMetadata(ctx)
 
 	// JSONL streaming: concurrent execution with progressive chunk delivery.
 	if isBatch && r.Header.Get("trpc-accept") == "application/jsonl" {
@@ -101,6 +102,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.writeErrorResponse(w, NewError(CodeInternalServerError, "failed to serialize response"), "", http.StatusInternalServerError, ctx, "")
 			return
 		}
+		applyResponseMetadata(ctx, w)
 		w.WriteHeader(results[0].status)
 		w.Write(data)
 		return
@@ -119,6 +121,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	statusCode := determineBatchStatus(results)
+	applyResponseMetadata(ctx, w)
 	w.WriteHeader(statusCode)
 	w.Write(data)
 }
@@ -286,6 +289,7 @@ func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWrite
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Transfer-Encoding", "chunked")
 	w.Header().Set("Vary", "trpc-accept")
+	applyResponseMetadata(ctx, w)
 	w.WriteHeader(http.StatusOK)
 	w.Write(headData)
 	w.Write([]byte("\n"))
@@ -329,6 +333,9 @@ func (h *httpHandler) writeErrorResponse(w http.ResponseWriter, err *Error, path
 	if marshalErr != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
+	}
+	if ctx != nil {
+		applyResponseMetadata(ctx, w)
 	}
 	w.WriteHeader(status)
 	w.Write(data)

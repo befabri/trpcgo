@@ -3630,3 +3630,173 @@ func TestValidatorNotSet(t *testing.T) {
 		t.Errorf("greeting = %v, want 'Hello, !'", data["greeting"])
 	}
 }
+
+// --- Response Metadata Tests ---
+
+func TestSetCookieFromHandler(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	trpcgo.VoidMutation(router, "auth.login", func(ctx context.Context) (string, error) {
+		trpcgo.SetCookie(ctx, &http.Cookie{
+			Name:  "session",
+			Value: "abc123",
+			Path:  "/",
+		})
+		trpcgo.SetCookie(ctx, &http.Cookie{
+			Name:  "logged_in",
+			Value: "1",
+			Path:  "/",
+		})
+		return "ok", nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+	resp := mustPost(t, server, "/trpc/auth.login", "")
+	if resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	cookies := resp.Cookies()
+	if len(cookies) != 2 {
+		t.Fatalf("got %d cookies, want 2", len(cookies))
+	}
+
+	found := map[string]string{}
+	for _, c := range cookies {
+		found[c.Name] = c.Value
+	}
+	if found["session"] != "abc123" {
+		t.Errorf("session cookie = %q, want %q", found["session"], "abc123")
+	}
+	if found["logged_in"] != "1" {
+		t.Errorf("logged_in cookie = %q, want %q", found["logged_in"], "1")
+	}
+
+	resp.Body.Close()
+}
+
+func TestSetCookieFromMiddleware(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	mw := func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input any) (any, error) {
+			trpcgo.SetCookie(ctx, &http.Cookie{
+				Name:  "mw_cookie",
+				Value: "from_middleware",
+			})
+			return next(ctx, input)
+		}
+	}
+
+	trpcgo.VoidQuery(router, "test", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	}, trpcgo.Use(mw))
+
+	server := newTestServer(t, router.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/test")
+	if resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	cookies := resp.Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("got %d cookies, want 1", len(cookies))
+	}
+	if cookies[0].Name != "mw_cookie" || cookies[0].Value != "from_middleware" {
+		t.Errorf("cookie = %s=%s, want mw_cookie=from_middleware", cookies[0].Name, cookies[0].Value)
+	}
+	resp.Body.Close()
+}
+
+func TestSetResponseHeader(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	trpcgo.VoidQuery(router, "test", func(ctx context.Context) (string, error) {
+		trpcgo.SetResponseHeader(ctx, "X-Custom", "hello")
+		return "ok", nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/test")
+	if resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	if got := resp.Header.Get("X-Custom"); got != "hello" {
+		t.Errorf("X-Custom = %q, want %q", got, "hello")
+	}
+	resp.Body.Close()
+}
+
+func TestSetCookieOnError(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	trpcgo.VoidMutation(router, "auth.logout", func(ctx context.Context) (string, error) {
+		// Set cookie to clear session even on error path
+		trpcgo.SetCookie(ctx, &http.Cookie{
+			Name:   "session",
+			Value:  "",
+			MaxAge: -1,
+		})
+		return "", trpcgo.NewError(trpcgo.CodeUnauthorized, "session expired")
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+	resp := mustPost(t, server, "/trpc/auth.logout", "")
+	if resp.StatusCode != 401 {
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+
+	cookies := resp.Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("got %d cookies, want 1", len(cookies))
+	}
+	if cookies[0].Name != "session" || cookies[0].MaxAge != -1 {
+		t.Errorf("cookie = %s maxAge=%d, want session maxAge=-1", cookies[0].Name, cookies[0].MaxAge)
+	}
+	resp.Body.Close()
+}
+
+func TestSetCookieInBatch(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithBatching(true))
+
+	trpcgo.VoidMutation(router, "noop", func(ctx context.Context) (string, error) {
+		return "hi", nil
+	})
+
+	trpcgo.VoidMutation(router, "auth.login", func(ctx context.Context) (string, error) {
+		trpcgo.SetCookie(ctx, &http.Cookie{
+			Name:  "token",
+			Value: "batch_token",
+		})
+		return "ok", nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+	resp := mustPost(t, server, "/trpc/noop,auth.login?batch=1", `{"0":null,"1":null}`)
+	if resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	cookies := resp.Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("got %d cookies, want 1", len(cookies))
+	}
+	if cookies[0].Name != "token" || cookies[0].Value != "batch_token" {
+		t.Errorf("cookie = %s=%s, want token=batch_token", cookies[0].Name, cookies[0].Value)
+	}
+	resp.Body.Close()
+}
+
+func TestSetCookieNoopOutsideHandler(t *testing.T) {
+	// SetCookie with a plain context should be a no-op, not panic.
+	ctx := context.Background()
+	trpcgo.SetCookie(ctx, &http.Cookie{Name: "test", Value: "value"})
+	trpcgo.SetResponseHeader(ctx, "X-Test", "value")
+	// If we got here without panicking, the test passes.
+}
