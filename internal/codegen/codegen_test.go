@@ -618,3 +618,52 @@ func TestRouterInputsOutputs(t *testing.T) {
 		}
 	})
 }
+
+func TestWriteAppRouterNoProcs(t *testing.T) {
+	var buf bytes.Buffer
+	if err := codegen.WriteAppRouter(&buf, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	if strings.Contains(output, "$Procedure") {
+		t.Errorf("$Procedure should not be emitted with no procedures.\nOutput:\n%s", output)
+	}
+	if strings.Contains(output, "$Query") {
+		t.Errorf("$Query should not be emitted with no procedures.\nOutput:\n%s", output)
+	}
+	if strings.Contains(output, "RouterInputs") {
+		t.Errorf("RouterInputs should not be emitted with no procedures.\nOutput:\n%s", output)
+	}
+	if strings.Contains(output, "RouterOutputs") {
+		t.Errorf("RouterOutputs should not be emitted with no procedures.\nOutput:\n%s", output)
+	}
+	// AppRouter should still be emitted.
+	if !strings.Contains(output, "export type AppRouter =") {
+		t.Errorf("AppRouter should always be emitted.\nOutput:\n%s", output)
+	}
+}
+
+func TestWriteAppRouterOnlyEmitsUsedProcTypes(t *testing.T) {
+	procs := []codegen.ProcEntry{
+		{Path: "user.get", ProcType: "query", InputTS: "string", OutputTS: "User"},
+	}
+	var buf bytes.Buffer
+	if err := codegen.WriteAppRouter(&buf, procs, nil); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	if !strings.Contains(output, "$Procedure") {
+		t.Errorf("$Procedure should be emitted when procs exist.\nOutput:\n%s", output)
+	}
+	if !strings.Contains(output, "$Query") {
+		t.Errorf("$Query should be emitted for query proc.\nOutput:\n%s", output)
+	}
+	if strings.Contains(output, "$Mutation") {
+		t.Errorf("$Mutation should not be emitted when no mutation procs exist.\nOutput:\n%s", output)
+	}
+	if strings.Contains(output, "$Subscription") {
+		t.Errorf("$Subscription should not be emitted when no subscription procs exist.\nOutput:\n%s", output)
+	}
+}

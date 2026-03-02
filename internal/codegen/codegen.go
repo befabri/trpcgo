@@ -80,8 +80,15 @@ func WriteAppRouter(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef) erro
 		fmt.Fprintln(w)
 	}
 
-	// Procedure type helpers.
-	fmt.Fprint(w, `// Structural procedure types compatible with @trpc/client
+	// Determine which procedure types are used.
+	usedTypes := map[string]bool{}
+	for _, p := range procs {
+		usedTypes[p.ProcType] = true
+	}
+
+	// Procedure type helpers (only emit types that are used).
+	if len(usedTypes) > 0 {
+		fmt.Fprint(w, `// Structural procedure types compatible with @trpc/client
 type $Procedure<TType extends string, TInput, TOutput> = {
   _def: {
     $types: { input: TInput; output: TOutput };
@@ -94,17 +101,35 @@ type $Procedure<TType extends string, TInput, TOutput> = {
   meta: unknown;
 } & ((...args: any[]) => any);
 
-type $Query<TInput, TOutput> = $Procedure<"query", TInput, TOutput>;
-type $Mutation<TInput, TOutput> = $Procedure<"mutation", TInput, TOutput>;
-type $Subscription<TInput, TOutput> = $Procedure<"subscription", TInput, TOutput>;
-
 `)
+		if usedTypes["query"] {
+			fmt.Fprintln(w, `type $Query<TInput, TOutput> = $Procedure<"query", TInput, TOutput>;`)
+		}
+		if usedTypes["mutation"] {
+			fmt.Fprintln(w, `type $Mutation<TInput, TOutput> = $Procedure<"mutation", TInput, TOutput>;`)
+		}
+		if usedTypes["subscription"] {
+			fmt.Fprintln(w, `type $Subscription<TInput, TOutput> = $Procedure<"subscription", TInput, TOutput>;`)
+		}
+		fmt.Fprintln(w)
+	}
 
 	// Build procedure tree from dot-separated paths.
-	tree := buildTree(procs)
+	tree := buildProcTree(procs, func(p ProcEntry) procLeaf {
+		return procLeaf{procType: p.ProcType, inputTS: p.InputTS, outputTS: p.OutputTS}
+	})
 
 	fmt.Fprint(w, "// Router record matching tRPC's internal structure\ntype AppRouterRecord = ")
-	writeTree(w, tree, 0)
+	writeTreeNodes(w, tree, 0, func(l procLeaf) string {
+		helper := "$Query"
+		switch l.procType {
+		case "mutation":
+			helper = "$Mutation"
+		case "subscription":
+			helper = "$Subscription"
+		}
+		return fmt.Sprintf("%s<%s, %s>", helper, l.inputTS, l.outputTS)
+	})
 	fmt.Fprintln(w, ";")
 	fmt.Fprintln(w)
 
@@ -152,73 +177,19 @@ func writeRouterIO(w io.Writer, procs []ProcEntry) {
 		return
 	}
 
-	inputTree := buildIOTree(procs, true)
-	outputTree := buildIOTree(procs, false)
+	identity := func(s string) string { return s }
+
+	inputTree := buildProcTree(procs, func(p ProcEntry) string { return p.InputTS })
+	outputTree := buildProcTree(procs, func(p ProcEntry) string { return p.OutputTS })
 
 	fmt.Fprint(w, "export type RouterInputs = ")
-	writeIOTree(w, inputTree, 0)
+	writeTreeNodes(w, inputTree, 0, identity)
 	fmt.Fprintln(w, ";")
 	fmt.Fprintln(w)
 
 	fmt.Fprint(w, "export type RouterOutputs = ")
-	writeIOTree(w, outputTree, 0)
+	writeTreeNodes(w, outputTree, 0, identity)
 	fmt.Fprintln(w, ";")
-}
-
-type ioNode struct {
-	children map[string]*ioNode
-	isLeaf   bool
-	tsType   string
-}
-
-func buildIOTree(procs []ProcEntry, isInput bool) *ioNode {
-	root := &ioNode{children: make(map[string]*ioNode)}
-	for _, p := range procs {
-		parts := strings.Split(p.Path, ".")
-		node := root
-		for i, part := range parts {
-			if node.children == nil {
-				node.children = make(map[string]*ioNode)
-			}
-			child, ok := node.children[part]
-			if !ok {
-				child = &ioNode{children: make(map[string]*ioNode)}
-				node.children[part] = child
-			}
-			if i == len(parts)-1 {
-				child.isLeaf = true
-				if isInput {
-					child.tsType = p.InputTS
-				} else {
-					child.tsType = p.OutputTS
-				}
-			}
-			node = child
-		}
-	}
-	return root
-}
-
-func writeIOTree(w io.Writer, node *ioNode, indent int) {
-	keys := make([]string, 0, len(node.children))
-	for k := range node.children {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	prefix := strings.Repeat("  ", indent)
-	fmt.Fprintln(w, "{")
-	for _, key := range keys {
-		child := node.children[key]
-		if child.isLeaf {
-			fmt.Fprintf(w, "%s  %s: %s;\n", prefix, key, child.tsType)
-		} else {
-			fmt.Fprintf(w, "%s  %s: ", prefix, key)
-			writeIOTree(w, child, indent+1)
-			fmt.Fprintln(w, ";")
-		}
-	}
-	fmt.Fprintf(w, "%s}", prefix)
 }
 
 func writeJSDoc(w io.Writer, comment, indent string) {
@@ -270,43 +241,46 @@ func writeAlias(w io.Writer, def typemap.TypeDef) {
 	fmt.Fprintf(w, "export type %s = %s;\n", def.Name, def.AliasOf)
 }
 
-type treeNode struct {
-	children map[string]*treeNode
-	isLeaf   bool
+// procLeaf holds the data for a procedure tree leaf node.
+type procLeaf struct {
 	procType string
 	inputTS  string
 	outputTS string
 }
 
-func buildTree(procs []ProcEntry) *treeNode {
-	root := &treeNode{children: make(map[string]*treeNode)}
+// treeNode is a generic tree node parameterized by leaf data type.
+type treeNode[L any] struct {
+	children map[string]*treeNode[L]
+	isLeaf   bool
+	leaf     L
+}
 
+// buildProcTree builds a tree from dot-separated procedure paths,
+// extracting leaf data from each ProcEntry via leafFn.
+func buildProcTree[L any](procs []ProcEntry, leafFn func(ProcEntry) L) *treeNode[L] {
+	root := &treeNode[L]{children: make(map[string]*treeNode[L])}
 	for _, p := range procs {
 		parts := strings.Split(p.Path, ".")
 		node := root
 		for i, part := range parts {
-			if node.children == nil {
-				node.children = make(map[string]*treeNode)
-			}
 			child, ok := node.children[part]
 			if !ok {
-				child = &treeNode{children: make(map[string]*treeNode)}
+				child = &treeNode[L]{children: make(map[string]*treeNode[L])}
 				node.children[part] = child
 			}
 			if i == len(parts)-1 {
 				child.isLeaf = true
-				child.procType = p.ProcType
-				child.inputTS = p.InputTS
-				child.outputTS = p.OutputTS
+				child.leaf = leafFn(p)
 			}
 			node = child
 		}
 	}
-
 	return root
 }
 
-func writeTree(w io.Writer, node *treeNode, indent int) {
+// writeTreeNodes recursively writes a tree as TypeScript object notation,
+// using renderLeaf to format each leaf node.
+func writeTreeNodes[L any](w io.Writer, node *treeNode[L], indent int, renderLeaf func(L) string) {
 	keys := make([]string, 0, len(node.children))
 	for k := range node.children {
 		keys = append(keys, k)
@@ -318,17 +292,10 @@ func writeTree(w io.Writer, node *treeNode, indent int) {
 	for _, key := range keys {
 		child := node.children[key]
 		if child.isLeaf {
-			helper := "$Query"
-			switch child.procType {
-			case "mutation":
-				helper = "$Mutation"
-			case "subscription":
-				helper = "$Subscription"
-			}
-			fmt.Fprintf(w, "%s  %s: %s<%s, %s>;\n", prefix, key, helper, child.inputTS, child.outputTS)
+			fmt.Fprintf(w, "%s  %s: %s;\n", prefix, key, renderLeaf(child.leaf))
 		} else {
 			fmt.Fprintf(w, "%s  %s: ", prefix, key)
-			writeTree(w, child, indent+1)
+			writeTreeNodes(w, child, indent+1, renderLeaf)
 			fmt.Fprintln(w, ";")
 		}
 	}
