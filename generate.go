@@ -164,6 +164,7 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 				ElementValidate:   f.elementValidate,
 				ElementGoKind:     f.elementGoKind,
 				UnsupportedZod:    f.unsupportedZod,
+				ZodOmit:           f.zodOmit,
 			}
 		}
 		typeDefs[i] = typemap.TypeDef{
@@ -201,6 +202,7 @@ type reflectField struct {
 	elementGoKind     string
 	validateOmitempty bool
 	unsupportedZod    []typemap.ValidateRule
+	zodOmit           bool
 }
 
 // goTypeToTS converts a reflect.Type to its TypeScript representation.
@@ -470,6 +472,8 @@ func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]refl
 		if doc, ok := typemap.ParseTSDocTag(string(f.Tag)); ok {
 			rf.comment = doc
 		}
+
+		rf.zodOmit = typemap.ParseZodOmitTag(string(f.Tag))
 
 		*fields = append(*fields, rf)
 	}

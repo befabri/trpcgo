@@ -1188,3 +1188,81 @@ func TestZodUnsupportedComment(t *testing.T) {
 		t.Errorf("label should have unsupported comment.\nOutput:\n%s", output)
 	}
 }
+
+func TestZodOmitField(t *testing.T) {
+	procs := []codegen.ProcEntry{
+		{Path: "update", ProcType: "mutation", InputTS: "UpdateInput", OutputTS: "string"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "UpdateInput",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{Name: "id", Type: "string", GoKind: "string", ZodOmit: true},
+				{Name: "name", Type: "string", GoKind: "string"},
+				{Name: "active", Type: "boolean", GoKind: "bool"},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+	t.Log(output)
+
+	// id should NOT appear in the schema.
+	if strings.Contains(output, "id: z.") {
+		t.Errorf("omitted field 'id' should not appear in Zod schema.\nOutput:\n%s", output)
+	}
+
+	// name and active should appear.
+	if !strings.Contains(output, "name: z.string(),") {
+		t.Errorf("non-omitted field 'name' should appear.\nOutput:\n%s", output)
+	}
+	if !strings.Contains(output, "active: z.boolean(),") {
+		t.Errorf("non-omitted field 'active' should appear.\nOutput:\n%s", output)
+	}
+}
+
+func TestZodOmitSkipsRefinement(t *testing.T) {
+	procs := []codegen.ProcEntry{
+		{Path: "update", ProcType: "mutation", InputTS: "RangeInput", OutputTS: "string"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "RangeInput",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{Name: "id", Type: "string", GoKind: "string", ZodOmit: true},
+				{Name: "min_val", Type: "number", GoKind: "int32"},
+				{Name: "max_val", Type: "number", GoKind: "int32"},
+			},
+			Refinements: []typemap.Refinement{
+				// This one references a non-omitted field pair → should be emitted.
+				{Field: "max_val", Op: ">=", OtherField: "min_val", Tag: "gtefield"},
+				// This one references the omitted "id" field → should be skipped.
+				{Field: "min_val", Op: ">=", OtherField: "id", Tag: "gtefield"},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+	t.Log(output)
+
+	// Refinement for max_val >= min_val should exist.
+	if !strings.Contains(output, "data.max_val >= data.min_val") {
+		t.Errorf("expected refinement for non-omitted fields.\nOutput:\n%s", output)
+	}
+
+	// Refinement referencing omitted "id" should be skipped.
+	if strings.Count(output, ".refine(") != 1 {
+		t.Errorf("expected exactly 1 .refine() (skipping one that references omitted field), got %d.\nOutput:\n%s",
+			strings.Count(output, ".refine("), output)
+	}
+}

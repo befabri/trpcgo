@@ -373,6 +373,41 @@ type ZodCrossFieldAllOps struct {
 	G int32 `json:"g" validate:"nefield=A"`
 }
 
+// zod_omit fixture — id is excluded from Zod schema but kept in TS interface.
+type ZodOmitInput struct {
+	ID     string `json:"id" zod_omit:"true"`
+	Name   string `json:"name" validate:"required,min=1"`
+	Active bool   `json:"active"`
+}
+
+// zod_omit + cross-field: omitted field's refinement should be skipped.
+type ZodOmitWithRefine struct {
+	ID     int32 `json:"id" zod_omit:"true"`
+	MinVal int32 `json:"min_val" validate:"min=1,gtefield=ID"`
+	MaxVal int32 `json:"max_val" validate:"min=1,gtefield=MinVal"`
+}
+
+// int64/uint64 fixture — these should map to z.number() not z.int64()/z.uint64().
+type ZodInt64Input struct {
+	BigSigned   int64  `json:"bigSigned"`
+	BigUnsigned uint64 `json:"bigUnsigned"`
+	NormalInt   int32  `json:"normalInt"`
+}
+
+// New format and constraint tags fixture — tests the reflect-path end-to-end.
+type ZodNewTagsInput struct {
+	Host    string `json:"host" validate:"hostname"`
+	Token   string `json:"token" validate:"base64url"`
+	Hash    string `json:"hash" validate:"hexadecimal,min=64,max=64"`
+	ID      string `json:"id" validate:"ulid"`
+	Mac     string `json:"mac" validate:"mac"`
+	Subnet  string `json:"subnet" validate:"cidrv4"`
+	Code    string `json:"code" validate:"uppercase"`
+	Website string `json:"website" validate:"startswith=https://,min=10"`
+	File    string `json:"file" validate:"endswith=.json"`
+	Path    string `json:"path" validate:"contains=/api/"`
+}
+
 // ---------- helpers ----------
 
 func generateTS(t *testing.T, r *trpcgo.Router) string {
@@ -2280,6 +2315,394 @@ func TestGenerateZodCrossFieldAllOps(t *testing.T) {
 	}
 }
 
+func TestGenerateZodInt64Number(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.Mutation(r, "big", func(_ context.Context, input ZodInt64Input) (string, error) {
+		return "", nil
+	})
+	zod := generateZod(t, r)
+	t.Log(zod)
+
+	// int64 and uint64 should map to z.number() since JSON encodes them as numbers,
+	// not z.int64()/z.uint64() which are ZodBigInt schemas in Zod 4.
+	if strings.Contains(zod, "z.int64()") {
+		t.Errorf("int64 should map to z.number(), not z.int64().\nOutput:\n%s", zod)
+	}
+	if strings.Contains(zod, "z.uint64()") {
+		t.Errorf("uint64 should map to z.number(), not z.uint64().\nOutput:\n%s", zod)
+	}
+
+	// bigSigned and bigUnsigned should be z.number().
+	if !strings.Contains(zod, "bigSigned: z.number(),") {
+		t.Errorf("expected bigSigned: z.number().\nOutput:\n%s", zod)
+	}
+	if !strings.Contains(zod, "bigUnsigned: z.number(),") {
+		t.Errorf("expected bigUnsigned: z.number().\nOutput:\n%s", zod)
+	}
+
+	// int32 should remain z.int32().
+	if !strings.Contains(zod, "normalInt: z.int32(),") {
+		t.Errorf("expected normalInt: z.int32().\nOutput:\n%s", zod)
+	}
+}
+
+func TestGenerateZodNewTags(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.Mutation(r, "create", func(_ context.Context, input ZodNewTagsInput) (string, error) {
+		return "", nil
+	})
+	zod := generateZod(t, r)
+	t.Log(zod)
+
+	// Format tags → base types.
+	checks := map[string]string{
+		"host":    "z.hostname()",
+		"token":   "z.base64url()",
+		"id":      "z.ulid()",
+		"mac":     "z.mac()",
+		"subnet":  "z.cidrv4()",
+		"code":    "z.uppercase()",
+	}
+	for field, base := range checks {
+		if !strings.Contains(zod, field+": "+base) {
+			t.Errorf("expected %s: %s.\nOutput:\n%s", field, base, zod)
+		}
+	}
+
+	// Format + constraint combo: hex with .min(64).max(64).
+	if !strings.Contains(zod, "hash: z.hex().min(64).max(64),") {
+		t.Errorf("expected hash: z.hex().min(64).max(64).\nOutput:\n%s", zod)
+	}
+
+	// Constraint tags on string fields.
+	if !strings.Contains(zod, `website: z.string().startsWith("https://").min(10),`) {
+		t.Errorf("expected website with startsWith + min.\nOutput:\n%s", zod)
+	}
+	if !strings.Contains(zod, `file: z.string().endsWith(".json"),`) {
+		t.Errorf("expected file with endsWith.\nOutput:\n%s", zod)
+	}
+	if !strings.Contains(zod, `path: z.string().includes("/api/"),`) {
+		t.Errorf("expected path with includes.\nOutput:\n%s", zod)
+	}
+
+	// No unsupported comments — all tags are now recognized.
+	if strings.Contains(zod, "/* unsupported") {
+		t.Errorf("no unsupported comments expected.\nOutput:\n%s", zod)
+	}
+}
+
+// ---------- runtime Zod validation via @traversable/zod-test ----------
+
+func TestZodRuntimeValidation(t *testing.T) {
+	zodRuntimeDir, err := filepath.Abs("testdata/zodruntime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsxPath := filepath.Join(zodRuntimeDir, "node_modules", ".bin", "tsx")
+	if _, err := os.Stat(tsxPath); err != nil {
+		t.Skip("zodruntime node_modules not installed, run: npm install --prefix testdata/zodruntime")
+	}
+
+	runValidation := func(t *testing.T, zodCode, script string) {
+		t.Helper()
+		dir := t.TempDir()
+
+		// Symlink node_modules so imports resolve.
+		if err := os.Symlink(filepath.Join(zodRuntimeDir, "node_modules"), filepath.Join(dir, "node_modules")); err != nil {
+			t.Fatalf("symlink node_modules: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "schemas.ts"), []byte(zodCode), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "validate.ts"), []byte(script), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := exec.Command(tsxPath, filepath.Join(dir, "validate.ts"))
+		cmd.Dir = dir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("runtime validation failed:\n%s\n\nGenerated schemas:\n%s", string(output), zodCode)
+		}
+		t.Log(string(output))
+	}
+
+	t.Run("standard", func(t *testing.T) {
+		r := trpcgo.NewRouter()
+		// Register diverse types exercising all constraint categories.
+		trpcgo.Mutation(r, "auth.login", func(_ context.Context, input ZodLoginInput) (string, error) {
+			return "", nil
+		})
+		trpcgo.Mutation(r, "items.create", func(_ context.Context, input ZodCreateItemInput) (string, error) {
+			return "", nil
+		})
+		trpcgo.Query(r, "search", func(_ context.Context, input ZodOptionalInput) (string, error) {
+			return "", nil
+		})
+		trpcgo.Mutation(r, "derived.create", func(_ context.Context, input ZodDerived) (string, error) {
+			return "", nil
+		})
+		trpcgo.Mutation(r, "multi.create", func(_ context.Context, input ZodMultiBase) (string, error) {
+			return "", nil
+		})
+		trpcgo.Mutation(r, "ptr.create", func(_ context.Context, input ZodPtrExtends) (string, error) {
+			return "", nil
+		})
+		trpcgo.Mutation(r, "cross.create", func(_ context.Context, input ZodCrossFieldInput) (string, error) {
+			return "", nil
+		})
+		trpcgo.Mutation(r, "omit.create", func(_ context.Context, input ZodOmitInput) (string, error) {
+			return "", nil
+		})
+		trpcgo.Mutation(r, "nums.create", func(_ context.Context, input ZodInt64Input) (string, error) {
+			return "", nil
+		})
+
+		zod := generateZod(t, r)
+		t.Log(zod)
+
+		script := `import { z } from "zod";
+import { zxTest } from "@traversable/zod-test";
+import * as fc from "fast-check";
+import * as schemas from "./schemas.js";
+
+let passed = 0;
+let failed = 0;
+let fuzzed = 0;
+function test(name: string, fn: () => void) {
+  try { fn(); passed++; console.log("PASS:", name); }
+  catch (e: any) { failed++; console.error("FAIL:", name, e?.message ?? e); }
+}
+function mustReject(name: string, schema: z.ZodType, data: unknown) {
+  test(name, () => {
+    const r = schema.safeParse(data);
+    if (r.success) throw new Error("expected rejection, got success");
+  });
+}
+
+// ---- Dynamic fuzz: auto-discover and fuzz every exported schema ----
+//
+// The string override handles the z.email()/fast-check incompatibility:
+// fuzz()'s built-in applyStringFormat calls fc.emailAddress() for z.email(),
+// but fast-check generates RFC emails that fail Zod 4's stricter regex.
+// We intercept format:"email" and filter; return null for other strings
+// to fall through to the built-in (which respects min/max constraints).
+const zodEmailRe = /^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/;
+const fuzzOpts = {};
+const fuzzOverrides = {
+  string: (x: any, constraints: any) => {
+    if (x.format === "email") return fc.emailAddress().filter((e: string) => zodEmailRe.test(e));
+    return null; // fall through to built-in (respects min/max/length)
+  },
+};
+
+// Schemas with .refine() can't be fuzzed (fast-check can't satisfy arbitrary
+// JS predicates). In Zod 4, refinements live in _zod.def.checks as entries
+// with _zod.def.check === "custom".
+function hasRefine(v: any): boolean {
+  const checks = v?._zod?.def?.checks;
+  if (!Array.isArray(checks) || checks.length === 0) return false;
+  return checks.some((ch: any) => ch?._zod?.def?.check === "custom");
+}
+
+for (const [name, value] of Object.entries(schemas)) {
+  // Skip non-schema exports.
+  if (typeof (value as any)?._zod?.def?.type !== "string") continue;
+
+  // Skip schemas with .refine() — cross-field constraints are arbitrary JS.
+  if (hasRefine(value)) {
+    console.log("SKIP-REFINE:", name);
+    continue;
+  }
+
+  test("fuzz " + name, () => {
+    const arb = zxTest.fuzz(value as any, fuzzOpts, fuzzOverrides);
+    fc.assert(fc.property(arb, (d) => { (value as any).parse(d); }), { numRuns: 100 });
+    fuzzed++;
+  });
+}
+
+// ---- Manual valid data ----
+
+const S = schemas as any;
+
+test("LoginInput valid", () => {
+  S.ZodLoginInputSchema.parse({ email: "user@example.com", password: "securepass123" });
+});
+
+test("CreateItemInput valid", () => {
+  S.ZodCreateItemInputSchema.parse({ name: "Widget", tags: ["electronics", "sale"], count: 42 });
+});
+
+test("CreateItemInput boundary", () => {
+  S.ZodCreateItemInputSchema.parse({ name: "x", tags: [], count: 0 });
+  S.ZodCreateItemInputSchema.parse({ name: "x".repeat(100), tags: Array(10).fill("a".repeat(50)), count: 1000 });
+});
+
+test("OptionalInput with all fields", () => {
+  S.ZodOptionalInputSchema.parse({ query: "test", limit: 10, offset: 0 });
+});
+
+test("OptionalInput minimal", () => {
+  S.ZodOptionalInputSchema.parse({ offset: 0 });
+});
+
+test("OptionalInput omitempty empty string", () => {
+  S.ZodOptionalInputSchema.parse({ query: "", offset: 5 });
+});
+
+test("DerivedSchema inherits base", () => {
+  S.ZodDerivedSchema.parse({ id: "abc-123", name: "Alice" });
+});
+
+test("MultiBase merges two bases", () => {
+  S.ZodMultiBaseSchema.parse({ id: "1", createdBy: "a", updatedBy: "b", title: "T" });
+});
+
+test("PtrExtends partial base", () => {
+  S.ZodPtrExtendsSchema.parse({ label: "x" });
+  S.ZodPtrExtendsSchema.parse({ id: "1", label: "x" });
+});
+
+test("OmitInput skips id", () => {
+  S.ZodOmitInputSchema.parse({ name: "Alice", active: true });
+});
+
+test("Int64Input numeric mapping", () => {
+  S.ZodInt64InputSchema.parse({ bigSigned: 999999999, bigUnsigned: 999999999, normalInt: 42 });
+});
+
+test("CrossFieldInput valid", () => {
+  S.ZodCrossFieldInputSchema.parse({ min_val: 1, max_val: 5, start_val: 1, end_val: 10 });
+});
+
+// ---- Constraint rejection ----
+
+mustReject("LoginInput: invalid email", S.ZodLoginInputSchema, { email: "not-email", password: "securepass123" });
+mustReject("LoginInput: password too short", S.ZodLoginInputSchema, { email: "a@b.com", password: "short" });
+mustReject("LoginInput: password too long", S.ZodLoginInputSchema, { email: "a@b.com", password: "x".repeat(129) });
+mustReject("LoginInput: missing email", S.ZodLoginInputSchema, { password: "securepass123" });
+mustReject("LoginInput: missing password", S.ZodLoginInputSchema, { email: "a@b.com" });
+
+mustReject("CreateItemInput: name too long", S.ZodCreateItemInputSchema, { name: "x".repeat(101), tags: [], count: 0 });
+mustReject("CreateItemInput: count below min", S.ZodCreateItemInputSchema, { name: "x", tags: [], count: -1 });
+mustReject("CreateItemInput: count above max", S.ZodCreateItemInputSchema, { name: "x", tags: [], count: 1001 });
+mustReject("CreateItemInput: array too long", S.ZodCreateItemInputSchema, { name: "x", tags: Array(11).fill("a"), count: 0 });
+mustReject("CreateItemInput: element too long", S.ZodCreateItemInputSchema, { name: "x", tags: ["a".repeat(51)], count: 0 });
+
+mustReject("DerivedSchema: missing base id", S.ZodDerivedSchema, { name: "Alice" });
+mustReject("DerivedSchema: name too short", S.ZodDerivedSchema, { id: "1", name: "" });
+
+mustReject("CrossField: max < min", S.ZodCrossFieldInputSchema, { min_val: 10, max_val: 5, start_val: 1, end_val: 10 });
+mustReject("CrossField: end < start", S.ZodCrossFieldInputSchema, { min_val: 1, max_val: 5, start_val: 10, end_val: 1 });
+
+mustReject("OmitInput: name too short", S.ZodOmitInputSchema, { name: "", active: false });
+
+// ---- Summary ----
+console.log("Fuzzed " + fuzzed + " schemas dynamically");
+if (failed > 0) {
+  console.error(failed + " test(s) FAILED out of " + (passed + failed));
+  process.exit(1);
+}
+console.log("All " + passed + " tests passed");
+`
+		runValidation(t, zod, script)
+	})
+
+	t.Run("mini", func(t *testing.T) {
+		r := trpcgo.NewRouter(trpcgo.WithZodMini(true))
+		trpcgo.Mutation(r, "auth.login", func(_ context.Context, input ZodLoginInput) (string, error) {
+			return "", nil
+		})
+		trpcgo.Mutation(r, "items.create", func(_ context.Context, input ZodCreateItemInput) (string, error) {
+			return "", nil
+		})
+		trpcgo.Query(r, "search", func(_ context.Context, input ZodOptionalInput) (string, error) {
+			return "", nil
+		})
+		trpcgo.Mutation(r, "derived.create", func(_ context.Context, input ZodDerived) (string, error) {
+			return "", nil
+		})
+		trpcgo.Mutation(r, "cross.create", func(_ context.Context, input ZodCrossFieldInput) (string, error) {
+			return "", nil
+		})
+
+		zod := generateZod(t, r)
+		t.Log(zod)
+
+		// zod/mini is not compatible with @traversable/zod-test fuzz
+		// (fuzz imports from "zod" internally), so manual tests only.
+		script := `import * as z from "zod/mini";
+import * as schemas from "./schemas.js";
+
+let passed = 0;
+let failed = 0;
+function test(name: string, fn: () => void) {
+  try { fn(); passed++; console.log("PASS:", name); }
+  catch (e: any) { failed++; console.error("FAIL:", name, e?.message ?? e); }
+}
+function mustReject(name: string, schema: z.ZodMiniType, data: unknown) {
+  test(name, () => {
+    const r = schema.safeParse(data);
+    if (r.success) throw new Error("expected rejection, got success");
+  });
+}
+
+const S = schemas as any;
+
+// ---- Manual valid data ----
+
+test("LoginInput valid", () => {
+  S.ZodLoginInputSchema.parse({ email: "user@example.com", password: "securepass123" });
+});
+
+test("CreateItemInput valid", () => {
+  S.ZodCreateItemInputSchema.parse({ name: "Widget", tags: ["electronics"], count: 42 });
+});
+
+test("CreateItemInput boundary", () => {
+  S.ZodCreateItemInputSchema.parse({ name: "x", tags: [], count: 0 });
+  S.ZodCreateItemInputSchema.parse({ name: "x".repeat(100), tags: Array(10).fill("a".repeat(50)), count: 1000 });
+});
+
+test("OptionalInput minimal", () => {
+  S.ZodOptionalInputSchema.parse({ offset: 0 });
+});
+
+test("OptionalInput with optionals", () => {
+  S.ZodOptionalInputSchema.parse({ query: "q", limit: 5, offset: 0 });
+});
+
+test("DerivedSchema inherits base", () => {
+  S.ZodDerivedSchema.parse({ id: "1", name: "Alice" });
+});
+
+test("CrossFieldInput valid", () => {
+  S.ZodCrossFieldInputSchema.parse({ min_val: 1, max_val: 5, start_val: 1, end_val: 10 });
+});
+
+// ---- Constraint rejection ----
+
+mustReject("LoginInput: invalid email", S.ZodLoginInputSchema, { email: "bad", password: "securepass123" });
+mustReject("LoginInput: password too short", S.ZodLoginInputSchema, { email: "a@b.com", password: "short" });
+mustReject("CreateItemInput: count below min", S.ZodCreateItemInputSchema, { name: "x", tags: [], count: -1 });
+mustReject("CreateItemInput: count above max", S.ZodCreateItemInputSchema, { name: "x", tags: [], count: 1001 });
+mustReject("CreateItemInput: name too long", S.ZodCreateItemInputSchema, { name: "x".repeat(101), tags: [], count: 0 });
+mustReject("CreateItemInput: element too long", S.ZodCreateItemInputSchema, { name: "x", tags: ["a".repeat(51)], count: 0 });
+mustReject("DerivedSchema: missing base id", S.ZodDerivedSchema, { name: "Alice" });
+mustReject("CrossField: max < min", S.ZodCrossFieldInputSchema, { min_val: 10, max_val: 5, start_val: 1, end_val: 10 });
+
+// ---- Summary ----
+if (failed > 0) {
+  console.error(failed + " test(s) FAILED out of " + (passed + failed));
+  process.exit(1);
+}
+console.log("All " + passed + " tests passed");
+`
+		runValidation(t, zod, script)
+	})
+}
+
 func TestGenerateZodDescribeAndMeta(t *testing.T) {
 	r := trpcgo.NewRouter()
 	trpcgo.Mutation(r, "configure", func(_ context.Context, input WithTSDoc) (string, error) {
@@ -2306,4 +2729,57 @@ func TestGenerateZodDescribeAndMeta(t *testing.T) {
 	if !strings.Contains(zod, `.meta({ id: "WithTSDoc" })`) {
 		t.Errorf("schema should have .meta() with type name.\nOutput:\n%s", zod)
 	}
+}
+
+func TestGenerateZodOmit(t *testing.T) {
+	t.Run("field excluded from zod but kept in TS", func(t *testing.T) {
+		r := trpcgo.NewRouter()
+		trpcgo.Mutation(r, "update", func(_ context.Context, input ZodOmitInput) (string, error) {
+			return "", nil
+		})
+
+		// TS interface should have all fields including id.
+		ts := generateTS(t, r)
+		if !strings.Contains(ts, "id: string") {
+			t.Errorf("TS interface should include omitted field.\nOutput:\n%s", ts)
+		}
+
+		// Zod schema should NOT have id.
+		zod := generateZod(t, r)
+		t.Log(zod)
+		if strings.Contains(zod, "id: z.") {
+			t.Errorf("omitted field 'id' should not appear in Zod schema.\nOutput:\n%s", zod)
+		}
+		if !strings.Contains(zod, "name: z.string().min(1),") {
+			t.Errorf("non-omitted field 'name' should appear.\nOutput:\n%s", zod)
+		}
+		if !strings.Contains(zod, "active: z.boolean(),") {
+			t.Errorf("non-omitted field 'active' should appear.\nOutput:\n%s", zod)
+		}
+	})
+
+	t.Run("refinement referencing omitted field is skipped", func(t *testing.T) {
+		r := trpcgo.NewRouter()
+		trpcgo.Mutation(r, "update", func(_ context.Context, input ZodOmitWithRefine) (string, error) {
+			return "", nil
+		})
+		zod := generateZod(t, r)
+		t.Log(zod)
+
+		// id should not appear.
+		if strings.Contains(zod, "id: z.") {
+			t.Errorf("omitted field 'id' should not appear.\nOutput:\n%s", zod)
+		}
+
+		// Refinement for max_val >= min_val should still exist.
+		if !strings.Contains(zod, "data.max_val >= data.min_val") {
+			t.Errorf("expected refinement for non-omitted fields.\nOutput:\n%s", zod)
+		}
+
+		// Only 1 refine (no refinement referencing id).
+		if strings.Count(zod, ".refine(") != 1 {
+			t.Errorf("expected exactly 1 .refine(), got %d.\nOutput:\n%s",
+				strings.Count(zod, ".refine("), zod)
+		}
+	})
 }

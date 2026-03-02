@@ -69,7 +69,7 @@ func zodZeroLiteral(base string) string {
 		return `z.literal("")`
 	}
 	switch base {
-	case "z.int()", "z.int32()", "z.int64()", "z.uint32()", "z.uint64()",
+	case "z.int()", "z.int32()", "z.uint32()",
 		"z.float32()", "z.float64()", "z.number()":
 		return "z.literal(0)"
 	case "z.boolean()":
@@ -112,6 +112,22 @@ func zodBaseFromKindAndType(tsType, goKind string, rules []ValidateRule) string 
 			return "z.ipv4()"
 		case "ipv6":
 			return "z.ipv6()"
+		case "hostname", "hostname_rfc1123":
+			return "z.hostname()"
+		case "base64url":
+			return "z.base64url()"
+		case "hexadecimal":
+			return "z.hex()"
+		case "ulid":
+			return "z.ulid()"
+		case "mac":
+			return "z.mac()"
+		case "cidrv4":
+			return "z.cidrv4()"
+		case "cidrv6":
+			return "z.cidrv6()"
+		case "uppercase":
+			return "z.uppercase()"
 		}
 	}
 
@@ -138,11 +154,11 @@ func zodBaseFromKindAndType(tsType, goKind string, rules []ValidateRule) string 
 	case "int32":
 		return "z.int32()"
 	case "int64":
-		return "z.int64()"
+		return "z.number()"
 	case "uint32":
 		return "z.uint32()"
 	case "uint64":
-		return "z.uint64()"
+		return "z.number()"
 	case "float32":
 		return "z.float32()"
 	case "float64":
@@ -229,6 +245,18 @@ func zodConstraints(f Field, base string) string {
 			parts = append(parts, `.regex(/^[a-zA-Z]*$/)`)
 		case "numeric":
 			parts = append(parts, `.regex(/^[0-9]*$/)`)
+		case "startswith":
+			if rule.Param != "" {
+				parts = append(parts, fmt.Sprintf(".startsWith(%q)", rule.Param))
+			}
+		case "endswith":
+			if rule.Param != "" {
+				parts = append(parts, fmt.Sprintf(".endsWith(%q)", rule.Param))
+			}
+		case "contains":
+			if rule.Param != "" {
+				parts = append(parts, fmt.Sprintf(".includes(%q)", rule.Param))
+			}
 			// Format tags (email, url, uuid, etc.) are handled in zodBaseType.
 			// required, omitempty are handled at the field level.
 		}
@@ -288,6 +316,12 @@ func zodMini(base string, constraints string, optional bool, omitemptyLit string
 				checks = append(checks, fmt.Sprintf("z.lt(%s)", args))
 			case "regex":
 				checks = append(checks, fmt.Sprintf("z.regex(%s)", args))
+			case "startsWith":
+				checks = append(checks, fmt.Sprintf("z.startsWith(%s)", args))
+			case "endsWith":
+				checks = append(checks, fmt.Sprintf("z.endsWith(%s)", args))
+			case "includes":
+				checks = append(checks, fmt.Sprintf("z.includes(%s)", args))
 			}
 		}
 	}
@@ -315,16 +349,25 @@ var supportedZodTags = map[string]bool{
 	"omitempty": true,
 	"dive":      true,
 	// Format tags (become Zod base types).
-	"email":     true,
-	"url":       true,
-	"uuid":      true,
-	"e164":      true,
-	"jwt":       true,
-	"base64":    true,
-	"lowercase": true,
-	"ip":        true,
-	"ipv4":      true,
-	"ipv6":      true,
+	"email":           true,
+	"url":             true,
+	"uuid":            true,
+	"e164":            true,
+	"jwt":             true,
+	"base64":          true,
+	"base64url":       true,
+	"lowercase":       true,
+	"uppercase":       true,
+	"ip":              true,
+	"ipv4":            true,
+	"ipv6":            true,
+	"hostname":        true,
+	"hostname_rfc1123": true,
+	"hexadecimal":     true,
+	"ulid":            true,
+	"mac":             true,
+	"cidrv4":          true,
+	"cidrv6":          true,
 	// Enum.
 	"oneof": true,
 	// Constraints.
@@ -339,6 +382,10 @@ var supportedZodTags = map[string]bool{
 	"alphanum": true,
 	"alpha":    true,
 	"numeric":  true,
+	// String constraints.
+	"startswith": true,
+	"endswith":   true,
+	"contains":   true,
 	// Cross-field (emitted as .refine() at object level).
 	"gtefield": true,
 	"ltefield": true,
@@ -386,7 +433,15 @@ func isStringBase(base string) bool {
 		base == "z.e164()" ||
 		base == "z.jwt()" ||
 		base == "z.base64()" ||
+		base == "z.base64url()" ||
 		base == "z.lowercase()" ||
+		base == "z.uppercase()" ||
 		base == "z.ipv4()" ||
-		base == "z.ipv6()"
+		base == "z.ipv6()" ||
+		base == "z.hostname()" ||
+		base == "z.hex()" ||
+		base == "z.ulid()" ||
+		base == "z.mac()" ||
+		base == "z.cidrv4()" ||
+		base == "z.cidrv6()"
 }

@@ -67,7 +67,7 @@ func writeZodSchema(w io.Writer, def typemap.TypeDef, cycles map[string]map[stri
 	case typemap.TypeDefInterface:
 		writeZodObject(w, def, cycles, style)
 	case typemap.TypeDefUnion:
-		writeZodEnum(w, def)
+		writeZodEnum(w, def, style)
 	case typemap.TypeDefAlias:
 		writeZodAlias(w, def, style)
 	}
@@ -79,24 +79,53 @@ func writeZodObject(w io.Writer, def typemap.TypeDef, cycles map[string]map[stri
 	hasExtends := len(def.Extends) > 0
 
 	// Build the schema expression opener.
-	// Without extends: z.object({...})
-	// With extends: BaseSchema.extend({...})
+	// Standard: BaseSchema.extend({...}) or z.object({...})
+	// Mini: z.extend(BaseSchema, {...}) or z.object({...})
 	var objectExpr string
 	if hasExtends {
-		objectExpr = extendsBaseExpr(def.Extends) + ".extend({"
+		// extendsBaseExpr returns e.g. "BaseSchema.extend(" or "z.extend(BaseSchema, "
+		objectExpr = extendsBaseExpr(def.Extends, style) + "{"
 	} else {
 		objectExpr = "z.object({"
 	}
 
+	// Collect omitted field names to skip refinements that reference them.
+	omitted := map[string]bool{}
+	for _, f := range def.Fields {
+		if f.ZodOmit {
+			omitted[f.Name] = true
+		}
+	}
+
+	// Count active refinements for mini z.pipe() wrapping.
+	var activeRefs []typemap.Refinement
+	for _, ref := range def.Refinements {
+		if !omitted[ref.Field] && !omitted[ref.OtherField] {
+			activeRefs = append(activeRefs, ref)
+		}
+	}
+
+	// Mini refinements use z.pipe(expr, z.refine(fn, opts)) since .refine()
+	// is not a method in zod/mini. Multiple refines nest:
+	// z.pipe(z.pipe(expr, z.refine1), z.refine2)
+	miniPipePrefix := ""
+	if style == typemap.ZodMini && len(activeRefs) > 0 {
+		miniPipePrefix = strings.Repeat("z.pipe(", len(activeRefs))
+	}
+
 	if isCyclic {
-		_, _ = fmt.Fprintf(w, "export const %s: z.ZodType<%s> = z.lazy(() => %s\n", schemaName, def.Name, objectExpr)
+		_, _ = fmt.Fprintf(w, "export const %s: z.ZodType<%s> = z.lazy(() => %s%s\n",
+			schemaName, def.Name, miniPipePrefix, objectExpr)
 	} else {
-		_, _ = fmt.Fprintf(w, "export const %s = %s\n", schemaName, objectExpr)
+		_, _ = fmt.Fprintf(w, "export const %s = %s%s\n", schemaName, miniPipePrefix, objectExpr)
 	}
 
 	for _, f := range def.Fields {
+		if f.ZodOmit {
+			continue
+		}
 		zodType := fieldToZod(f, cycles[def.Name], style)
-		if f.Comment != "" {
+		if f.Comment != "" && style != typemap.ZodMini {
 			zodType += fmt.Sprintf(".describe(%q)", f.Comment)
 		}
 		comment := unsupportedComment(f.UnsupportedZod)
@@ -110,23 +139,43 @@ func writeZodObject(w io.Writer, def typemap.TypeDef, cycles map[string]map[stri
 		_, _ = fmt.Fprint(w, "})")
 	}
 
-	// Emit .refine() for cross-field validation rules.
-	for _, ref := range def.Refinements {
-		_, _ = fmt.Fprint(w, ".refine(\n")
-		_, _ = fmt.Fprintf(w, "  (data) => data.%s %s data.%s,\n",
-			typemap.QuotePropName(ref.Field), ref.Op, typemap.QuotePropName(ref.OtherField))
-		_, _ = fmt.Fprintf(w, "  { message: \"%s must be %s %s\", path: [\"%s\"] }\n",
-			ref.Field, ref.Op, ref.OtherField, ref.Field)
-		_, _ = fmt.Fprint(w, ")")
+	// Emit refinements for cross-field validation rules.
+	// Standard: expr.refine(fn, opts)
+	// Mini: z.pipe(expr, z.refine(fn, opts)) wrapping (prefixes already emitted above).
+	if style == typemap.ZodMini {
+		for _, ref := range activeRefs {
+			_, _ = fmt.Fprint(w, ", z.refine(\n")
+			_, _ = fmt.Fprintf(w, "  (data: any) => data.%s %s data.%s,\n",
+				typemap.QuotePropName(ref.Field), ref.Op, typemap.QuotePropName(ref.OtherField))
+			_, _ = fmt.Fprintf(w, "  { message: \"%s must be %s %s\", path: [\"%s\"] }\n",
+				ref.Field, ref.Op, ref.OtherField, ref.Field)
+			_, _ = fmt.Fprint(w, "))")
+		}
+	} else {
+		for _, ref := range activeRefs {
+			_, _ = fmt.Fprint(w, ".refine(\n")
+			_, _ = fmt.Fprintf(w, "  (data) => data.%s %s data.%s,\n",
+				typemap.QuotePropName(ref.Field), ref.Op, typemap.QuotePropName(ref.OtherField))
+			_, _ = fmt.Fprintf(w, "  { message: \"%s must be %s %s\", path: [\"%s\"] }\n",
+				ref.Field, ref.Op, ref.OtherField, ref.Field)
+			_, _ = fmt.Fprint(w, ")")
+		}
 	}
-	writeZodMeta(w, def)
+	writeZodMeta(w, def, style)
 	_, _ = fmt.Fprintln(w, ";")
 }
 
 // extendsBaseExpr builds the Zod base expression for extends.
-// Single: "BaseSchema" or "BaseSchema.partial()" for Partial<Base>
-// Multiple: "Base1Schema.merge(Base2Schema)"
-func extendsBaseExpr(extends []string) string {
+// Standard: BaseSchema.extend( / BaseSchema.partial().extend( / Base1Schema.merge(Base2Schema).extend(
+// Mini:     z.extend(BaseSchema / z.extend(z.partial(BaseSchema) / z.extend(z.merge(Base1Schema, Base2Schema)
+func extendsBaseExpr(extends []string, style typemap.ZodStyle) string {
+	if style == typemap.ZodMini {
+		return extendsBaseExprMini(extends)
+	}
+	return extendsBaseExprStandard(extends)
+}
+
+func extendsBaseExprStandard(extends []string) string {
 	parts := make([]string, len(extends))
 	for i, ext := range extends {
 		if after, ok := strings.CutPrefix(ext, "Partial<"); ok {
@@ -137,13 +186,36 @@ func extendsBaseExpr(extends []string) string {
 		}
 	}
 	if len(parts) == 1 {
-		return parts[0]
+		return parts[0] + ".extend("
 	}
 	result := parts[0]
 	for _, p := range parts[1:] {
 		result += ".merge(" + p + ")"
 	}
-	return result
+	return result + ".extend("
+}
+
+func extendsBaseExprMini(extends []string) string {
+	parts := make([]string, len(extends))
+	for i, ext := range extends {
+		if after, ok := strings.CutPrefix(ext, "Partial<"); ok {
+			name := strings.TrimSuffix(after, ">")
+			parts[i] = "z.partial(" + name + "Schema)"
+		} else {
+			parts[i] = ext + "Schema"
+		}
+	}
+	var base string
+	if len(parts) == 1 {
+		base = parts[0]
+	} else {
+		// z.merge only takes two args; chain: z.merge(z.merge(a, b), c)
+		base = parts[0]
+		for _, p := range parts[1:] {
+			base = "z.merge(" + base + ", " + p + ")"
+		}
+	}
+	return "z.extend(" + base + ", "
 }
 
 // unsupportedComment returns a trailing inline comment listing validate tags
@@ -164,14 +236,14 @@ func unsupportedComment(unsupported []typemap.ValidateRule) string {
 }
 
 // writeZodMeta emits .meta({ id: "TypeName" }) for the schema if the type
-// has a name. This enables JSON Schema $ref generation from Zod schemas.
-func writeZodMeta(w io.Writer, def typemap.TypeDef) {
-	if def.Name != "" {
+// has a name. Skipped for ZodMini since zod/mini doesn't support .meta().
+func writeZodMeta(w io.Writer, def typemap.TypeDef, style typemap.ZodStyle) {
+	if def.Name != "" && style != typemap.ZodMini {
 		_, _ = fmt.Fprintf(w, ".meta({ id: %q })", def.Name)
 	}
 }
 
-func writeZodEnum(w io.Writer, def typemap.TypeDef) {
+func writeZodEnum(w io.Writer, def typemap.TypeDef, style typemap.ZodStyle) {
 	schemaName := def.Name + "Schema"
 
 	// z.enum() only accepts string literals. For non-string unions (integers),
@@ -184,13 +256,13 @@ func writeZodEnum(w io.Writer, def typemap.TypeDef) {
 			literals[i] = "z.literal(" + m + ")"
 		}
 		_, _ = fmt.Fprintf(w, "export const %s = z.union([%s])", schemaName, strings.Join(literals, ", "))
-		writeZodMeta(w, def)
+		writeZodMeta(w, def, style)
 		_, _ = fmt.Fprintln(w, ";")
 		return
 	}
 
 	_, _ = fmt.Fprintf(w, "export const %s = z.enum([%s])", schemaName, strings.Join(def.UnionMembers, ", "))
-	writeZodMeta(w, def)
+	writeZodMeta(w, def, style)
 	_, _ = fmt.Fprintln(w, ";")
 }
 
@@ -206,7 +278,7 @@ func writeZodAlias(w io.Writer, def typemap.TypeDef, style typemap.ZodStyle) {
 		zodStr = base
 	}
 	_, _ = fmt.Fprintf(w, "export const %s = %s", schemaName, zodStr)
-	writeZodMeta(w, def)
+	writeZodMeta(w, def, style)
 	_, _ = fmt.Fprintln(w, ";")
 }
 
@@ -247,19 +319,42 @@ func fieldToZod(f typemap.Field, cyclicFields map[string]bool, style typemap.Zod
 		result := fmt.Sprintf("z.array(%s)", elemZod)
 
 		// Apply container-level constraints (before dive: min/max = array length).
-		for _, rule := range f.Validate {
-			switch rule.Tag {
-			case "min":
-				if rule.Param != "" {
-					result += fmt.Sprintf(".min(%s)", rule.Param)
+		if style == typemap.ZodMini {
+			var checks []string
+			for _, rule := range f.Validate {
+				switch rule.Tag {
+				case "min":
+					if rule.Param != "" {
+						checks = append(checks, fmt.Sprintf("z.minLength(%s)", rule.Param))
+					}
+				case "max":
+					if rule.Param != "" {
+						checks = append(checks, fmt.Sprintf("z.maxLength(%s)", rule.Param))
+					}
+				case "len":
+					if rule.Param != "" {
+						checks = append(checks, fmt.Sprintf("z.length(%s)", rule.Param))
+					}
 				}
-			case "max":
-				if rule.Param != "" {
-					result += fmt.Sprintf(".max(%s)", rule.Param)
-				}
-			case "len":
-				if rule.Param != "" {
-					result += fmt.Sprintf(".length(%s)", rule.Param)
+			}
+			if len(checks) > 0 {
+				result += fmt.Sprintf(".check(%s)", strings.Join(checks, ", "))
+			}
+		} else {
+			for _, rule := range f.Validate {
+				switch rule.Tag {
+				case "min":
+					if rule.Param != "" {
+						result += fmt.Sprintf(".min(%s)", rule.Param)
+					}
+				case "max":
+					if rule.Param != "" {
+						result += fmt.Sprintf(".max(%s)", rule.Param)
+					}
+				case "len":
+					if rule.Param != "" {
+						result += fmt.Sprintf(".length(%s)", rule.Param)
+					}
 				}
 			}
 		}

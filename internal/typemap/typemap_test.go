@@ -361,6 +361,138 @@ func TestZodTypeString(t *testing.T) {
 			},
 			want: "z.string().optional()",
 		},
+		// --- new format tags ---
+		{
+			name:  "hostname format",
+			field: Field{Name: "host", Type: "string", GoKind: "string", Validate: []ValidateRule{{Tag: "hostname"}}},
+			want:  "z.hostname()",
+		},
+		{
+			name:  "hostname_rfc1123 maps to same z.hostname()",
+			field: Field{Name: "host", Type: "string", GoKind: "string", Validate: []ValidateRule{{Tag: "hostname_rfc1123"}}},
+			want:  "z.hostname()",
+		},
+		{
+			name:  "base64url format",
+			field: Field{Name: "tok", Type: "string", GoKind: "string", Validate: []ValidateRule{{Tag: "base64url"}}},
+			want:  "z.base64url()",
+		},
+		{
+			name:  "hexadecimal format",
+			field: Field{Name: "hex", Type: "string", GoKind: "string", Validate: []ValidateRule{{Tag: "hexadecimal"}}},
+			want:  "z.hex()",
+		},
+		{
+			name:  "ulid format",
+			field: Field{Name: "id", Type: "string", GoKind: "string", Validate: []ValidateRule{{Tag: "ulid"}}},
+			want:  "z.ulid()",
+		},
+		{
+			name:  "mac format",
+			field: Field{Name: "addr", Type: "string", GoKind: "string", Validate: []ValidateRule{{Tag: "mac"}}},
+			want:  "z.mac()",
+		},
+		{
+			name:  "cidrv4 format",
+			field: Field{Name: "subnet", Type: "string", GoKind: "string", Validate: []ValidateRule{{Tag: "cidrv4"}}},
+			want:  "z.cidrv4()",
+		},
+		{
+			name:  "cidrv6 format",
+			field: Field{Name: "subnet6", Type: "string", GoKind: "string", Validate: []ValidateRule{{Tag: "cidrv6"}}},
+			want:  "z.cidrv6()",
+		},
+		{
+			name:  "uppercase format",
+			field: Field{Name: "code", Type: "string", GoKind: "string", Validate: []ValidateRule{{Tag: "uppercase"}}},
+			want:  "z.uppercase()",
+		},
+		// --- format + constraint combo (isStringBase interaction) ---
+		{
+			name: "hostname + min uses string .min() not numeric .gte()",
+			field: Field{Name: "host", Type: "string", GoKind: "string", Validate: []ValidateRule{
+				{Tag: "hostname"},
+				{Tag: "min", Param: "5"},
+			}},
+			want: "z.hostname().min(5)",
+		},
+		{
+			name: "ulid + max uses string .max()",
+			field: Field{Name: "id", Type: "string", GoKind: "string", Validate: []ValidateRule{
+				{Tag: "ulid"},
+				{Tag: "max", Param: "26"},
+			}},
+			want: "z.ulid().max(26)",
+		},
+		// --- format + omitempty (zero-value .or() wrapping) ---
+		{
+			name: "hostname + omitempty allows empty string",
+			field: Field{
+				Name: "host", Type: "string", GoKind: "string",
+				ValidateOmitempty: true,
+				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "hostname"}},
+			},
+			want: `z.hostname().or(z.literal(""))`,
+		},
+		{
+			name: "mac + omitempty allows empty string",
+			field: Field{
+				Name: "addr", Type: "string", GoKind: "string",
+				ValidateOmitempty: true,
+				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "mac"}},
+			},
+			want: `z.mac().or(z.literal(""))`,
+		},
+		// --- format + optional ---
+		{
+			name: "cidrv4 + optional",
+			field: Field{
+				Name: "subnet", Type: "string", GoKind: "string",
+				Optional: true,
+				Validate: []ValidateRule{{Tag: "cidrv4"}},
+			},
+			want: "z.cidrv4().optional()",
+		},
+		// --- new constraint tags ---
+		{
+			name: "startswith constraint",
+			field: Field{Name: "url", Type: "string", GoKind: "string", Validate: []ValidateRule{
+				{Tag: "startswith", Param: "https://"},
+			}},
+			want: `z.string().startsWith("https://")`,
+		},
+		{
+			name: "endswith constraint",
+			field: Field{Name: "file", Type: "string", GoKind: "string", Validate: []ValidateRule{
+				{Tag: "endswith", Param: ".go"},
+			}},
+			want: `z.string().endsWith(".go")`,
+		},
+		{
+			name: "contains constraint",
+			field: Field{Name: "path", Type: "string", GoKind: "string", Validate: []ValidateRule{
+				{Tag: "contains", Param: "/api/"},
+			}},
+			want: `z.string().includes("/api/")`,
+		},
+		// --- constraint combos ---
+		{
+			name: "startswith + min + max combined",
+			field: Field{Name: "url", Type: "string", GoKind: "string", Validate: []ValidateRule{
+				{Tag: "startswith", Param: "https://"},
+				{Tag: "min", Param: "10"},
+				{Tag: "max", Param: "200"},
+			}},
+			want: `z.string().startsWith("https://").min(10).max(200)`,
+		},
+		{
+			name: "contains + endswith combined",
+			field: Field{Name: "path", Type: "string", GoKind: "string", Validate: []ValidateRule{
+				{Tag: "contains", Param: "api"},
+				{Tag: "endswith", Param: ".json"},
+			}},
+			want: `z.string().includes("api").endsWith(".json")`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -412,6 +544,16 @@ func TestZodTypeNumeric(t *testing.T) {
 				},
 			},
 			want: "z.int().gte(1).lte(100)",
+		},
+		{
+			name:  "int64 maps to z.number() not z.int64()",
+			field: Field{Name: "big", Type: "number", GoKind: "int64"},
+			want:  "z.number()",
+		},
+		{
+			name:  "uint64 maps to z.number() not z.uint64()",
+			field: Field{Name: "ubig", Type: "number", GoKind: "uint64"},
+			want:  "z.number()",
 		},
 	}
 
@@ -1044,6 +1186,73 @@ func TestZodMiniStyle(t *testing.T) {
 			},
 			want: "z.optional(z.string())",
 		},
+		{
+			name: "startsWith in mini style",
+			field: Field{
+				Name:     "url",
+				Type:     "string",
+				GoKind:   "string",
+				Validate: []ValidateRule{{Tag: "startswith", Param: "https://"}},
+			},
+			want: `z.string().check(z.startsWith("https://"))`,
+		},
+		{
+			name: "endsWith in mini style",
+			field: Field{
+				Name:     "file",
+				Type:     "string",
+				GoKind:   "string",
+				Validate: []ValidateRule{{Tag: "endswith", Param: ".ts"}},
+			},
+			want: `z.string().check(z.endsWith(".ts"))`,
+		},
+		{
+			name: "includes in mini style",
+			field: Field{
+				Name:     "path",
+				Type:     "string",
+				GoKind:   "string",
+				Validate: []ValidateRule{{Tag: "contains", Param: "/api/"}},
+			},
+			want: `z.string().check(z.includes("/api/"))`,
+		},
+		{
+			name: "startsWith + min combined in mini style",
+			field: Field{
+				Name:   "url",
+				Type:   "string",
+				GoKind: "string",
+				Validate: []ValidateRule{
+					{Tag: "startswith", Param: "https://"},
+					{Tag: "min", Param: "10"},
+				},
+			},
+			want: `z.string().check(z.startsWith("https://"), z.minLength(10))`,
+		},
+		{
+			name: "hostname + min in mini uses minLength",
+			field: Field{
+				Name:   "host",
+				Type:   "string",
+				GoKind: "string",
+				Validate: []ValidateRule{
+					{Tag: "hostname"},
+					{Tag: "min", Param: "4"},
+				},
+			},
+			want: "z.hostname().check(z.minLength(4))",
+		},
+		{
+			name: "hostname + optional in mini",
+			field: Field{
+				Name:     "host",
+				Type:     "string",
+				GoKind:   "string",
+				Optional: true,
+				Validate: []ValidateRule{{Tag: "hostname"}},
+			},
+			want: "z.optional(z.hostname())",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1219,6 +1428,31 @@ func TestUnsupportedZodRules(t *testing.T) {
 		}
 	})
 
+	t.Run("new format and constraint tags are supported", func(t *testing.T) {
+		rules := []ValidateRule{
+			{Tag: "hostname"},
+			{Tag: "hostname_rfc1123"},
+			{Tag: "base64url"},
+			{Tag: "hexadecimal"},
+			{Tag: "ulid"},
+			{Tag: "mac"},
+			{Tag: "cidrv4"},
+			{Tag: "cidrv6"},
+			{Tag: "uppercase"},
+			{Tag: "startswith", Param: "https://"},
+			{Tag: "endswith", Param: ".go"},
+			{Tag: "contains", Param: "api"},
+		}
+		got := UnsupportedZodRules(rules)
+		if len(got) != 0 {
+			tags := make([]string, len(got))
+			for i, r := range got {
+				tags[i] = r.Tag
+			}
+			t.Errorf("expected all supported, but got unsupported: %v", tags)
+		}
+	})
+
 	t.Run("nil input returns nil", func(t *testing.T) {
 		got := UnsupportedZodRules(nil)
 		if got != nil {
@@ -1247,6 +1481,25 @@ func TestCrossFieldOp(t *testing.T) {
 		op, ok := CrossFieldOp(tc.tag)
 		if ok != tc.wantOk || op != tc.wantOp {
 			t.Errorf("CrossFieldOp(%q) = (%q, %v), want (%q, %v)", tc.tag, op, ok, tc.wantOp, tc.wantOk)
+		}
+	}
+}
+
+func TestParseZodOmitTag(t *testing.T) {
+	tests := []struct {
+		tag  string
+		want bool
+	}{
+		{`json:"id" zod_omit:"true"`, true},
+		{`json:"name"`, false},
+		{`json:"id" zod_omit:"false"`, false},
+		{`zod_omit:"true"`, true},
+		{``, false},
+	}
+	for _, tc := range tests {
+		got := ParseZodOmitTag(tc.tag)
+		if got != tc.want {
+			t.Errorf("ParseZodOmitTag(%q) = %v, want %v", tc.tag, got, tc.want)
 		}
 	}
 }

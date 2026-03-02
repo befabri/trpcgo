@@ -109,3 +109,12 @@ func ParseTSDocTag(rawTag string) (doc string, ok bool) {
 	doc, ok = tag.Lookup("ts_doc")
 	return doc, ok
 }
+
+// ParseZodOmitTag returns true if the field has `zod_omit:"true"`.
+// Fields with this tag are excluded from Zod schema generation
+// but still appear in the TypeScript interface.
+func ParseZodOmitTag(rawTag string) bool {
+	tag := reflect.StructTag(rawTag)
+	v, ok := tag.Lookup("zod_omit")
+	return ok && v == "true"
+}

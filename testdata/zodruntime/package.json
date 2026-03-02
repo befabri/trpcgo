@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "zod": "^4.3.6",
+    "@traversable/zod-test": "^0",
+    "@traversable/zod-types": "^0",
+    "fast-check": "^3",
+    "tsx": "^4"
+  }
+}

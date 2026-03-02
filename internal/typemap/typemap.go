@@ -56,6 +56,7 @@ type Field struct {
 	ElementValidate   []ValidateRule // parsed validate tag rules after dive (for slice elements)
 	ElementGoKind     string         // Go kind of slice/array element type
 	UnsupportedZod    []ValidateRule // validate rules with no Zod equivalent
+	ZodOmit           bool           // zod_omit:"true" — exclude from Zod schema
 }
 
 // Mapper converts Go types to TypeScript type strings and collects interface definitions.
@@ -556,6 +557,8 @@ func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, extends *[]str
 				f.Comment = doc
 			}
 		}
+
+		f.ZodOmit = ParseZodOmitTag(tag)
 
 		*fields = append(*fields, f)
 	}
