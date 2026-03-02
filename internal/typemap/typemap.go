@@ -177,6 +177,10 @@ func (m *Mapper) Defs() []TypeDef {
 		for i := range d.Fields {
 			d.Fields[i].Type = resolveTokens(d.Fields[i].Type, display)
 		}
+		// Resolve tokens in extends clause.
+		for i := range d.Extends {
+			d.Extends[i] = resolveTokens(d.Extends[i], display)
+		}
 		// Resolve tokens in alias target.
 		if d.AliasOf != "" {
 			d.AliasOf = resolveTokens(d.AliasOf, display)
@@ -211,7 +215,7 @@ func (m *Mapper) convert(t types.Type) string {
 			case "encoding/json.RawMessage":
 				return "unknown"
 			case "encoding/json.Number":
-				return "string"
+				return "number"
 			}
 
 			// TrackedEvent[T] — unwrap to T for TypeScript output.
@@ -525,10 +529,15 @@ func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, extends *[]str
 			}
 		}
 
-		// Apply field comment from metadata.
+		// Apply field comment: Go source comments take precedence, ts_doc is fallback.
 		if fieldComments != nil {
 			if comment, ok := fieldComments[i]; ok {
 				f.Comment = comment
+			}
+		}
+		if f.Comment == "" {
+			if doc, ok := ParseTSDocTag(tag); ok {
+				f.Comment = doc
 			}
 		}
 

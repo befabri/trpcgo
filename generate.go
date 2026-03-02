@@ -217,7 +217,7 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Ty
 		case "RawMessage":
 			return "unknown"
 		case "Number":
-			return "string"
+			return "number"
 		}
 	}
 

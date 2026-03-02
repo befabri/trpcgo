@@ -1055,3 +1055,123 @@ func TestZodMiniStyle(t *testing.T) {
 		})
 	}
 }
+
+func TestExtendsTokenResolution(t *testing.T) {
+	pkg := types.NewPackage("github.com/app/models", "models")
+
+	// Base struct: type Base struct { ID string `json:"id"` }
+	baseIDField := types.NewField(0, pkg, "ID", types.Typ[types.String], false)
+	baseStruct := types.NewStruct([]*types.Var{baseIDField}, []string{`json:"id"`})
+	base := types.NewNamed(types.NewTypeName(0, pkg, "Base", nil), baseStruct, nil)
+
+	// User struct with embedded Base using tstype:",extends"
+	// type User struct { Base `tstype:",extends"`; Name string `json:"name"` }
+	embeddedBase := types.NewField(0, pkg, "Base", base, true)
+	nameField := types.NewField(0, pkg, "Name", types.Typ[types.String], false)
+	userStruct := types.NewStruct(
+		[]*types.Var{embeddedBase, nameField},
+		[]string{`tstype:",extends"`, `json:"name"`},
+	)
+	user := types.NewNamed(types.NewTypeName(0, pkg, "User", nil), userStruct, nil)
+
+	m := NewMapper(nil)
+	m.Convert(user)
+	defs := m.Defs()
+
+	// Find User def.
+	var userDef *TypeDef
+	for i := range defs {
+		if defs[i].Name == "User" {
+			userDef = &defs[i]
+			break
+		}
+	}
+	if userDef == nil {
+		t.Fatal("User def not found")
+	}
+
+	// Extends should be resolved to "Base", not a raw §...§ token.
+	if len(userDef.Extends) != 1 {
+		t.Fatalf("User.Extends = %v, want 1 entry", userDef.Extends)
+	}
+	if userDef.Extends[0] != "Base" {
+		t.Errorf("User.Extends[0] = %q, want %q", userDef.Extends[0], "Base")
+	}
+
+	// User should NOT have the base field (ID) since it's extended, not flattened.
+	for _, f := range userDef.Fields {
+		if f.Name == "id" {
+			t.Error("User should not have 'id' field — extended fields should not be flattened")
+		}
+	}
+}
+
+func TestTSDocTagInCollectFields(t *testing.T) {
+	pkg := types.NewPackage("github.com/app/models", "models")
+
+	// type Config struct {
+	//     Host string `json:"host" ts_doc:"The hostname to connect to"`
+	//     Port int    `json:"port"`
+	// }
+	hostField := types.NewField(0, pkg, "Host", types.Typ[types.String], false)
+	portField := types.NewField(0, pkg, "Port", types.Typ[types.Int], false)
+	configStruct := types.NewStruct(
+		[]*types.Var{hostField, portField},
+		[]string{`json:"host" ts_doc:"The hostname to connect to"`, `json:"port"`},
+	)
+	config := types.NewNamed(types.NewTypeName(0, pkg, "Config", nil), configStruct, nil)
+
+	m := NewMapper(nil)
+	m.Convert(config)
+	defs := m.Defs()
+
+	if len(defs) != 1 {
+		t.Fatalf("got %d defs, want 1", len(defs))
+	}
+
+	var hostComment, portComment string
+	for _, f := range defs[0].Fields {
+		switch f.Name {
+		case "host":
+			hostComment = f.Comment
+		case "port":
+			portComment = f.Comment
+		}
+	}
+
+	if hostComment != "The hostname to connect to" {
+		t.Errorf("host comment = %q, want %q", hostComment, "The hostname to connect to")
+	}
+	if portComment != "" {
+		t.Errorf("port comment = %q, want empty (no ts_doc tag)", portComment)
+	}
+}
+
+func TestTSDocTagFallbackBehindSourceComment(t *testing.T) {
+	pkg := types.NewPackage("github.com/app/models", "models")
+
+	// When both a source comment and ts_doc exist, source comment wins.
+	hostField := types.NewField(0, pkg, "Host", types.Typ[types.String], false)
+	configStruct := types.NewStruct(
+		[]*types.Var{hostField},
+		[]string{`json:"host" ts_doc:"from tag"`},
+	)
+	config := types.NewNamed(types.NewTypeName(0, pkg, "Config", nil), configStruct, nil)
+
+	// Provide a source comment via metadata.
+	metas := map[string]TypeMeta{
+		"github.com/app/models.Config": {
+			FieldComments: map[int]string{0: "from source"},
+		},
+	}
+	m := NewMapper(metas)
+	m.Convert(config)
+	defs := m.Defs()
+
+	if len(defs) != 1 || len(defs[0].Fields) != 1 {
+		t.Fatal("unexpected defs structure")
+	}
+	if defs[0].Fields[0].Comment != "from source" {
+		t.Errorf("comment = %q, want %q (source comment should take precedence)", defs[0].Fields[0].Comment, "from source")
+	}
+}

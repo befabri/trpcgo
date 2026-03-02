@@ -1798,14 +1798,14 @@ func TestGenerateTSMiscEdgeCases(t *testing.T) {
 		}
 	})
 
-	t.Run("json.Number returns string", func(t *testing.T) {
+	t.Run("json.Number returns number", func(t *testing.T) {
 		r := trpcgo.NewRouter()
 		trpcgo.VoidQuery(r, "get", func(_ context.Context) (WithJSONNumber, error) {
 			return WithJSONNumber{}, nil
 		})
 		ts := generateTS(t, r)
-		if !strings.Contains(ts, "value: string;") {
-			t.Errorf("json.Number should map to string:\n%s", ts)
+		if !strings.Contains(ts, "value: number;") {
+			t.Errorf("json.Number should map to number (marshals as unquoted JSON number):\n%s", ts)
 		}
 	})
 }
