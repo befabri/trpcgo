@@ -27,6 +27,7 @@ func NewRouter(opts ...Option) *Router {
 		opts: routerOptions{
 			allowBatching: true,
 			maxBodySize:   defaultMaxBodySize,
+			maxBatchSize:  defaultMaxBatchSize,
 		},
 	}
 	for _, opt := range opts {

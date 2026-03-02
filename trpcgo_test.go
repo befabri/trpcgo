@@ -3879,3 +3879,188 @@ func TestSetCookieNoopOutsideHandler(t *testing.T) {
 	trpcgo.SetResponseHeader(ctx, "X-Test", "value")
 	// If we got here without panicking, the test passes.
 }
+
+func TestSetCookieNilDoesNotPanic(t *testing.T) {
+	// SetCookie with nil cookie should be a no-op, not panic.
+	ctx := context.Background()
+	trpcgo.SetCookie(ctx, nil)
+	// If we got here without panicking, the test passes.
+}
+
+// --- Batch Size Limit Tests ---
+
+func TestBatchSizeLimitDefault(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithBatching(true))
+
+	trpcgo.VoidQuery(router, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// 11 paths exceeds default limit of 10.
+	paths := strings.Repeat("ping,", 10) + "ping"
+	inputs := "{"
+	for i := range 11 {
+		if i > 0 {
+			inputs += ","
+		}
+		inputs += fmt.Sprintf(`"%d":null`, i)
+	}
+	inputs += "}"
+
+	resp := mustPost(t, server, "/trpc/"+paths+"?batch=1", inputs)
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestBatchSizeLimitWithinLimit(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithBatching(true))
+
+	trpcgo.VoidMutation(router, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// 2 paths is within default limit of 10.
+	resp := mustPost(t, server, "/trpc/ping,ping?batch=1", `{"0":null,"1":null}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestBatchSizeLimitCustom(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithBatching(true), trpcgo.WithMaxBatchSize(2))
+
+	trpcgo.VoidQuery(router, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// 3 paths exceeds custom limit of 2.
+	resp := mustPost(t, server, "/trpc/ping,ping,ping?batch=1", `{"0":null,"1":null,"2":null}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Fatalf("status = %d, want 400 for batch exceeding custom limit", resp.StatusCode)
+	}
+}
+
+func TestBatchSizeLimitDisabled(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithBatching(true), trpcgo.WithMaxBatchSize(0))
+
+	trpcgo.VoidMutation(router, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// 15 paths with limit disabled should succeed.
+	paths := strings.Repeat("ping,", 14) + "ping"
+	inputs := "{"
+	for i := range 15 {
+		if i > 0 {
+			inputs += ","
+		}
+		inputs += fmt.Sprintf(`"%d":null`, i)
+	}
+	inputs += "}"
+
+	resp := mustPost(t, server, "/trpc/"+paths+"?batch=1", inputs)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200 with batch limit disabled", resp.StatusCode)
+	}
+}
+
+func TestBatchSizeLimitJSONL(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithBatching(true), trpcgo.WithMaxBatchSize(2))
+
+	trpcgo.VoidMutation(router, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// 3 paths exceeds limit of 2, should be rejected even for JSONL.
+	req, _ := http.NewRequest("POST", server.URL+"/trpc/ping,ping,ping?batch=1",
+		strings.NewReader(`{"0":null,"1":null,"2":null}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("trpc-accept", "application/jsonl")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Fatalf("status = %d, want 400 for JSONL batch exceeding limit", resp.StatusCode)
+	}
+}
+
+// --- RawCall Response Metadata Tests ---
+
+func TestRawCallSetCookie(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	trpcgo.VoidMutation(router, "auth.login", func(ctx context.Context) (string, error) {
+		trpcgo.SetCookie(ctx, &http.Cookie{
+			Name:  "session",
+			Value: "abc123",
+		})
+		trpcgo.SetResponseHeader(ctx, "X-Custom", "hello")
+		return "ok", nil
+	})
+
+	// Pre-inject response metadata so we can read cookies/headers after RawCall.
+	ctx := trpcgo.WithResponseMetadata(context.Background())
+	result, err := router.RawCall(ctx, "auth.login", nil)
+	if err != nil {
+		t.Fatalf("RawCall error: %v", err)
+	}
+	if result != "ok" {
+		t.Errorf("result = %v, want ok", result)
+	}
+
+	cookies := trpcgo.GetResponseCookies(ctx)
+	if len(cookies) != 1 {
+		t.Fatalf("got %d cookies, want 1", len(cookies))
+	}
+	if cookies[0].Name != "session" || cookies[0].Value != "abc123" {
+		t.Errorf("cookie = %s=%s, want session=abc123", cookies[0].Name, cookies[0].Value)
+	}
+
+	headers := trpcgo.GetResponseHeaders(ctx)
+	if got := headers.Get("X-Custom"); got != "hello" {
+		t.Errorf("X-Custom = %q, want %q", got, "hello")
+	}
+}
+
+func TestRawCallWithoutMetadataIsNoop(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	trpcgo.VoidMutation(router, "auth.login", func(ctx context.Context) (string, error) {
+		trpcgo.SetCookie(ctx, &http.Cookie{Name: "session", Value: "abc"})
+		return "ok", nil
+	})
+
+	// Without pre-injecting metadata, RawCall injects its own context.
+	// The caller can't access it, but SetCookie must not panic.
+	ctx := context.Background()
+	result, err := router.RawCall(ctx, "auth.login", nil)
+	if err != nil {
+		t.Fatalf("RawCall error: %v", err)
+	}
+	if result != "ok" {
+		t.Errorf("result = %v, want ok", result)
+	}
+
+	// Cookies are not accessible from the original context.
+	cookies := trpcgo.GetResponseCookies(ctx)
+	if len(cookies) != 0 {
+		t.Errorf("got %d cookies, want 0 (metadata not pre-injected)", len(cookies))
+	}
+}

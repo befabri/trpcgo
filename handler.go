@@ -55,12 +55,18 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enforce batch size limit to prevent goroutine explosion.
+	if isBatch && h.router.opts.maxBatchSize > 0 && len(calls) > h.router.opts.maxBatchSize {
+		h.writeErrorResponse(w, NewError(CodeBadRequest, fmt.Sprintf("batch size %d exceeds limit of %d", len(calls), h.router.opts.maxBatchSize)), "", http.StatusBadRequest, nil, "")
+		return
+	}
+
 	// Create context
 	ctx := r.Context()
 	if h.router.opts.createContext != nil {
 		ctx = h.router.opts.createContext(r)
 	}
-	ctx = withResponseMetadata(ctx)
+	ctx = WithResponseMetadata(ctx)
 
 	// JSONL streaming: concurrent execution with progressive chunk delivery.
 	if isBatch && r.Header.Get("trpc-accept") == "application/jsonl" {

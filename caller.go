@@ -23,12 +23,17 @@ func (r *Router) RawCall(ctx context.Context, path string, input json.RawMessage
 		return nil, NewError(CodeBadRequest, "subscriptions are not supported via RawCall")
 	}
 
-	// Inject procedure metadata into context.
+	// Inject procedure metadata and response metadata into context.
+	// Response metadata allows handlers to call SetCookie/SetResponseHeader
+	// even via RawCall (callers can retrieve it with GetResponseMetadata).
 	ctx = withProcedureMeta(ctx, ProcedureMeta{
 		Path: path,
 		Type: proc.typ,
 		Meta: proc.meta,
 	})
+	if getResponseMetadata(ctx) == nil {
+		ctx = WithResponseMetadata(ctx)
+	}
 
 	return r.executeProcedure(ctx, proc, input)
 }

@@ -7,12 +7,14 @@ import (
 )
 
 const defaultMaxBodySize int64 = 1 << 20 // 1 MB
+const defaultMaxBatchSize int = 10
 
 type routerOptions struct {
 	allowBatching                  bool
 	allowMethodOverride            bool
 	isDev                          bool
 	maxBodySize                    int64
+	maxBatchSize                   int
 	onError                        func(ctx context.Context, err *Error, path string)
 	createContext                  func(r *http.Request) context.Context
 	errorFormatter                 func(ErrorFormatterInput) any
@@ -105,6 +107,14 @@ func WithDev(enabled bool) Option {
 func WithMaxBodySize(n int64) Option {
 	return func(o *routerOptions) {
 		o.maxBodySize = n
+	}
+}
+
+// WithMaxBatchSize sets the maximum number of procedures allowed in a single
+// batch request. Default is 10. Set to 0 for no limit.
+func WithMaxBatchSize(n int) Option {
+	return func(o *routerOptions) {
+		o.maxBatchSize = n
 	}
 }
 
