@@ -61,9 +61,9 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 	for _, p := range procs {
 		inputTS := "void"
 		if p.inputType != nil {
-			inputTS = goTypeToTS(p.inputType, defs)
+			inputTS = goTypeToTS(p.inputType, defs, nil)
 		}
-		outputTS := goTypeToTS(p.outputType, defs)
+		outputTS := goTypeToTS(p.outputType, defs, nil)
 		entries = append(entries, codegen.ProcEntry{
 			Path:     p.path,
 			ProcType: string(p.typ),
@@ -91,15 +91,21 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 				Required: f.required,
 			}
 		}
-		typeDefs[i] = typemap.TypeDef{Name: d.name, Kind: typemap.TypeDefInterface, Fields: fields}
+		typeDefs[i] = typemap.TypeDef{
+			Name:       d.name,
+			Kind:       typemap.TypeDefInterface,
+			TypeParams: d.typeParams,
+			Fields:     fields,
+		}
 	}
 
 	return entries, typeDefs
 }
 
 type reflectDef struct {
-	name   string
-	fields []reflectField
+	name       string
+	typeParams []string
+	fields     []reflectField
 }
 
 type reflectField struct {
@@ -110,9 +116,19 @@ type reflectField struct {
 	required bool
 }
 
-func goTypeToTS(t reflect.Type, defs map[string]*reflectDef) string {
+// goTypeToTS converts a reflect.Type to its TypeScript representation.
+// subs maps concrete reflect.Types to generic type parameter names (e.g., "T")
+// for building generic interface definitions. Pass nil for non-generic contexts.
+func goTypeToTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Type]string) string {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
+	}
+
+	// Generic type parameter substitution.
+	if len(subs) > 0 {
+		if paramName, ok := subs[t]; ok {
+			return paramName
+		}
 	}
 
 	// Well-known types that need special handling regardless of Kind.
@@ -126,7 +142,7 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef) string {
 	// "TrackedEvent[pkg.Foo·1]", so we check with HasPrefix.
 	if t.PkgPath() == "github.com/befabri/trpcgo" && strings.HasPrefix(t.Name(), "TrackedEvent[") {
 		if dataField, ok := t.FieldByName("Data"); ok {
-			return goTypeToTS(dataField.Type, defs)
+			return goTypeToTS(dataField.Type, defs, subs)
 		}
 	}
 
@@ -144,18 +160,18 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef) string {
 		if t.Elem().Kind() == reflect.Uint8 {
 			return "string"
 		}
-		elem := goTypeToTS(t.Elem(), defs)
+		elem := goTypeToTS(t.Elem(), defs, subs)
 		if strings.Contains(elem, "|") {
 			return "(" + elem + ")[]"
 		}
 		return elem + "[]"
 
 	case reflect.Array:
-		return goTypeToTS(t.Elem(), defs) + "[]"
+		return goTypeToTS(t.Elem(), defs, subs) + "[]"
 
 	case reflect.Map:
-		key := goTypeToTS(t.Key(), defs)
-		val := goTypeToTS(t.Elem(), defs)
+		key := goTypeToTS(t.Key(), defs, subs)
+		val := goTypeToTS(t.Elem(), defs, subs)
 		return fmt.Sprintf("Record<%s, %s>", key, val)
 
 	case reflect.Struct:
@@ -164,8 +180,13 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef) string {
 			return "string"
 		}
 		if name == "" {
-			return inlineStructTS(t, defs)
+			return inlineStructTS(t, defs, subs)
 		}
+		// Generic instantiation: PageResult[github.com/pkg.Foo]
+		if bracketIdx := strings.IndexByte(name, '['); bracketIdx >= 0 {
+			return handleGenericTS(t, name, bracketIdx, defs, subs)
+		}
+
 		key := t.PkgPath() + "." + name
 		if _, ok := defs[key]; !ok {
 			resolveStructTS(t, defs)
@@ -180,19 +201,80 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef) string {
 	}
 }
 
+// handleGenericTS handles a generic type instantiation (e.g., PageResult[pkg.Foo]).
+// It registers a single generic interface definition for the base type and
+// returns a TypeScript reference like PageResult<Foo>.
+func handleGenericTS(t reflect.Type, name string, bracketIdx int, defs map[string]*reflectDef, outerSubs map[reflect.Type]string) string {
+	baseName := name[:bracketIdx]
+	argsStr := name[bracketIdx+1 : len(name)-1]
+	argParts := splitGenericArgs(argsStr)
+
+	// Find reflect.Type for each type argument by scanning struct field types.
+	fieldTypes := map[string]reflect.Type{}
+	visited := map[reflect.Type]bool{}
+	for f := range t.Fields() {
+		collectNamedTypes(f.Type, fieldTypes, visited)
+	}
+
+	argTypes := make([]reflect.Type, len(argParts))
+	for i, argStr := range argParts {
+		argTypes[i] = findArgType(fieldTypes, argStr)
+	}
+
+	// Register the generic interface once per base type.
+	// The definition is built from whichever instantiation is encountered first.
+	// This is correct because all instantiations share the same struct layout;
+	// only the concrete type arguments differ.
+	genericKey := t.PkgPath() + "." + baseName
+	if _, ok := defs[genericKey]; !ok {
+		paramNames := makeParamNames(len(argParts))
+		interfaceSubs := make(map[reflect.Type]string, len(argTypes))
+		for i, at := range argTypes {
+			if at != nil {
+				interfaceSubs[at] = paramNames[i]
+			}
+		}
+		resolveGenericStructTS(t, baseName, genericKey, paramNames, interfaceSubs, defs)
+	}
+
+	// Convert type args to TypeScript names for the reference.
+	argTSNames := make([]string, len(argTypes))
+	for i, at := range argTypes {
+		if at != nil {
+			argTSNames[i] = goTypeToTS(at, defs, outerSubs)
+		} else {
+			argTSNames[i] = basicArgToTS(argParts[i])
+		}
+	}
+
+	return baseName + "<" + strings.Join(argTSNames, ", ") + ">"
+}
+
+// resolveGenericStructTS registers a generic interface definition.
+// subs maps concrete type arg types to parameter names (e.g., EffectRow → "T").
+func resolveGenericStructTS(t reflect.Type, baseName, key string, paramNames []string, subs map[reflect.Type]string, defs map[string]*reflectDef) {
+	defs[key] = &reflectDef{
+		name:       baseName,
+		typeParams: paramNames,
+	}
+
+	var fields []reflectField
+	collectFieldsTS(t, defs, &fields, subs)
+	defs[key].fields = fields
+}
+
 func resolveStructTS(t reflect.Type, defs map[string]*reflectDef) {
 	name := t.Name()
 	key := t.PkgPath() + "." + name
 	defs[key] = &reflectDef{name: name}
 
 	var fields []reflectField
-	collectFieldsTS(t, defs, &fields)
+	collectFieldsTS(t, defs, &fields, nil)
 	defs[key].fields = fields
 }
 
-func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]reflectField) {
+func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]reflectField, subs map[reflect.Type]string) {
 	for f := range t.Fields() {
-
 		jsonName, omitempty, skip := typemap.ParseJSONTag(string(f.Tag))
 		if skip {
 			continue
@@ -211,7 +293,7 @@ func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]refl
 				ft = ft.Elem()
 			}
 			if ft.Kind() == reflect.Struct {
-				collectFieldsTS(ft, defs, fields)
+				collectFieldsTS(ft, defs, fields, subs)
 				continue
 			}
 		}
@@ -224,7 +306,7 @@ func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]refl
 			jsonName = f.Name
 		}
 
-		tsType := goTypeToTS(f.Type, defs)
+		tsType := goTypeToTS(f.Type, defs, subs)
 		optional := omitempty || f.Type.Kind() == reflect.Pointer
 
 		rf := reflectField{name: jsonName, tsType: tsType, optional: optional}
@@ -245,13 +327,12 @@ func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]refl
 	}
 }
 
-func inlineStructTS(t reflect.Type, defs map[string]*reflectDef) string {
+func inlineStructTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Type]string) string {
 	if t.NumField() == 0 {
 		return "Record<string, never>"
 	}
 	var parts []string
 	for f := range t.Fields() {
-
 		if !f.IsExported() {
 			continue
 		}
@@ -266,7 +347,7 @@ func inlineStructTS(t reflect.Type, defs map[string]*reflectDef) string {
 		if jsonName == "" {
 			jsonName = f.Name
 		}
-		tsType := goTypeToTS(f.Type, defs)
+		tsType := goTypeToTS(f.Type, defs, subs)
 		if hasTSTag && tstag.Type != "" {
 			tsType = tstag.Type
 		}
@@ -287,4 +368,134 @@ func inlineStructTS(t reflect.Type, defs map[string]*reflectDef) string {
 		return "Record<string, never>"
 	}
 	return "{ " + strings.Join(parts, "; ") + " }"
+}
+
+// --- Generic type helpers ---
+
+// splitGenericArgs splits a comma-separated list of Go type arguments,
+// respecting nested brackets for generic type arguments.
+func splitGenericArgs(s string) []string {
+	var parts []string
+	depth := 0
+	start := 0
+	for i, c := range s {
+		switch c {
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, strings.TrimSpace(s[start:]))
+	return parts
+}
+
+// collectNamedTypes recursively collects all named types reachable from t.
+// Results are keyed by PkgPath + "." + Name.
+func collectNamedTypes(t reflect.Type, result map[string]reflect.Type, visited map[reflect.Type]bool) {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if visited[t] {
+		return
+	}
+	visited[t] = true
+
+	if t.Name() != "" && t.PkgPath() != "" {
+		result[t.PkgPath()+"."+t.Name()] = t
+	}
+
+	switch t.Kind() {
+	case reflect.Struct:
+		for f := range t.Fields() {
+			collectNamedTypes(f.Type, result, visited)
+		}
+	case reflect.Slice, reflect.Array:
+		collectNamedTypes(t.Elem(), result, visited)
+	case reflect.Map:
+		collectNamedTypes(t.Key(), result, visited)
+		collectNamedTypes(t.Elem(), result, visited)
+	case reflect.Chan:
+		collectNamedTypes(t.Elem(), result, visited)
+	case reflect.Func:
+		for p := range t.Ins() {
+			collectNamedTypes(p, result, visited)
+		}
+		for p := range t.Outs() {
+			collectNamedTypes(p, result, visited)
+		}
+	}
+}
+
+// basicTypesByName maps Go basic type names to their reflect.Type.
+var basicTypesByName = map[string]reflect.Type{
+	"string":  reflect.TypeFor[string](),
+	"bool":    reflect.TypeFor[bool](),
+	"int":     reflect.TypeFor[int](),
+	"int8":    reflect.TypeFor[int8](),
+	"int16":   reflect.TypeFor[int16](),
+	"int32":   reflect.TypeFor[int32](),
+	"int64":   reflect.TypeFor[int64](),
+	"uint":    reflect.TypeFor[uint](),
+	"uint8":   reflect.TypeFor[uint8](),
+	"uint16":  reflect.TypeFor[uint16](),
+	"uint32":  reflect.TypeFor[uint32](),
+	"uint64":  reflect.TypeFor[uint64](),
+	"float32": reflect.TypeFor[float32](),
+	"float64": reflect.TypeFor[float64](),
+}
+
+// findArgType finds the reflect.Type for a Go type argument string.
+// Checks types found in struct fields first, then falls back to basic types.
+func findArgType(fieldTypes map[string]reflect.Type, argStr string) reflect.Type {
+	if t, ok := fieldTypes[argStr]; ok {
+		return t
+	}
+	if t, ok := basicTypesByName[argStr]; ok {
+		return t
+	}
+	return nil
+}
+
+// basicArgToTS converts a Go type argument string to TypeScript as a fallback
+// when the reflect.Type cannot be found.
+func basicArgToTS(argStr string) string {
+	switch argStr {
+	case "string":
+		return "string"
+	case "bool":
+		return "boolean"
+	case "int", "int8", "int16", "int32", "int64",
+		"uint", "uint8", "uint16", "uint32", "uint64",
+		"float32", "float64":
+		return "number"
+	default:
+		if idx := strings.LastIndexByte(argStr, '.'); idx >= 0 {
+			return argStr[idx+1:]
+		}
+		return argStr
+	}
+}
+
+// makeParamNames generates TypeScript type parameter names.
+// Single parameter: ["T"]. Multiple: ["A", "B", "C", ...].
+// Beyond 26 parameters, uses T1, T2, etc.
+func makeParamNames(count int) []string {
+	if count == 1 {
+		return []string{"T"}
+	}
+	names := make([]string, count)
+	for i := range names {
+		if i < 26 {
+			names[i] = string(rune('A' + i))
+		} else {
+			names[i] = fmt.Sprintf("T%d", i+1)
+		}
+	}
+	return names
 }
