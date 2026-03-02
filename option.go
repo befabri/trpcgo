@@ -6,8 +6,9 @@ import (
 	"time"
 )
 
-const defaultMaxBodySize int64 = 1 << 20 // 1 MB
-const defaultMaxBatchSize int = 10
+const defaultMaxBodySize int64 = 1 << 20        // 1 MB
+const defaultMaxBatchSize int = 10               //
+const defaultSSEMaxDuration = 30 * time.Minute   // 30 minutes
 
 type routerOptions struct {
 	allowBatching                 bool
@@ -17,11 +18,12 @@ type routerOptions struct {
 	maxBodySize                   int64
 	maxBatchSize                  int
 	onError                       func(ctx context.Context, err *Error, path string)
-	createContext                 func(r *http.Request) context.Context
+	createContext                 func(ctx context.Context, r *http.Request) context.Context
 	errorFormatter                func(ErrorFormatterInput) any
 	validator                     func(any) error
 	ssePingInterval               time.Duration
 	sseMaxDuration                time.Duration
+	sseMaxConnections             int
 	sseReconnectAfterInactivityMs int
 	typeOutput                    string
 	zodOutput                     string
@@ -35,7 +37,7 @@ type ErrorFormatterInput struct {
 	Type  ProcedureType
 	Path  string
 	Ctx   context.Context
-	Shape errorEnvelope // the default tRPC error shape
+	Shape ErrorEnvelope // the default tRPC error shape
 }
 
 // Option configures a Router.
@@ -63,7 +65,9 @@ func WithOnError(fn func(ctx context.Context, err *Error, path string)) Option {
 }
 
 // WithContextCreator sets a function that creates the base context for each request.
-func WithContextCreator(fn func(r *http.Request) context.Context) Option {
+// The ctx argument is the request's existing context (r.Context()), so values and
+// cancellation propagate automatically when the returned context is derived from it.
+func WithContextCreator(fn func(ctx context.Context, r *http.Request) context.Context) Option {
 	return func(o *routerOptions) {
 		o.createContext = fn
 	}
@@ -80,12 +84,16 @@ func WithSSEPingInterval(d time.Duration) Option {
 // WithSSEMaxDuration sets the maximum duration for SSE subscriptions.
 // After this duration the server sends a "return" event and closes the
 // connection; the tRPC client will automatically reconnect.
-// Default is 0 (unlimited). In production, set a finite duration or
-// use external connection limits to prevent resource exhaustion from
-// clients holding connections open indefinitely.
+// Default is 30 minutes. Set to -1 for unlimited. Passing 0 keeps the default.
 func WithSSEMaxDuration(d time.Duration) Option {
 	return func(o *routerOptions) {
-		o.sseMaxDuration = d
+		switch {
+		case d > 0:
+			o.sseMaxDuration = d
+		case d < 0:
+			o.sseMaxDuration = 0 // internal 0 = unlimited (no timer created)
+		}
+		// d == 0: no-op, keep default
 	}
 }
 
@@ -96,6 +104,22 @@ func WithSSEMaxDuration(d time.Duration) Option {
 func WithSSEReconnectAfterInactivity(d time.Duration) Option {
 	return func(o *routerOptions) {
 		o.sseReconnectAfterInactivityMs = int(d.Milliseconds())
+	}
+}
+
+// WithSSEMaxConnections sets the maximum number of concurrent SSE subscriptions.
+// When the limit is reached, new subscription requests are rejected with
+// a TOO_MANY_REQUESTS (429) error. Default is 0 (unlimited).
+// Set to -1 to explicitly disable the limit. Passing 0 keeps the default.
+func WithSSEMaxConnections(n int) Option {
+	return func(o *routerOptions) {
+		switch {
+		case n > 0:
+			o.sseMaxConnections = n
+		case n < 0:
+			o.sseMaxConnections = 0 // unlimited
+		}
+		// n == 0: no-op, keep default
 	}
 }
 

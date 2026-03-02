@@ -21,6 +21,19 @@ func GetProcedureMeta(ctx context.Context) (ProcedureMeta, bool) {
 	return pm, ok
 }
 
+// GetMeta extracts typed metadata from the procedure context.
+// Returns the zero value and false if the context has no procedure metadata
+// or if the metadata is not of type T.
+func GetMeta[T any](ctx context.Context) (T, bool) {
+	pm, ok := GetProcedureMeta(ctx)
+	if !ok {
+		var zero T
+		return zero, false
+	}
+	val, ok := pm.Meta.(T)
+	return val, ok
+}
+
 func withProcedureMeta(ctx context.Context, pm ProcedureMeta) context.Context {
 	return context.WithValue(ctx, ctxKeyProcedureMeta, pm)
 }

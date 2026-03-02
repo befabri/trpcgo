@@ -70,6 +70,7 @@ func (r *Router) startWatcher() {
 		zodStyle:  zodStyle,
 	}
 
+	done := r.done
 	go func() {
 		defer func() { _ = watcher.Close() }()
 
@@ -79,6 +80,9 @@ func (r *Router) startWatcher() {
 		var debounce <-chan time.Time
 		for {
 			select {
+			case <-done:
+				return
+
 			case event, ok := <-watcher.Events:
 				if !ok {
 					return

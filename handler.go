@@ -75,7 +75,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// disconnects.
 	ctx := r.Context()
 	if h.opts.createContext != nil {
-		userCtx := h.opts.createContext(r)
+		userCtx := h.opts.createContext(r.Context(), r)
 		if userCtx != ctx {
 			var cancel context.CancelFunc
 			ctx, cancel = mergeContexts(ctx, userCtx)
@@ -101,6 +101,18 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !isBatch {
 		if s, ok := results[0].response.(streamer); ok {
 			path := calls[0].path
+
+			// Enforce concurrent SSE connection limit.
+			if max := h.opts.sseMaxConnections; max > 0 {
+				n := h.router.sseConnections.Add(1)
+				if n > int64(max) {
+					h.router.sseConnections.Add(-1)
+					h.writeErrorResponse(w, NewError(CodeTooManyRequests, "too many concurrent subscriptions"), path, http.StatusTooManyRequests, ctx, ProcedureSubscription)
+					return
+				}
+				defer h.router.sseConnections.Add(-1)
+			}
+
 			if err := s.writeSSE(ctx, w, sseOptions{
 				pingInterval:               h.opts.ssePingInterval,
 				maxDuration:                h.opts.sseMaxDuration,

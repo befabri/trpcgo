@@ -443,8 +443,7 @@ func main() {
 				},
 			}
 		}),
-		trpcgo.WithContextCreator(func(r *http.Request) context.Context {
-			ctx := r.Context()
+		trpcgo.WithContextCreator(func(ctx context.Context, r *http.Request) context.Context {
 			reqID := r.Header.Get("X-Request-ID")
 			if reqID != "" {
 				ctx = context.WithValue(ctx, contextKeyRequestID, reqID)

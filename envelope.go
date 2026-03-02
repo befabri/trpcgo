@@ -14,18 +14,21 @@ type resultData struct {
 	Data any `json:"data"`
 }
 
-// errorEnvelope is the error response envelope following JSON-RPC 2.0 conventions.
-type errorEnvelope struct {
-	Error errorShape `json:"error"`
+// ErrorEnvelope is the error response envelope following JSON-RPC 2.0 conventions.
+// It is exposed so custom error formatters can inspect or extend the default shape.
+type ErrorEnvelope struct {
+	Error ErrorShape `json:"error"`
 }
 
-type errorShape struct {
+// ErrorShape is the error object within an ErrorEnvelope.
+type ErrorShape struct {
 	Code    ErrorCode      `json:"code"`
 	Message string         `json:"message"`
-	Data    errorShapeData `json:"data"`
+	Data    ErrorShapeData `json:"data"`
 }
 
-type errorShapeData struct {
+// ErrorShapeData contains machine-readable error metadata.
+type ErrorShapeData struct {
 	Code       string `json:"code"`
 	HTTPStatus int    `json:"httpStatus"`
 	Path       string `json:"path,omitempty"`
@@ -37,9 +40,9 @@ func newResultEnvelope(data any) resultEnvelope {
 }
 
 // defaultErrorEnvelope builds the standard tRPC error envelope.
-func defaultErrorEnvelope(err *Error, path string, isDev bool) errorEnvelope {
+func defaultErrorEnvelope(err *Error, path string, isDev bool) ErrorEnvelope {
 	httpStatus := HTTPStatusFromCode(err.Code)
-	data := errorShapeData{
+	data := ErrorShapeData{
 		Code:       NameFromCode(err.Code),
 		HTTPStatus: httpStatus,
 		Path:       path,
@@ -49,8 +52,8 @@ func defaultErrorEnvelope(err *Error, path string, isDev bool) errorEnvelope {
 		n := runtime.Stack(buf, false)
 		data.Stack = string(buf[:n])
 	}
-	return errorEnvelope{
-		Error: errorShape{
+	return ErrorEnvelope{
+		Error: ErrorShape{
 			Code:    err.Code,
 			Message: err.Message,
 			Data:    data,

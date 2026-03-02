@@ -9,26 +9,32 @@ import (
 	"net/http"
 	"reflect"
 	"sync"
+	"sync/atomic"
 )
 
 // Router holds registered procedures and produces an http.Handler
 // implementing the tRPC HTTP wire protocol.
 type Router struct {
-	mu          sync.RWMutex
-	procedures  map[string]*procedure
-	middleware  []Middleware
-	opts        routerOptions
-	watcherOnce sync.Once
+	mu             sync.RWMutex
+	procedures     map[string]*procedure
+	middleware     []Middleware
+	opts           routerOptions
+	sseConnections atomic.Int64 // active SSE connection count
+	watcherOnce    sync.Once
+	closeOnce      sync.Once
+	done           chan struct{} // closed by Close() to stop the watcher goroutine
 }
 
 // NewRouter creates a new Router with the given options.
 func NewRouter(opts ...Option) *Router {
 	r := &Router{
 		procedures: make(map[string]*procedure),
+		done:       make(chan struct{}),
 		opts: routerOptions{
-			allowBatching: true,
-			maxBodySize:   defaultMaxBodySize,
-			maxBatchSize:  defaultMaxBatchSize,
+			allowBatching:  true,
+			maxBodySize:    defaultMaxBodySize,
+			maxBatchSize:   defaultMaxBatchSize,
+			sseMaxDuration: defaultSSEMaxDuration,
 		},
 	}
 	for _, opt := range opts {
@@ -61,50 +67,84 @@ func (r *Router) register(path string, typ ProcedureType, handler HandlerFunc, m
 }
 
 // Merge copies all procedures from the source routers into this router.
-// Panics if any procedure path already exists.
+// Returns an error if any procedure path already exists.
+// The operation is atomic: on error, no procedures are added.
 // Global middleware and options on source routers are NOT copied.
-func (r *Router) Merge(sources ...*Router) {
+func (r *Router) Merge(sources ...*Router) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// Collect all procedures first, checking for duplicates against both
+	// the target router and across sources. This ensures atomicity: either
+	// all procedures are added or none are.
+	type entry struct {
+		path string
+		proc *procedure
+	}
+	var toAdd []entry
+	seen := make(map[string]bool)
 	for _, src := range sources {
 		src.mu.RLock()
 		for path, proc := range src.procedures {
 			if _, exists := r.procedures[path]; exists {
 				src.mu.RUnlock()
-				panic(fmt.Sprintf("trpcgo: Merge: duplicate procedure %q", path))
+				return fmt.Errorf("trpcgo: Merge: duplicate procedure %q", path)
 			}
-			r.procedures[path] = &procedure{
-				typ:        proc.typ,
-				handler:    proc.handler,
-				middleware: proc.middleware,
-				meta:       proc.meta,
-				inputType:  proc.inputType,
-				outputType: proc.outputType,
+			if seen[path] {
+				src.mu.RUnlock()
+				return fmt.Errorf("trpcgo: Merge: duplicate procedure %q across sources", path)
 			}
+			seen[path] = true
+			toAdd = append(toAdd, entry{path, proc})
 		}
 		src.mu.RUnlock()
 	}
+
+	// All checks passed — insert.
+	for _, e := range toAdd {
+		r.procedures[e.path] = &procedure{
+			typ:        e.proc.typ,
+			handler:    e.proc.handler,
+			middleware: e.proc.middleware,
+			meta:       e.proc.meta,
+			inputType:  e.proc.inputType,
+			outputType: e.proc.outputType,
+		}
+	}
+	return nil
 }
 
 // MergeRouters creates a new Router combining procedures from all sources.
-// Panics if any two routers define a procedure at the same path.
+// Returns an error if any two routers define a procedure at the same path.
 // The returned router has default options and no global middleware.
-func MergeRouters(routers ...*Router) *Router {
+func MergeRouters(routers ...*Router) (*Router, error) {
 	merged := NewRouter()
-	merged.Merge(routers...)
-	return merged
+	if err := merged.Merge(routers...); err != nil {
+		return nil, err
+	}
+	return merged, nil
+}
+
+// Close stops the file watcher goroutine (if running) and releases resources.
+// Safe to call multiple times.
+func (r *Router) Close() error {
+	r.closeOnce.Do(func() {
+		close(r.done)
+	})
+	return nil
 }
 
 // Handler returns an http.Handler that serves all registered procedures.
 // basePath is stripped from incoming request URLs before procedure lookup.
 //
-// If WithTypeOutput was configured, the TypeScript type file is written
-// and a file watcher is started to regenerate types when Go source changes.
+// When WithDev and WithTypeOutput are both set, the TypeScript type file
+// is generated and a file watcher is started to regenerate types when
+// Go source changes. Call Close() to stop the watcher.
 func (r *Router) Handler(basePath string) http.Handler {
 	if r.opts.zodOutput != "" && r.opts.typeOutput == "" {
 		log.Printf("trpcgo: WithZodOutput is set but WithTypeOutput is not — Zod schemas will not be generated")
 	}
-	if r.opts.typeOutput != "" {
+	if r.opts.typeOutput != "" && r.opts.isDev {
 		if err := r.GenerateTS(r.opts.typeOutput); err != nil {
 			log.Printf("trpcgo: failed to generate TypeScript types: %v", err)
 		}
