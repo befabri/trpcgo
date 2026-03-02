@@ -3892,7 +3892,7 @@ func TestSetCookieNilDoesNotPanic(t *testing.T) {
 func TestBatchSizeLimitDefault(t *testing.T) {
 	router := trpcgo.NewRouter(trpcgo.WithBatching(true))
 
-	trpcgo.VoidQuery(router, "ping", func(ctx context.Context) (string, error) {
+	trpcgo.VoidMutation(router, "ping", func(ctx context.Context) (string, error) {
 		return "pong", nil
 	})
 
@@ -3913,6 +3913,10 @@ func TestBatchSizeLimitDefault(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "batch size") {
+		t.Errorf("error should mention batch size, got: %s", body)
 	}
 }
 
@@ -3936,7 +3940,7 @@ func TestBatchSizeLimitWithinLimit(t *testing.T) {
 func TestBatchSizeLimitCustom(t *testing.T) {
 	router := trpcgo.NewRouter(trpcgo.WithBatching(true), trpcgo.WithMaxBatchSize(2))
 
-	trpcgo.VoidQuery(router, "ping", func(ctx context.Context) (string, error) {
+	trpcgo.VoidMutation(router, "ping", func(ctx context.Context) (string, error) {
 		return "pong", nil
 	})
 
@@ -3947,6 +3951,10 @@ func TestBatchSizeLimitCustom(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400 for batch exceeding custom limit", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "batch size") {
+		t.Errorf("error should mention batch size, got: %s", body)
 	}
 }
 
@@ -3998,6 +4006,10 @@ func TestBatchSizeLimitJSONL(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400 for JSONL batch exceeding limit", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "batch size") {
+		t.Errorf("error should mention batch size, got: %s", body)
 	}
 }
 
