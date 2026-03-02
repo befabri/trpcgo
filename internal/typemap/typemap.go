@@ -27,6 +27,7 @@ type TypeDef struct {
 	Kind         TypeDefKind
 	Comment      string   // Go doc comment → JSDoc
 	TypeParams   []string // Generic type parameter names: ["T", "U"]
+	Extends      []string // base types for TypeScript extends clause
 	Fields       []Field  // Kind == TypeDefInterface
 	UnionMembers []string // Kind == TypeDefUnion (TS-formatted values)
 	AliasOf      string   // Kind == TypeDefAlias (e.g., "string")
@@ -209,6 +210,8 @@ func (m *Mapper) convert(t types.Type) string {
 				return "string"
 			case "encoding/json.RawMessage":
 				return "unknown"
+			case "encoding/json.Number":
+				return "string"
 			}
 
 			// TrackedEvent[T] — unwrap to T for TypeScript output.
@@ -345,7 +348,7 @@ func (m *Mapper) resolveStruct(id, name string, named *types.Named) {
 		Kind:    TypeDefInterface,
 		Comment: meta.Comment,
 	}
-	m.collectFields(st, &def.Fields, meta.FieldComments)
+	m.collectFields(st, &def.Fields, &def.Extends, meta.FieldComments)
 	m.defs[id] = def
 }
 
@@ -371,7 +374,7 @@ func (m *Mapper) resolveGenericStruct(id, name string, named *types.Named) {
 		Comment:    meta.Comment,
 		TypeParams: params,
 	}
-	m.collectFields(st, &def.Fields, meta.FieldComments)
+	m.collectFields(st, &def.Fields, &def.Extends, meta.FieldComments)
 	m.defs[id] = def
 }
 
@@ -421,7 +424,7 @@ func pkgName(obj types.Object) string {
 	return ""
 }
 
-func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, fieldComments map[int]string) {
+func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, extends *[]string, fieldComments map[int]string) {
 	for i := 0; i < st.NumFields(); i++ {
 		field := st.Field(i)
 		tag := st.Tag(i)
@@ -437,16 +440,36 @@ func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, fieldComments 
 			continue
 		}
 
-		// Handle embedded fields: flatten promoted fields.
+		// Handle embedded fields.
 		if field.Embedded() && jsonName == "" {
 			embType := field.Type()
+			isPtr := false
 			if ptr, ok := embType.(*types.Pointer); ok {
 				embType = ptr.Elem()
+				isPtr = true
 			}
 			embType = types.Unalias(embType)
+
+			// tstype:",extends" — emit extends clause instead of flattening.
+			if hasTSTag && tstag.Extends {
+				if named, ok := embType.(*types.Named); ok {
+					if _, ok := named.Underlying().(*types.Struct); ok {
+						tsName := m.convert(embType)
+						if isPtr && !tstag.Required {
+							tsName = "Partial<" + tsName + ">"
+						}
+						if extends != nil {
+							*extends = append(*extends, tsName)
+						}
+						continue
+					}
+				}
+			}
+
+			// Default: flatten promoted fields.
 			if named, ok := embType.(*types.Named); ok {
 				if embSt, ok := named.Underlying().(*types.Struct); ok {
-					m.collectFields(embSt, fields, nil)
+					m.collectFields(embSt, fields, extends, nil)
 					continue
 				}
 			}
@@ -590,7 +613,7 @@ func ParseJSONTag(rawTag string) (name string, omitempty bool, skip bool) {
 	parts := strings.Split(jsonTag, ",")
 	name = parts[0]
 	for _, p := range parts[1:] {
-		if p == "omitempty" {
+		if p == "omitempty" || p == "omitzero" {
 			omitempty = true
 		}
 	}

@@ -217,7 +217,11 @@ func writeInterface(w io.Writer, def typemap.TypeDef) {
 	if len(def.TypeParams) > 0 {
 		typeParams = "<" + strings.Join(def.TypeParams, ", ") + ">"
 	}
-	_, _ = fmt.Fprintf(w, "export interface %s%s {\n", def.Name, typeParams)
+	extendsClause := ""
+	if len(def.Extends) > 0 {
+		extendsClause = " extends " + strings.Join(def.Extends, ", ")
+	}
+	_, _ = fmt.Fprintf(w, "export interface %s%s%s {\n", def.Name, typeParams, extendsClause)
 	for _, f := range def.Fields {
 		writeJSDoc(w, f.Comment, "  ")
 		opt := ""

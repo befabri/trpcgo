@@ -37,6 +37,41 @@ func (r *Router) GenerateTS(outputPath string) error {
 	return os.WriteFile(outputPath, buf.Bytes(), 0o644)
 }
 
+// GenerateZod writes Zod validation schemas for all registered procedure
+// input types. Uses the same reflect-based type information as GenerateTS,
+// enriched with Go kind and validate tag metadata.
+//
+// If no procedures have typed inputs (all void), no file is written and
+// nil is returned. Use WithZodMini to switch to zod/mini functional syntax.
+func (r *Router) GenerateZod(outputPath string) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	dir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating output directory: %w", err)
+	}
+
+	procs, defs := r.convertProcedures()
+
+	style := typemap.ZodStandard
+	if r.opts.zodMini {
+		style = typemap.ZodMini
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, style); err != nil {
+		return fmt.Errorf("generating Zod schemas: %w", err)
+	}
+
+	// No typed inputs → nothing to write.
+	if buf.Len() == 0 {
+		return nil
+	}
+
+	return os.WriteFile(outputPath, buf.Bytes(), 0o644)
+}
+
 // convertProcedures converts reflect-based procedure registrations to
 // codegen ProcEntry and typemap TypeDef slices.
 func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
@@ -84,17 +119,24 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 		fields := make([]typemap.Field, len(d.fields))
 		for j, f := range d.fields {
 			fields[j] = typemap.Field{
-				Name:     f.name,
-				Type:     f.tsType,
-				Optional: f.optional,
-				Readonly: f.readonly,
-				Required: f.required,
+				Name:              f.name,
+				Type:              f.tsType,
+				Comment:           f.comment,
+				GoKind:            f.goKind,
+				Optional:          f.optional,
+				Readonly:          f.readonly,
+				Required:          f.required,
+				ValidateOmitempty: f.validateOmitempty,
+				Validate:          f.validate,
+				ElementValidate:   f.elementValidate,
+				ElementGoKind:     f.elementGoKind,
 			}
 		}
 		typeDefs[i] = typemap.TypeDef{
 			Name:       d.name,
 			Kind:       typemap.TypeDefInterface,
 			TypeParams: d.typeParams,
+			Extends:    d.extends,
 			Fields:     fields,
 		}
 	}
@@ -105,15 +147,22 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 type reflectDef struct {
 	name       string
 	typeParams []string
+	extends    []string
 	fields     []reflectField
 }
 
 type reflectField struct {
-	name     string
-	tsType   string
-	optional bool
-	readonly bool
-	required bool
+	name              string
+	tsType            string
+	comment           string // from ts_doc tag → JSDoc
+	optional          bool
+	readonly          bool
+	required          bool
+	goKind            string // Go kind for Zod: "string", "int", "float64", etc.
+	validate          []typemap.ValidateRule
+	elementValidate   []typemap.ValidateRule
+	elementGoKind     string
+	validateOmitempty bool
 }
 
 // goTypeToTS converts a reflect.Type to its TypeScript representation.
@@ -132,8 +181,13 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Ty
 	}
 
 	// Well-known types that need special handling regardless of Kind.
-	if t.PkgPath() == "encoding/json" && t.Name() == "RawMessage" {
-		return "unknown"
+	if t.PkgPath() == "encoding/json" {
+		switch t.Name() {
+		case "RawMessage":
+			return "unknown"
+		case "Number":
+			return "string"
+		}
 	}
 
 	// TrackedEvent[T] — unwrap to T for TypeScript output.
@@ -259,8 +313,10 @@ func resolveGenericStructTS(t reflect.Type, baseName, key string, paramNames []s
 	}
 
 	var fields []reflectField
-	collectFieldsTS(t, defs, &fields, subs)
+	var extends []string
+	collectFieldsTS(t, defs, &fields, &extends, subs)
 	defs[key].fields = fields
+	defs[key].extends = extends
 }
 
 func resolveStructTS(t reflect.Type, defs map[string]*reflectDef) {
@@ -269,11 +325,13 @@ func resolveStructTS(t reflect.Type, defs map[string]*reflectDef) {
 	defs[key] = &reflectDef{name: name}
 
 	var fields []reflectField
-	collectFieldsTS(t, defs, &fields, nil)
+	var extends []string
+	collectFieldsTS(t, defs, &fields, &extends, nil)
 	defs[key].fields = fields
+	defs[key].extends = extends
 }
 
-func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]reflectField, subs map[reflect.Type]string) {
+func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]reflectField, extends *[]string, subs map[reflect.Type]string) {
 	for f := range t.Fields() {
 		jsonName, omitempty, skip := typemap.ParseJSONTag(string(f.Tag))
 		if skip {
@@ -286,14 +344,29 @@ func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]refl
 			continue
 		}
 
-		// Embedded struct: flatten fields.
+		// Embedded struct handling.
 		if f.Anonymous && jsonName == "" {
 			ft := f.Type
-			if ft.Kind() == reflect.Pointer {
+			isPtr := ft.Kind() == reflect.Pointer
+			if isPtr {
 				ft = ft.Elem()
 			}
+
+			// tstype:",extends" — emit extends clause instead of flattening.
+			if hasTSTag && tstag.Extends && ft.Kind() == reflect.Struct {
+				tsName := goTypeToTS(ft, defs, subs)
+				if isPtr && !tstag.Required {
+					tsName = "Partial<" + tsName + ">"
+				}
+				if extends != nil {
+					*extends = append(*extends, tsName)
+				}
+				continue
+			}
+
+			// Default: flatten promoted fields.
 			if ft.Kind() == reflect.Struct {
-				collectFieldsTS(ft, defs, fields, subs)
+				collectFieldsTS(ft, defs, fields, extends, subs)
 				continue
 			}
 		}
@@ -311,7 +384,32 @@ func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]refl
 
 		rf := reflectField{name: jsonName, tsType: tsType, optional: optional}
 
-		// Apply tstype tag overrides.
+		// Extract Go kind for Zod type discrimination.
+		rf.goKind = reflectGoKind(f.Type)
+
+		// Parse validate tag and split at dive boundary.
+		allRules := typemap.ParseValidateTag(string(f.Tag))
+		sliceRules, elemRules := typemap.SplitAtDive(allRules)
+		rf.validate = sliceRules
+		rf.elementValidate = elemRules
+
+		// Extract element Go kind for slice/array fields.
+		if rf.goKind == "slice" || rf.goKind == "array" {
+			rf.elementGoKind = reflectSliceElementGoKind(f.Type)
+		}
+
+		// Check for validate:"required" and validate:"omitempty".
+		// Note: tstype tag overrides below take final precedence.
+		for _, rule := range rf.validate {
+			if rule.Tag == "required" {
+				rf.optional = false
+			}
+			if rule.Tag == "omitempty" {
+				rf.validateOmitempty = true
+			}
+		}
+
+		// Apply tstype tag overrides (final precedence over validate tags).
 		if hasTSTag {
 			if tstag.Type != "" {
 				rf.tsType = tstag.Type
@@ -321,6 +419,11 @@ func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]refl
 				rf.required = true
 				rf.optional = false
 			}
+		}
+
+		// Apply ts_doc tag for JSDoc.
+		if doc, ok := typemap.ParseTSDocTag(string(f.Tag)); ok {
+			rf.comment = doc
 		}
 
 		*fields = append(*fields, rf)
@@ -368,6 +471,81 @@ func inlineStructTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflec
 		return "Record<string, never>"
 	}
 	return "{ " + strings.Join(parts, "; ") + " }"
+}
+
+// reflectGoKind returns a Go kind string for Zod type discrimination.
+// This mirrors typemap.goKind (which uses go/types) but works with reflect.Type.
+// SYNC: when adding well-known types here, update typemap.goKind too.
+func reflectGoKind(t reflect.Type) string {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+
+	// Well-known types.
+	if t.PkgPath() == "time" && t.Name() == "Time" {
+		return "time.Time"
+	}
+	if t.PkgPath() == "encoding/json" && t.Name() == "RawMessage" {
+		return "json.RawMessage"
+	}
+
+	switch t.Kind() {
+	case reflect.String:
+		return "string"
+	case reflect.Bool:
+		return "bool"
+	case reflect.Int:
+		return "int"
+	case reflect.Int8:
+		return "int8"
+	case reflect.Int16:
+		return "int16"
+	case reflect.Int32:
+		return "int32"
+	case reflect.Int64:
+		return "int64"
+	case reflect.Uint:
+		return "uint"
+	case reflect.Uint8:
+		return "uint8"
+	case reflect.Uint16:
+		return "uint16"
+	case reflect.Uint32:
+		return "uint32"
+	case reflect.Uint64:
+		return "uint64"
+	case reflect.Float32:
+		return "float32"
+	case reflect.Float64:
+		return "float64"
+	case reflect.Slice:
+		if t.Elem().Kind() == reflect.Uint8 {
+			return "[]byte"
+		}
+		return "slice"
+	case reflect.Array:
+		return "array"
+	case reflect.Map:
+		return "map"
+	case reflect.Struct:
+		return "struct"
+	case reflect.Interface:
+		return "interface"
+	default:
+		return "unknown"
+	}
+}
+
+// reflectSliceElementGoKind returns the Go kind of a slice or array's element type.
+func reflectSliceElementGoKind(t reflect.Type) string {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Slice, reflect.Array:
+		return reflectGoKind(t.Elem())
+	}
+	return ""
 }
 
 // --- Generic type helpers ---

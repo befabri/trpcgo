@@ -108,6 +108,11 @@ func (r *Router) Handler(basePath string) http.Handler {
 		if err := r.GenerateTS(r.opts.typeOutput); err != nil {
 			log.Printf("trpcgo: failed to generate TypeScript types: %v", err)
 		}
+		if r.opts.zodOutput != "" {
+			if err := r.GenerateZod(r.opts.zodOutput); err != nil {
+				log.Printf("trpcgo: failed to generate Zod schemas: %v", err)
+			}
+		}
 		r.watcherOnce.Do(r.startWatcher)
 	}
 

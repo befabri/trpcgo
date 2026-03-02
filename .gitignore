@@ -24,6 +24,9 @@ routeTree.gen.ts
 # Claude Code
 .claude/
 
+# Reference repos (cloned for research)
+.reference/
+
 # OS
 .DS_Store
 Thumbs.db

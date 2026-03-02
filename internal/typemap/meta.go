@@ -67,6 +67,7 @@ type TSTypeTag struct {
 	Type     string // overrides the generated TS type (empty = no override)
 	Readonly bool
 	Required bool
+	Extends  bool // embedded field should use TypeScript extends (not flatten)
 }
 
 // ParseTSTypeTag parses a raw struct tag string for a `tstype` tag.
@@ -91,10 +92,20 @@ func ParseTSTypeTag(rawTag string) (TSTypeTag, bool) {
 			result.Readonly = true
 		case "required":
 			result.Required = true
+		case "extends":
+			result.Extends = true
 		default:
 			typeParts = append(typeParts, p)
 		}
 	}
 	result.Type = strings.TrimSpace(strings.Join(typeParts, ","))
 	return result, true
+}
+
+// ParseTSDocTag parses a raw struct tag string for a `ts_doc` tag.
+// Returns the JSDoc comment text and ok=true if present.
+func ParseTSDocTag(rawTag string) (doc string, ok bool) {
+	tag := reflect.StructTag(rawTag)
+	doc, ok = tag.Lookup("ts_doc")
+	return doc, ok
 }

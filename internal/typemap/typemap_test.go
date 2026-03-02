@@ -743,7 +743,7 @@ func TestCollectFieldsDive(t *testing.T) {
 
 	m := NewMapper(nil)
 	var fields []Field
-	m.collectFields(st, &fields, nil)
+	m.collectFields(st, &fields, nil, nil)
 
 	if len(fields) != 1 {
 		t.Fatalf("got %d fields, want 1", len(fields))
@@ -794,7 +794,7 @@ func TestCollectFieldsNoDive(t *testing.T) {
 
 	m := NewMapper(nil)
 	var fields []Field
-	m.collectFields(st, &fields, nil)
+	m.collectFields(st, &fields, nil, nil)
 
 	if len(fields) != 1 {
 		t.Fatalf("got %d fields, want 1", len(fields))
@@ -824,7 +824,7 @@ func TestCollectFieldsDiveOnNonSlice(t *testing.T) {
 
 	m := NewMapper(nil)
 	var fields []Field
-	m.collectFields(st, &fields, nil)
+	m.collectFields(st, &fields, nil, nil)
 
 	if len(fields) != 1 {
 		t.Fatalf("got %d fields, want 1", len(fields))
