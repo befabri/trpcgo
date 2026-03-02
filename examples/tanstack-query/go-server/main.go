@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/befabri/trpcgo"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-playground/validator/v10"
-	"github.com/befabri/trpcgo"
 )
 
 type ctxKey int
@@ -183,9 +183,9 @@ func requireRequestID(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
 // Handlers
 
 type userService struct {
-	mu       sync.RWMutex
-	users    []User
-	nextID   int
+	mu        sync.RWMutex
+	users     []User
+	nextID    int
 	startedAt time.Time
 
 	// Subscription broadcast: listeners register a channel, CreateUser pushes to all.

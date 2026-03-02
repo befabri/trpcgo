@@ -145,7 +145,7 @@ func (r *Router) executeProcedure(ctx context.Context, proc *procedure, raw json
 	// Validate the decoded struct.
 	if r.opts.validator != nil && proc.inputType != nil && input != nil {
 		t := proc.inputType
-		for t.Kind() == reflect.Ptr {
+		for t.Kind() == reflect.Pointer {
 			t = t.Elem()
 		}
 		if t.Kind() == reflect.Struct {

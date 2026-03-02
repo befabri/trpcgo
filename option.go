@@ -10,21 +10,21 @@ const defaultMaxBodySize int64 = 1 << 20 // 1 MB
 const defaultMaxBatchSize int = 10
 
 type routerOptions struct {
-	allowBatching                  bool
-	allowMethodOverride            bool
-	isDev                          bool
-	maxBodySize                    int64
-	maxBatchSize                   int
-	onError                        func(ctx context.Context, err *Error, path string)
-	createContext                  func(r *http.Request) context.Context
-	errorFormatter                 func(ErrorFormatterInput) any
-	validator                      func(any) error
-	ssePingInterval                time.Duration
-	sseMaxDuration                 time.Duration
-	sseReconnectAfterInactivityMs  int
-	typeOutput                     string
-	zodOutput                      string
-	zodMini                        bool
+	allowBatching                 bool
+	allowMethodOverride           bool
+	isDev                         bool
+	maxBodySize                   int64
+	maxBatchSize                  int
+	onError                       func(ctx context.Context, err *Error, path string)
+	createContext                 func(r *http.Request) context.Context
+	errorFormatter                func(ErrorFormatterInput) any
+	validator                     func(any) error
+	ssePingInterval               time.Duration
+	sseMaxDuration                time.Duration
+	sseReconnectAfterInactivityMs int
+	typeOutput                    string
+	zodOutput                     string
+	zodMini                       bool
 }
 
 // ErrorFormatterInput is passed to a custom error formatter.

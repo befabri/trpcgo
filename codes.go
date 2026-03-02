@@ -6,26 +6,26 @@ import "net/http"
 type ErrorCode int
 
 const (
-	CodeParseError          ErrorCode = -32700
-	CodeBadRequest          ErrorCode = -32600
-	CodeInternalServerError ErrorCode = -32603
-	CodeUnauthorized        ErrorCode = -32001
-	CodeForbidden           ErrorCode = -32003
-	CodeNotFound            ErrorCode = -32004
-	CodeMethodNotSupported  ErrorCode = -32005
-	CodeTimeout             ErrorCode = -32008
-	CodeConflict            ErrorCode = -32009
-	CodePreconditionFailed  ErrorCode = -32012
-	CodePayloadTooLarge     ErrorCode = -32013
-	CodeUnsupportedMedia    ErrorCode = -32015
+	CodeParseError           ErrorCode = -32700
+	CodeBadRequest           ErrorCode = -32600
+	CodeInternalServerError  ErrorCode = -32603
+	CodeUnauthorized         ErrorCode = -32001
+	CodeForbidden            ErrorCode = -32003
+	CodeNotFound             ErrorCode = -32004
+	CodeMethodNotSupported   ErrorCode = -32005
+	CodeTimeout              ErrorCode = -32008
+	CodeConflict             ErrorCode = -32009
+	CodePreconditionFailed   ErrorCode = -32012
+	CodePayloadTooLarge      ErrorCode = -32013
+	CodeUnsupportedMedia     ErrorCode = -32015
 	CodeUnprocessableContent ErrorCode = -32022
 	CodePreconditionRequired ErrorCode = -32028
-	CodeTooManyRequests     ErrorCode = -32029
-	CodeClientClosed        ErrorCode = -32099
-	CodeNotImplemented      ErrorCode = -32501
-	CodeBadGateway          ErrorCode = -32502
-	CodeServiceUnavailable  ErrorCode = -32503
-	CodeGatewayTimeout      ErrorCode = -32504
+	CodeTooManyRequests      ErrorCode = -32029
+	CodeClientClosed         ErrorCode = -32099
+	CodeNotImplemented       ErrorCode = -32501
+	CodeBadGateway           ErrorCode = -32502
+	CodeServiceUnavailable   ErrorCode = -32503
+	CodeGatewayTimeout       ErrorCode = -32504
 )
 
 var codeToHTTPStatus = map[ErrorCode]int{
