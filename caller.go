@@ -3,7 +3,6 @@ package trpcgo
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 )
 
 // RawCall invokes a procedure by path, running the full middleware chain.
@@ -16,7 +15,7 @@ func (r *Router) RawCall(ctx context.Context, path string, input json.RawMessage
 	r.mu.RUnlock()
 
 	if !ok {
-		return nil, NewError(CodeNotFound, fmt.Sprintf("procedure %q not found", path))
+		return nil, NewError(CodeNotFound, "procedure not found")
 	}
 
 	if proc.typ == ProcedureSubscription {

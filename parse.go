@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 )
 
@@ -15,19 +14,39 @@ type parsedRequest struct {
 	input json.RawMessage
 }
 
+// containsTraversal rejects paths that contain directory traversal segments.
+// Procedure names are flat identifiers (e.g. "user.getById") — they should
+// never contain "..", ".", or leading/trailing slashes. This is defense-in-depth:
+// while the map lookup is inherently safe against traversal, the raw path
+// is exposed to middleware via ProcedureMeta.Path, to onError callbacks, and
+// to the error envelope data.path field.
+func containsTraversal(path string) bool {
+	for _, segment := range strings.Split(path, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 // parseRequest extracts procedure path(s) and input(s) from an HTTP request.
 // Returns one parsedRequest per procedure call (multiple if batched).
 func parseRequest(r *http.Request, basePath string, isBatch bool, maxBodySize int64) ([]parsedRequest, error) {
-	// Extract procedure path from URL
+	// Extract procedure path from URL.
+	// r.URL.Path is already decoded by Go's net/http — do NOT call
+	// PathUnescape again, as that would create a double-decode allowing
+	// double-encoded paths to bypass reverse proxy path-based ACLs.
 	rawPath := strings.TrimPrefix(r.URL.Path, basePath)
 	rawPath = strings.TrimPrefix(rawPath, "/")
-	rawPath, _ = url.PathUnescape(rawPath)
 
 	if rawPath == "" {
 		return nil, NewError(CodeNotFound, "no procedure path specified")
 	}
 
 	if !isBatch {
+		if containsTraversal(rawPath) {
+			return nil, NewError(CodeBadRequest, "invalid procedure path")
+		}
 		input, err := parseInput(r, maxBodySize)
 		if err != nil {
 			return nil, err
@@ -37,18 +56,24 @@ func parseRequest(r *http.Request, basePath string, isBatch bool, maxBodySize in
 
 	// Batch: paths are comma-separated
 	paths := strings.Split(rawPath, ",")
+	for _, p := range paths {
+		if containsTraversal(p) {
+			return nil, NewError(CodeBadRequest, "invalid procedure path")
+		}
+	}
 	results := make([]parsedRequest, len(paths))
 
 	if r.Method == http.MethodGet {
-		// GET batch: input is a JSON object keyed by index in the query param
+		// GET batch: input is a JSON object keyed by index in the query param.
+		// r.URL.Query().Get() already percent-decodes — do NOT call
+		// url.QueryUnescape again (same double-decode bug as parseInput).
 		rawInput := r.URL.Query().Get("input")
+		if maxBodySize > 0 && int64(len(rawInput)) > maxBodySize {
+			return nil, NewError(CodePayloadTooLarge, "query input too large")
+		}
 		var indexedInputs map[string]json.RawMessage
 		if rawInput != "" {
-			decoded, err := url.QueryUnescape(rawInput)
-			if err != nil {
-				decoded = rawInput
-			}
-			if err := json.Unmarshal([]byte(decoded), &indexedInputs); err != nil {
+			if err := json.Unmarshal([]byte(rawInput), &indexedInputs); err != nil {
 				return nil, NewError(CodeParseError, "failed to parse batch input")
 			}
 		}
@@ -84,15 +109,18 @@ func parseRequest(r *http.Request, basePath string, isBatch bool, maxBodySize in
 // parseInput extracts the input for a single (non-batch) procedure call.
 func parseInput(r *http.Request, maxBodySize int64) (json.RawMessage, error) {
 	if r.Method == http.MethodGet {
+		// r.URL.Query().Get() already percent-decodes the query parameter.
+		// Do NOT call url.QueryUnescape again — that would create a
+		// double-decode allowing double-encoded input to bypass proxy/WAF
+		// input validation.
 		rawInput := r.URL.Query().Get("input")
 		if rawInput == "" {
 			return nil, nil
 		}
-		decoded, err := url.QueryUnescape(rawInput)
-		if err != nil {
-			decoded = rawInput
+		if maxBodySize > 0 && int64(len(rawInput)) > maxBodySize {
+			return nil, NewError(CodePayloadTooLarge, "query input too large")
 		}
-		return json.RawMessage(decoded), nil
+		return json.RawMessage(rawInput), nil
 	}
 
 	// POST: read body
@@ -128,6 +156,5 @@ func isBatchRequest(r *http.Request) bool {
 func parsePaths(r *http.Request, basePath string) []string {
 	rawPath := strings.TrimPrefix(r.URL.Path, basePath)
 	rawPath = strings.TrimPrefix(rawPath, "/")
-	rawPath, _ = url.PathUnescape(rawPath)
 	return strings.Split(rawPath, ",")
 }

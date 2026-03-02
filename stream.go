@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -180,6 +181,9 @@ func writeSSENamedEvent(w http.ResponseWriter, event string, data []byte) {
 func writeSSEData(w http.ResponseWriter, data []byte, id string) {
 	_, _ = fmt.Fprintf(w, "data: %s\n", data)
 	if id != "" {
+		// Sanitize newlines to prevent SSE field injection. An id containing
+		// \n or \r could inject arbitrary SSE fields (data:, event:, etc.).
+		id = strings.NewReplacer("\n", "", "\r", "").Replace(id)
 		_, _ = fmt.Fprintf(w, "id: %s\n", id)
 	}
 	_, _ = fmt.Fprint(w, "\n")
