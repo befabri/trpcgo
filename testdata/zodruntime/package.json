@@ -6,6 +6,7 @@
     "@traversable/zod-test": "^0",
     "@traversable/zod-types": "^0",
     "fast-check": "^3",
-    "tsx": "^4"
+    "tsx": "^4",
+    "typescript": "^5"
   }
 }

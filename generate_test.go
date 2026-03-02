@@ -2403,6 +2403,8 @@ func TestZodRuntimeValidation(t *testing.T) {
 		t.Skip("zodruntime node_modules not installed, run: npm install --prefix testdata/zodruntime")
 	}
 
+	tscPath := filepath.Join(zodRuntimeDir, "node_modules", ".bin", "tsc")
+
 	runValidation := func(t *testing.T, zodCode, script string) {
 		t.Helper()
 		dir := t.TempDir()
@@ -2416,6 +2418,27 @@ func TestZodRuntimeValidation(t *testing.T) {
 		}
 		if err := os.WriteFile(filepath.Join(dir, "validate.ts"), []byte(script), 0o644); err != nil {
 			t.Fatal(err)
+		}
+
+		// Type-check generated schemas with tsc --noEmit.
+		tsconfig := `{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true
+  },
+  "include": ["schemas.ts"]
+}`
+		if err := os.WriteFile(filepath.Join(dir, "tsconfig.json"), []byte(tsconfig), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tsc := exec.Command(tscPath, "--noEmit", "--project", dir)
+		tsc.Dir = dir
+		if tscOut, err := tsc.CombinedOutput(); err != nil {
+			t.Fatalf("tsc type-check failed:\n%s\n\nGenerated schemas:\n%s", string(tscOut), zodCode)
 		}
 
 		cmd := exec.Command(tsxPath, filepath.Join(dir, "validate.ts"))

@@ -32,6 +32,9 @@ type routerOptions struct {
 
 // ErrorFormatterInput is passed to a custom error formatter.
 // It includes the default error shape so the formatter can extend or replace it.
+//
+// Security: Ctx carries the full request context, which may contain auth tokens
+// or other sensitive values. Avoid including context values in formatted error responses.
 type ErrorFormatterInput struct {
 	Error *Error
 	Type  ProcedureType

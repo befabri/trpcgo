@@ -97,7 +97,7 @@ func writeZodObject(w io.Writer, def typemap.TypeDef, cycles map[string]map[stri
 		}
 	}
 
-	// Count active refinements for mini z.pipe() wrapping.
+	// Count active refinements.
 	var activeRefs []typemap.Refinement
 	for _, ref := range def.Refinements {
 		if !omitted[ref.Field] && !omitted[ref.OtherField] {
@@ -105,19 +105,11 @@ func writeZodObject(w io.Writer, def typemap.TypeDef, cycles map[string]map[stri
 		}
 	}
 
-	// Mini refinements use z.pipe(expr, z.refine(fn, opts)) since .refine()
-	// is not a method in zod/mini. Multiple refines nest:
-	// z.pipe(z.pipe(expr, z.refine1), z.refine2)
-	miniPipePrefix := ""
-	if style == typemap.ZodMini && len(activeRefs) > 0 {
-		miniPipePrefix = strings.Repeat("z.pipe(", len(activeRefs))
-	}
-
 	if isCyclic {
-		_, _ = fmt.Fprintf(w, "export const %s: z.ZodType<%s> = z.lazy(() => %s%s\n",
-			schemaName, def.Name, miniPipePrefix, objectExpr)
+		_, _ = fmt.Fprintf(w, "export const %s: z.ZodType<%s> = z.lazy(() => %s\n",
+			schemaName, def.Name, objectExpr)
 	} else {
-		_, _ = fmt.Fprintf(w, "export const %s = %s%s\n", schemaName, miniPipePrefix, objectExpr)
+		_, _ = fmt.Fprintf(w, "export const %s = %s\n", schemaName, objectExpr)
 	}
 
 	for _, f := range def.Fields {
@@ -141,23 +133,24 @@ func writeZodObject(w io.Writer, def typemap.TypeDef, cycles map[string]map[stri
 
 	// Emit refinements for cross-field validation rules.
 	// Standard: expr.refine(fn, opts)
-	// Mini: z.pipe(expr, z.refine(fn, opts)) wrapping (prefixes already emitted above).
-	if style == typemap.ZodMini {
-		for _, ref := range activeRefs {
-			_, _ = fmt.Fprint(w, ", z.refine(\n")
-			_, _ = fmt.Fprintf(w, "  (data: any) => data.%s %s data.%s,\n",
-				typemap.QuotePropName(ref.Field), ref.Op, typemap.QuotePropName(ref.OtherField))
-			_, _ = fmt.Fprintf(w, "  { message: \"%s must be %s %s\", path: [\"%s\"] }\n",
-				ref.Field, ref.Op, ref.OtherField, ref.Field)
-			_, _ = fmt.Fprint(w, "))")
-		}
-	} else {
-		for _, ref := range activeRefs {
+	// Mini: expr.check(z.refine(fn, opts))  (.check() accepts $ZodCheck)
+	for _, ref := range activeRefs {
+		if style == typemap.ZodMini {
+			_, _ = fmt.Fprint(w, ".check(z.refine(\n")
+		} else {
 			_, _ = fmt.Fprint(w, ".refine(\n")
-			_, _ = fmt.Fprintf(w, "  (data) => data.%s %s data.%s,\n",
-				typemap.QuotePropName(ref.Field), ref.Op, typemap.QuotePropName(ref.OtherField))
-			_, _ = fmt.Fprintf(w, "  { message: \"%s must be %s %s\", path: [\"%s\"] }\n",
-				ref.Field, ref.Op, ref.OtherField, ref.Field)
+		}
+		dataParam := "(data)"
+		if style == typemap.ZodMini {
+			dataParam = "(data: any)"
+		}
+		_, _ = fmt.Fprintf(w, "  %s => data.%s %s data.%s,\n",
+			dataParam, typemap.QuotePropName(ref.Field), ref.Op, typemap.QuotePropName(ref.OtherField))
+		_, _ = fmt.Fprintf(w, "  { message: \"%s must be %s %s\", path: [\"%s\"] }\n",
+			ref.Field, ref.Op, ref.OtherField, ref.Field)
+		if style == typemap.ZodMini {
+			_, _ = fmt.Fprint(w, "))")
+		} else {
 			_, _ = fmt.Fprint(w, ")")
 		}
 	}
