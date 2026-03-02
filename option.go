@@ -13,6 +13,7 @@ type routerOptions struct {
 	allowBatching                 bool
 	allowMethodOverride           bool
 	isDev                         bool
+	strictInput                   bool
 	maxBodySize                   int64
 	maxBatchSize                  int
 	onError                       func(ctx context.Context, err *Error, path string)
@@ -77,7 +78,11 @@ func WithSSEPingInterval(d time.Duration) Option {
 }
 
 // WithSSEMaxDuration sets the maximum duration for SSE subscriptions.
-// Default is 0 (unlimited).
+// After this duration the server sends a "return" event and closes the
+// connection; the tRPC client will automatically reconnect.
+// Default is 0 (unlimited). In production, set a finite duration or
+// use external connection limits to prevent resource exhaustion from
+// clients holding connections open indefinitely.
 func WithSSEMaxDuration(d time.Duration) Option {
 	return func(o *routerOptions) {
 		o.sseMaxDuration = d
@@ -103,18 +108,42 @@ func WithDev(enabled bool) Option {
 }
 
 // WithMaxBodySize sets the maximum allowed request body size in bytes.
-// Default is 1 MB. Set to 0 for no limit.
+// Default is 1 MB. Set to -1 for no limit. Passing 0 keeps the default.
 func WithMaxBodySize(n int64) Option {
 	return func(o *routerOptions) {
-		o.maxBodySize = n
+		switch {
+		case n > 0:
+			o.maxBodySize = n
+		case n < 0:
+			o.maxBodySize = 0 // internal 0 = unlimited (readBody skips MaxBytesReader)
+		}
+		// n == 0: no-op, keep default
 	}
 }
 
 // WithMaxBatchSize sets the maximum number of procedures allowed in a single
-// batch request. Default is 10. Set to 0 for no limit.
+// batch request. Default is 10. Set to -1 for no limit. Passing 0 keeps the default.
 func WithMaxBatchSize(n int) Option {
 	return func(o *routerOptions) {
-		o.maxBatchSize = n
+		switch {
+		case n > 0:
+			o.maxBatchSize = n
+		case n < 0:
+			o.maxBatchSize = 0 // internal 0 = unlimited (batch check skipped)
+		}
+		// n == 0: no-op, keep default
+	}
+}
+
+// WithStrictInput enables strict JSON input parsing. When true, procedure
+// inputs that contain unknown fields (fields not present in the input struct)
+// are rejected with a BAD_REQUEST error. This uses json.Decoder's
+// DisallowUnknownFields under the hood.
+//
+// By default, Go's json.Unmarshal silently ignores unknown fields.
+func WithStrictInput(enabled bool) Option {
+	return func(o *routerOptions) {
+		o.strictInput = enabled
 	}
 }
 

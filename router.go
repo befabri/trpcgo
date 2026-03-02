@@ -1,6 +1,7 @@
 package trpcgo
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -94,13 +95,6 @@ func MergeRouters(routers ...*Router) *Router {
 	return merged
 }
 
-func (r *Router) lookup(path string) (*procedure, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	p, ok := r.procedures[path]
-	return p, ok
-}
-
 // Handler returns an http.Handler that serves all registered procedures.
 // basePath is stripped from incoming request URLs before procedure lookup.
 //
@@ -117,14 +111,22 @@ func (r *Router) Handler(basePath string) http.Handler {
 		r.watcherOnce.Do(r.startWatcher)
 	}
 
-	// Pre-compute middleware chains for each procedure.
-	r.mu.Lock()
-	for _, proc := range r.procedures {
-		proc.wrappedHandler = applyMiddleware(proc.handler, r.middleware, proc.middleware)
+	// Pre-compute middleware chains and snapshot the procedures map so
+	// the HTTP handler needs no locking on the hot path.
+	// IMPORTANT: create new procedure copies — do NOT mutate the originals.
+	// r.procedures entries are shared with RawCall(), which reads them
+	// concurrently under RLock. Writing wrappedHandler on the original
+	// would race with executeProcedure reading it.
+	r.mu.RLock()
+	snapshot := make(map[string]*procedure, len(r.procedures))
+	for path, proc := range r.procedures {
+		snap := *proc // shallow copy
+		snap.wrappedHandler = applyMiddleware(proc.handler, r.middleware, proc.middleware)
+		snapshot[path] = &snap
 	}
-	r.mu.Unlock()
+	r.mu.RUnlock()
 
-	return &httpHandler{router: r, basePath: basePath}
+	return &httpHandler{router: r, procedures: snapshot, opts: &r.opts, basePath: basePath}
 }
 
 // executeProcedure decodes the raw JSON input, validates it, and calls the handler.
@@ -135,7 +137,13 @@ func (r *Router) executeProcedure(ctx context.Context, proc *procedure, raw json
 	if proc.inputType != nil {
 		ptr := reflect.New(proc.inputType)
 		if len(raw) > 0 {
-			if err := json.Unmarshal(raw, ptr.Interface()); err != nil {
+			if r.opts.strictInput {
+				dec := json.NewDecoder(bytes.NewReader(raw))
+				dec.DisallowUnknownFields()
+				if err := dec.Decode(ptr.Interface()); err != nil {
+					return nil, NewError(CodeBadRequest, "unknown field in input")
+				}
+			} else if err := json.Unmarshal(raw, ptr.Interface()); err != nil {
 				return nil, NewError(CodeParseError, "failed to parse input")
 			}
 		}

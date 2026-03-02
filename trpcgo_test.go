@@ -4007,7 +4007,7 @@ func TestBatchSizeLimitCustom(t *testing.T) {
 }
 
 func TestBatchSizeLimitDisabled(t *testing.T) {
-	router := trpcgo.NewRouter(trpcgo.WithBatching(true), trpcgo.WithMaxBatchSize(0))
+	router := trpcgo.NewRouter(trpcgo.WithBatching(true), trpcgo.WithMaxBatchSize(-1))
 
 	trpcgo.VoidMutation(router, "ping", func(ctx context.Context) (string, error) {
 		return "pong", nil
@@ -4098,6 +4098,61 @@ func TestRawCallSetCookie(t *testing.T) {
 	if got := headers.Get("X-Custom"); got != "hello" {
 		t.Errorf("X-Custom = %q, want %q", got, "hello")
 	}
+}
+
+func TestHandlerSnapshotIsolation(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithMethodOverride(true))
+
+	trpcgo.VoidQuery(router, "before", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	})
+
+	handler := router.Handler("/trpc")
+	server := newTestServer(t, handler)
+
+	// Register a new procedure AFTER Handler() was called.
+	trpcgo.VoidQuery(router, "after", func(ctx context.Context) (string, error) {
+		return "should not be reachable", nil
+	})
+
+	// "before" should still work via the HTTP handler.
+	resp := mustGet(t, server, "/trpc/before")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("before: status = %d, want 200", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	// "after" should NOT be reachable via the HTTP handler (snapshot isolation).
+	resp = mustGet(t, server, "/trpc/after")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("after: status = %d, want 404", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	// But "after" should still be reachable via Call on the router directly.
+	result, err := trpcgo.Call[any, string](router, context.Background(), "after", nil)
+	if err != nil {
+		t.Fatalf("Call(after): %v", err)
+	}
+	if result != "should not be reachable" {
+		t.Errorf("Call(after) = %q, want %q", result, "should not be reachable")
+	}
+
+	// A second Handler() call sees the new procedure.
+	handler2 := router.Handler("/trpc")
+	server2 := newTestServer(t, handler2)
+	resp = mustGet(t, server2, "/trpc/after")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("handler2 after: status = %d, want 200", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	// Original handler still doesn't see it.
+	resp = mustGet(t, server, "/trpc/after")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("handler1 after (re-check): status = %d, want 404", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
 }
 
 func TestRawCallWithoutMetadataIsNoop(t *testing.T) {

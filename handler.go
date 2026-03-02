@@ -9,8 +9,15 @@ import (
 )
 
 type httpHandler struct {
-	router   *Router
-	basePath string
+	router     *Router                // kept for executeProcedure (shared with RawCall)
+	procedures map[string]*procedure  // frozen snapshot — no lock on the hot path
+	opts       *routerOptions         // pointer to router's opts (immutable after construction)
+	basePath   string
+}
+
+func (h *httpHandler) lookup(path string) (*procedure, bool) {
+	p, ok := h.procedures[path]
+	return p, ok
 }
 
 type callResult struct {
@@ -28,24 +35,30 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	isBatch := isBatchRequest(r)
 
 	// Check if batching is allowed
-	if isBatch && !h.router.opts.allowBatching {
+	if isBatch && !h.opts.allowBatching {
 		h.writeErrorResponse(w, NewError(CodeBadRequest, "batching is not enabled"), "", http.StatusBadRequest, nil, "")
 		return
 	}
 
-	// Subscriptions cannot be batched (tRPC spec).
+	// For batch requests, enforce the batch size limit early — before parsing
+	// inputs or iterating paths — to prevent amplification from oversized URL paths.
 	if isBatch {
 		paths := parsePaths(r, h.basePath)
+		if h.opts.maxBatchSize > 0 && len(paths) > h.opts.maxBatchSize {
+			h.writeErrorResponse(w, NewError(CodeBadRequest, fmt.Sprintf("batch size %d exceeds limit of %d", len(paths), h.opts.maxBatchSize)), "", http.StatusBadRequest, nil, "")
+			return
+		}
+		// Subscriptions cannot be batched (tRPC spec).
 		for _, path := range paths {
-			if proc, ok := h.router.lookup(path); ok && proc.typ == ProcedureSubscription {
+			if proc, ok := h.lookup(path); ok && proc.typ == ProcedureSubscription {
 				h.writeErrorResponse(w, NewError(CodeBadRequest, "subscriptions cannot be batched"), "", http.StatusBadRequest, nil, "")
 				return
 			}
 		}
 	}
 
-	// Parse all procedure calls from the request
-	calls, err := parseRequest(r, h.basePath, isBatch, h.router.opts.maxBodySize)
+	// Parse all procedure calls from the request.
+	calls, err := parseRequest(r, h.basePath, isBatch, h.opts.maxBodySize)
 	if err != nil {
 		if trpcErr, ok := errors.AsType[*Error](err); ok {
 			h.writeErrorResponse(w, trpcErr, "", HTTPStatusFromCode(trpcErr.Code), nil, "")
@@ -55,20 +68,14 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce batch size limit to prevent goroutine explosion.
-	if isBatch && h.router.opts.maxBatchSize > 0 && len(calls) > h.router.opts.maxBatchSize {
-		h.writeErrorResponse(w, NewError(CodeBadRequest, fmt.Sprintf("batch size %d exceeds limit of %d", len(calls), h.router.opts.maxBatchSize)), "", http.StatusBadRequest, nil, "")
-		return
-	}
-
 	// Create context.
 	// If createContext returns a context not derived from r.Context(),
 	// we must still propagate the request's cancellation so that SSE
 	// subscriptions and long-running handlers stop when the client
 	// disconnects.
 	ctx := r.Context()
-	if h.router.opts.createContext != nil {
-		userCtx := h.router.opts.createContext(r)
+	if h.opts.createContext != nil {
+		userCtx := h.opts.createContext(r)
 		if userCtx != ctx {
 			var cancel context.CancelFunc
 			ctx, cancel = mergeContexts(ctx, userCtx)
@@ -95,12 +102,12 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s, ok := results[0].response.(streamer); ok {
 			path := calls[0].path
 			if err := s.writeSSE(ctx, w, sseOptions{
-				pingInterval:               h.router.opts.ssePingInterval,
-				maxDuration:                h.router.opts.sseMaxDuration,
-				reconnectAfterInactivityMs: h.router.opts.sseReconnectAfterInactivityMs,
-				isDev:                      h.router.opts.isDev,
+				pingInterval:               h.opts.ssePingInterval,
+				maxDuration:                h.opts.sseMaxDuration,
+				reconnectAfterInactivityMs: h.opts.sseReconnectAfterInactivityMs,
+				isDev:                      h.opts.isDev,
 				formatError: func(sseErr *Error) any {
-					return formatError(&h.router.opts, sseErr, path, ctx, ProcedureSubscription)
+					return formatError(h.opts, sseErr, path, ctx, ProcedureSubscription)
 				},
 			}); err != nil {
 				h.writeErrorResponse(w, NewError(CodeInternalServerError, err.Error()), "", http.StatusInternalServerError, ctx, "")
@@ -142,13 +149,13 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *httpHandler) executeCall(ctx context.Context, r *http.Request, call parsedRequest) (any, int) {
-	proc, ok := h.router.lookup(call.path)
+	proc, ok := h.lookup(call.path)
 	if !ok {
 		trpcErr := NewError(CodeNotFound, "procedure not found")
-		if h.router.opts.onError != nil {
-			h.router.opts.onError(ctx, trpcErr, call.path)
+		if h.opts.onError != nil {
+			h.opts.onError(ctx, trpcErr, call.path)
 		}
-		return formatError(&h.router.opts, trpcErr, call.path, ctx, ""), HTTPStatusFromCode(CodeNotFound)
+		return formatError(h.opts, trpcErr, call.path, ctx, ""), HTTPStatusFromCode(CodeNotFound)
 	}
 
 	// Inject procedure metadata into context for middleware access.
@@ -164,30 +171,30 @@ func (h *httpHandler) executeCall(ctx context.Context, r *http.Request, call par
 	}
 
 	// Validate HTTP method matches procedure type
-	if err := validateMethod(r.Method, proc.typ, h.router.opts.allowMethodOverride); err != nil {
-		if h.router.opts.onError != nil {
-			h.router.opts.onError(ctx, err, call.path)
+	if err := validateMethod(r.Method, proc.typ, h.opts.allowMethodOverride); err != nil {
+		if h.opts.onError != nil {
+			h.opts.onError(ctx, err, call.path)
 		}
-		return formatError(&h.router.opts, err, call.path, ctx, proc.typ), HTTPStatusFromCode(err.Code)
+		return formatError(h.opts, err, call.path, ctx, proc.typ), HTTPStatusFromCode(err.Code)
 	}
 
 	// Decode, validate, and execute through middleware chain.
 	result, err := h.router.executeProcedure(ctx, proc, call.input)
 	if err != nil {
 		trpcErr, ok := errors.AsType[*Error](err)
-		if h.router.opts.onError != nil {
+		if h.opts.onError != nil {
 			// Pass the original error so the server can log it.
 			callbackErr := trpcErr
 			if !ok {
 				callbackErr = WrapError(CodeInternalServerError, "internal server error", err)
 			}
-			h.router.opts.onError(ctx, callbackErr, call.path)
+			h.opts.onError(ctx, callbackErr, call.path)
 		}
 		if !ok {
 			// Never leak internal error details to clients.
 			trpcErr = NewError(CodeInternalServerError, "internal server error")
 		}
-		return formatError(&h.router.opts, trpcErr, call.path, ctx, proc.typ), HTTPStatusFromCode(trpcErr.Code)
+		return formatError(h.opts, trpcErr, call.path, ctx, proc.typ), HTTPStatusFromCode(trpcErr.Code)
 	}
 
 	// Return streamers unwrapped so the handler can detect and dispatch SSE.
@@ -314,6 +321,9 @@ func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWrite
 	flusher.Flush()
 
 	// Execute all calls concurrently.
+	// Each goroutine must recover panics — an unrecovered panic in a spawned
+	// goroutine kills the entire process (net/http only recovers in the handler
+	// goroutine). On panic, we send an INTERNAL_SERVER_ERROR result for that call.
 	type indexedResult struct {
 		index    int
 		response any
@@ -321,6 +331,15 @@ func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWrite
 	ch := make(chan indexedResult, n)
 	for i, call := range calls {
 		go func(idx int, c parsedRequest) {
+			defer func() {
+				if rv := recover(); rv != nil {
+					trpcErr := NewError(CodeInternalServerError, "internal server error")
+					ch <- indexedResult{
+						index:    idx,
+						response: formatError(h.opts, trpcErr, c.path, ctx, ""),
+					}
+				}
+			}()
 			resp, _ := h.executeCall(ctx, r, c)
 			ch <- indexedResult{index: idx, response: resp}
 		}(i, call)
@@ -342,10 +361,10 @@ func (h *httpHandler) writeErrorResponse(w http.ResponseWriter, err *Error, path
 	w.Header().Set("Content-Type", "application/json")
 	var formatted any
 	if ctx != nil {
-		formatted = formatError(&h.router.opts, err, path, ctx, typ)
+		formatted = formatError(h.opts, err, path, ctx, typ)
 	} else {
 		// Pre-context errors (e.g., method not allowed) use default formatting.
-		formatted = defaultErrorEnvelope(err, path, h.router.opts.isDev)
+		formatted = defaultErrorEnvelope(err, path, h.opts.isDev)
 	}
 	data, marshalErr := json.Marshal(formatted)
 	if marshalErr != nil {
