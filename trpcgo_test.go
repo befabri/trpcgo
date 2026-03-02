@@ -765,8 +765,8 @@ func TestOnErrorNotCalledOnSuccess(t *testing.T) {
 func TestCustomContextCreator(t *testing.T) {
 	type ctxKey string
 
-	router := trpcgo.NewRouter(trpcgo.WithContextCreator(func(r *http.Request) context.Context {
-		return context.WithValue(r.Context(), ctxKey("reqID"), "req-42")
+	router := trpcgo.NewRouter(trpcgo.WithContextCreator(func(ctx context.Context, r *http.Request) context.Context {
+		return context.WithValue(ctx, ctxKey("reqID"), "req-42")
 	}))
 	trpcgo.VoidQuery(router, "reqid", func(ctx context.Context) (string, error) {
 		return ctx.Value(ctxKey("reqID")).(string), nil
@@ -790,8 +790,8 @@ func TestContextCreatorCancellationPropagation(t *testing.T) {
 	type ctxKey string
 	cancelled := make(chan struct{})
 
-	router := trpcgo.NewRouter(trpcgo.WithContextCreator(func(r *http.Request) context.Context {
-		// Deliberately not derived from r.Context().
+	router := trpcgo.NewRouter(trpcgo.WithContextCreator(func(ctx context.Context, r *http.Request) context.Context {
+		// Deliberately not derived from ctx — tests mergeContexts safety net.
 		return context.WithValue(context.Background(), ctxKey("user"), "alice")
 	}))
 
@@ -2670,8 +2670,8 @@ func TestErrorFormatterReceivesContext(t *testing.T) {
 
 	var gotVal string
 	router := trpcgo.NewRouter(
-		trpcgo.WithContextCreator(func(r *http.Request) context.Context {
-			return context.WithValue(r.Context(), ctxKey("tenant"), "acme")
+		trpcgo.WithContextCreator(func(ctx context.Context, r *http.Request) context.Context {
+			return context.WithValue(ctx, ctxKey("tenant"), "acme")
 		}),
 		trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
 			gotVal, _ = input.Ctx.Value(ctxKey("tenant")).(string)
@@ -2727,7 +2727,10 @@ func TestMergeRouters(t *testing.T) {
 		return "world", nil
 	})
 
-	merged := trpcgo.MergeRouters(r1, r2)
+	merged, err := trpcgo.MergeRouters(r1, r2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := newTestServer(t, merged.Handler("/trpc"))
 
 	resp1 := mustGet(t, server, "/trpc/hello")
@@ -2749,7 +2752,7 @@ func TestMergeRouters(t *testing.T) {
 	}
 }
 
-func TestMergeRoutersDuplicatePanics(t *testing.T) {
+func TestMergeRoutersDuplicateError(t *testing.T) {
 	r1 := trpcgo.NewRouter()
 	trpcgo.VoidQuery(r1, "dup", func(ctx context.Context) (string, error) {
 		return "a", nil
@@ -2760,17 +2763,13 @@ func TestMergeRoutersDuplicatePanics(t *testing.T) {
 		return "b", nil
 	})
 
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected panic on duplicate procedure path")
-		}
-		msg, ok := r.(string)
-		if !ok || !strings.Contains(msg, "dup") {
-			t.Fatalf("expected panic mentioning 'dup', got %v", r)
-		}
-	}()
-	trpcgo.MergeRouters(r1, r2)
+	_, err := trpcgo.MergeRouters(r1, r2)
+	if err == nil {
+		t.Fatal("expected error on duplicate procedure path")
+	}
+	if !strings.Contains(err.Error(), "dup") {
+		t.Fatalf("expected error mentioning 'dup', got %v", err)
+	}
 }
 
 func TestRouterMergeMethod(t *testing.T) {
@@ -2783,7 +2782,9 @@ func TestRouterMergeMethod(t *testing.T) {
 	trpcgo.VoidQuery(main, "main.hello", func(ctx context.Context) (string, error) {
 		return "from main", nil
 	})
-	main.Merge(sub)
+	if err := main.Merge(sub); err != nil {
+		t.Fatal(err)
+	}
 
 	server := newTestServer(t, main.Handler("/trpc"))
 
@@ -2827,7 +2828,9 @@ func TestMergeRoutersWithGlobalMiddleware(t *testing.T) {
 			return next(ctx, input)
 		}
 	})
-	merged.Merge(r1, r2)
+	if err := merged.Merge(r1, r2); err != nil {
+		t.Fatal(err)
+	}
 
 	server := newTestServer(t, merged.Handler("/trpc"))
 
@@ -3262,7 +3265,9 @@ func TestMergePreservesPerProcMiddleware(t *testing.T) {
 	}))
 
 	main := trpcgo.NewRouter()
-	main.Merge(sub)
+	if err := main.Merge(sub); err != nil {
+		t.Fatal(err)
+	}
 
 	server := newTestServer(t, main.Handler("/trpc"))
 	resp := mustGet(t, server, "/trpc/guarded")
@@ -3284,7 +3289,9 @@ func TestMergePreservesMeta(t *testing.T) {
 	}, trpcgo.WithMeta("preserved"))
 
 	main := trpcgo.NewRouter()
-	main.Merge(sub)
+	if err := main.Merge(sub); err != nil {
+		t.Fatal(err)
+	}
 
 	server := newTestServer(t, main.Handler("/trpc"))
 	resp := mustGet(t, server, "/trpc/tagged")
@@ -3299,7 +3306,10 @@ func TestMergeEmptyRouters(t *testing.T) {
 	r1 := trpcgo.NewRouter()
 	r2 := trpcgo.NewRouter()
 
-	merged := trpcgo.MergeRouters(r1, r2)
+	merged, err := trpcgo.MergeRouters(r1, r2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := newTestServer(t, merged.Handler("/trpc"))
 
 	resp := mustGet(t, server, "/trpc/anything")

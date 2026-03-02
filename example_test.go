@@ -197,7 +197,11 @@ func ExampleMergeRouters() {
 	})
 
 	// Merge combines procedures from multiple routers.
-	app := trpcgo.MergeRouters(users, posts)
+	app, err := trpcgo.MergeRouters(users, posts)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 	_ = app.Handler("/trpc")
 
 	fmt.Println("merged")

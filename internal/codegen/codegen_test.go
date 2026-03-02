@@ -1266,3 +1266,58 @@ func TestZodOmitSkipsRefinement(t *testing.T) {
 			strings.Count(output, ".refine("), output)
 	}
 }
+
+func TestZodOmitE2E(t *testing.T) {
+	// End-to-end: Go source → analysis → codegen → Zod output.
+	// Verifies zod_omit tag is picked up through the AST path.
+	dir := testdataDir("zodomit")
+	result, err := analysis.Analyze([]string{"."}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	genResult, err := codegen.Generate(&buf, result, result.TypeMetas)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var zodBuf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&zodBuf, genResult.Procs, genResult.Defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	zodOutput := zodBuf.String()
+	t.Log(zodOutput)
+
+	t.Run("omitted field excluded", func(t *testing.T) {
+		if strings.Contains(zodOutput, "id: z.") {
+			t.Errorf("zod_omit field 'id' should not appear in Zod schema.\nOutput:\n%s", zodOutput)
+		}
+	})
+
+	t.Run("non-omitted fields present", func(t *testing.T) {
+		if !strings.Contains(zodOutput, "name: z.string().min(1),") {
+			t.Errorf("field 'name' should appear with constraints.\nOutput:\n%s", zodOutput)
+		}
+		if !strings.Contains(zodOutput, "active: z.boolean(),") {
+			t.Errorf("field 'active' should appear.\nOutput:\n%s", zodOutput)
+		}
+	})
+
+	t.Run("refinement referencing omitted field skipped", func(t *testing.T) {
+		// UpdateWithRefine has gtefield=ID (omitted) and gtefield=MinVal (kept).
+		if strings.Count(zodOutput, ".refine(") != 1 {
+			t.Errorf("expected 1 .refine() (skipping one referencing omitted 'id'), got %d.\nOutput:\n%s",
+				strings.Count(zodOutput, ".refine("), zodOutput)
+		}
+		if !strings.Contains(zodOutput, "data.max_val >= data.min_val") {
+			t.Errorf("expected refinement for non-omitted fields.\nOutput:\n%s", zodOutput)
+		}
+	})
+
+	t.Run("TS interface still has omitted field", func(t *testing.T) {
+		tsOutput := buf.String()
+		if !strings.Contains(tsOutput, "id: string") {
+			t.Errorf("TS interface should still include omitted field.\nOutput:\n%s", tsOutput)
+		}
+	})
+}

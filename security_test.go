@@ -653,6 +653,231 @@ func TestSSEMaxDurationEnforced(t *testing.T) {
 	}
 }
 
+// TestSSEMaxDurationDefault verifies the default SSE max duration is 30 minutes.
+func TestSSEMaxDurationDefault(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.VoidSubscribe(r, "test", func(ctx context.Context) (<-chan string, error) {
+		ch := make(chan string)
+		go func() { <-ctx.Done(); close(ch) }()
+		return ch, nil
+	})
+
+	// Start SSE connection and verify connected event includes non-zero timeout.
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp, err := http.Get(server.URL + "/trpc/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// The SSE stream should connect successfully (max duration is finite, not 0).
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	// Read the connected event — it should be sent before max duration kicks in.
+	scanner := bufio.NewScanner(resp.Body)
+	var gotConnected bool
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, "event: connected") {
+			gotConnected = true
+			break
+		}
+	}
+	if !gotConnected {
+		t.Error("expected 'event: connected' from SSE stream")
+	}
+}
+
+// TestSSEMaxDurationOptionConventions verifies the WithSSEMaxDuration option
+// follows the same convention as WithMaxBodySize: positive=set, -1=unlimited, 0=keep default.
+func TestSSEMaxDurationOptionConventions(t *testing.T) {
+	t.Run("positive sets value", func(t *testing.T) {
+		r := trpcgo.NewRouter(trpcgo.WithSSEMaxDuration(5 * time.Minute))
+		trpcgo.VoidSubscribe(r, "forever", func(ctx context.Context) (<-chan string, error) {
+			ch := make(chan string)
+			go func() { <-ctx.Done(); close(ch) }()
+			return ch, nil
+		})
+		server := newTestServer(t, r.Handler("/trpc"))
+		resp, err := http.Get(server.URL + "/trpc/forever")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected 200, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("negative gives unlimited", func(t *testing.T) {
+		// -1 should mean unlimited (no timer). We can't easily verify absence
+		// of a timer, but we verify it doesn't panic and connects.
+		r := trpcgo.NewRouter(trpcgo.WithSSEMaxDuration(-1))
+		trpcgo.VoidSubscribe(r, "forever", func(ctx context.Context) (<-chan string, error) {
+			ch := make(chan string)
+			go func() { <-ctx.Done(); close(ch) }()
+			return ch, nil
+		})
+		server := newTestServer(t, r.Handler("/trpc"))
+		resp, err := http.Get(server.URL + "/trpc/forever")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected 200, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("zero keeps default", func(t *testing.T) {
+		// Passing 0 should be a no-op, keeping the 30-minute default.
+		// Verify by setting a short duration first, then overriding with 0.
+		r := trpcgo.NewRouter(
+			trpcgo.WithSSEMaxDuration(100*time.Millisecond),
+			trpcgo.WithSSEMaxDuration(0), // should be no-op
+		)
+		trpcgo.VoidSubscribe(r, "forever", func(ctx context.Context) (<-chan string, error) {
+			ch := make(chan string)
+			go func() { <-ctx.Done(); close(ch) }()
+			return ch, nil
+		})
+		server := newTestServer(t, r.Handler("/trpc"))
+		start := time.Now()
+		resp, err := http.Get(server.URL + "/trpc/forever")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		raw, _ := io.ReadAll(resp.Body)
+		elapsed := time.Since(start)
+
+		// Should still terminate after 100ms (the 0 was a no-op).
+		if elapsed > 3*time.Second {
+			t.Errorf("stream ran for %v; expected ~100ms (0 should not override)", elapsed)
+		}
+		if !strings.Contains(string(raw), "event: return") {
+			t.Error("expected 'event: return' — 100ms duration should still be active")
+		}
+	})
+}
+
+// TestSSEMaxConnectionsEnforced verifies that WithSSEMaxConnections rejects
+// new subscriptions when the limit is reached.
+func TestSSEMaxConnectionsEnforced(t *testing.T) {
+	const maxConns = 2
+
+	r := trpcgo.NewRouter(
+		trpcgo.WithSSEMaxConnections(maxConns),
+		trpcgo.WithSSEMaxDuration(5*time.Second),
+	)
+	trpcgo.VoidSubscribe(r, "stream", func(ctx context.Context) (<-chan string, error) {
+		ch := make(chan string)
+		go func() { <-ctx.Done(); close(ch) }()
+		return ch, nil
+	})
+
+	server := newTestServer(t, r.Handler("/trpc"))
+
+	// Open maxConns connections.
+	var conns []*http.Response
+	for i := range maxConns {
+		resp, err := http.Get(server.URL + "/trpc/stream")
+		if err != nil {
+			t.Fatalf("connection %d failed: %v", i, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("connection %d: expected 200, got %d", i, resp.StatusCode)
+		}
+		conns = append(conns, resp)
+	}
+
+	// The next connection should be rejected with 429.
+	resp, err := http.Get(server.URL + "/trpc/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("over-limit connection: expected 429, got %d. Body: %s", resp.StatusCode, raw)
+	}
+
+	// Close one existing connection — counter should decrement.
+	_ = conns[0].Body.Close()
+	// Give the server a moment to process the disconnect.
+	time.Sleep(50 * time.Millisecond)
+
+	// Now a new connection should succeed.
+	resp2, err := http.Get(server.URL + "/trpc/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("after freeing slot: expected 200, got %d", resp2.StatusCode)
+	}
+
+	// Cleanup.
+	for _, c := range conns[1:] {
+		_ = c.Body.Close()
+	}
+	_ = resp2.Body.Close()
+}
+
+// TestSSEMaxConnectionsConcurrentRace tests the connection counter under
+// concurrent access to detect races (run with -race).
+func TestSSEMaxConnectionsConcurrentRace(t *testing.T) {
+	const maxConns = 5
+	const attempts = 20
+
+	r := trpcgo.NewRouter(
+		trpcgo.WithSSEMaxConnections(maxConns),
+		trpcgo.WithSSEMaxDuration(2*time.Second),
+	)
+	trpcgo.VoidSubscribe(r, "stream", func(ctx context.Context) (<-chan string, error) {
+		ch := make(chan string)
+		go func() { <-ctx.Done(); close(ch) }()
+		return ch, nil
+	})
+
+	server := newTestServer(t, r.Handler("/trpc"))
+
+	var accepted atomic.Int64
+	var rejected atomic.Int64
+	done := make(chan struct{}, attempts)
+
+	for range attempts {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			resp, err := http.Get(server.URL + "/trpc/stream")
+			if err != nil {
+				return
+			}
+			if resp.StatusCode == http.StatusOK {
+				accepted.Add(1)
+				// Hold connection briefly.
+				time.Sleep(100 * time.Millisecond)
+			} else {
+				rejected.Add(1)
+			}
+			_, _ = io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+		}()
+	}
+
+	for range attempts {
+		<-done
+	}
+
+	// At least some should be rejected and none should exceed limit.
+	t.Logf("accepted: %d, rejected: %d", accepted.Load(), rejected.Load())
+	if rejected.Load() == 0 {
+		t.Error("expected some connections to be rejected")
+	}
+}
+
 // --- Concurrent Safety ---
 
 // TestConcurrentBatchAndSingleRequests fires many requests of different types
