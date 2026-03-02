@@ -8,16 +8,8 @@
 //
 // Define a router with procedures:
 //
-//	type GetUserInput struct {
-//		ID int `json:"id"`
-//	}
-//
-//	type User struct {
-//		ID   int    `json:"id"`
-//		Name string `json:"name"`
-//	}
-//
-//	r := trpcgo.NewRouter()
+//	r := trpcgo.NewRouter(trpcgo.WithDev(true), trpcgo.WithTypeOutput("gen/trpc.ts"))
+//	defer r.Close()
 //
 //	trpcgo.Query(r, "user.get", func(ctx context.Context, input GetUserInput) (User, error) {
 //		return User{ID: input.ID, Name: "Alice"}, nil
@@ -33,49 +25,49 @@
 //   - [Mutation] and [VoidMutation] for write operations (POST)
 //   - [Subscribe] and [VoidSubscribe] for real-time streams (SSE)
 //
-// Void variants are for procedures that take no input.
-//
 // # Router Options
 //
 // Configure the router with functional options:
 //
 //   - [WithBatching] — enable/disable batch request support
+//   - [WithMethodOverride] — allow POST for queries
+//   - [WithMaxBodySize] — request body size limit (default 1 MB)
+//   - [WithMaxBatchSize] — max procedures per batch (default 10)
+//   - [WithStrictInput] — reject unknown JSON fields
 //   - [WithValidator] — input validation (e.g. go-playground/validator)
-//   - [WithDev] — development mode with stack traces
+//   - [WithDev] — development mode with stack traces and file watcher
 //   - [WithErrorFormatter] — custom error response shapes
 //   - [WithContextCreator] — custom context per request
-//   - [WithTypeOutput] — automatic TypeScript generation at startup
-//   - [WithZodOutput] — Zod schema generation alongside types
+//   - [WithOnError] — error callback for logging
+//   - [WithSSEPingInterval], [WithSSEMaxDuration], [WithSSEMaxConnections] — SSE tuning
+//   - [WithTypeOutput], [WithZodOutput], [WithZodMini] — code generation
 //
 // # Middleware
 //
 // Global middleware applies to all procedures via [Router.Use].
 // Per-procedure middleware is set with the [Use] procedure option.
+// Access procedure metadata with [GetProcedureMeta] or the typed [GetMeta].
 // Compose multiple middleware with [Chain].
 //
 // # Error Handling
 //
 // Return [Error] values from handlers with JSON-RPC 2.0 error codes.
 // Use [NewError], [NewErrorf], or [WrapError] to create errors.
-// All standard tRPC error codes are provided as constants (e.g.
-// [CodeNotFound], [CodeUnauthorized]).
+// All 20 standard tRPC error codes are provided as constants (e.g.
+// [CodeNotFound], [CodeUnauthorized], [CodeTooManyRequests]).
+// Use [HTTPStatusFromCode] and [NameFromCode] for code conversions.
 //
-// # Merging Routers
+// # Merging and Lifecycle
 //
-// Combine procedures from multiple routers with [MergeRouters].
+// Combine procedures from multiple routers with [MergeRouters] or [Router.Merge].
+// Call [Router.Close] to stop the file watcher on shutdown.
 //
 // # Server-Side Calls
 //
 // Invoke procedures from Go without HTTP using [Call] (typed) or
 // [Router.RawCall] (untyped). Both run the full middleware chain.
 //
-// # Code Generation
-//
-// The trpcgo CLI generates TypeScript types from Go source:
-//
-//	//go:generate trpcgo generate -output ../web/gen/trpc.ts
-//
-// Install the CLI with:
-//
-//	go get -tool github.com/befabri/trpcgo/cmd/trpcgo
+// See the project README for full documentation, frontend setup guides,
+// struct tag reference, and working examples:
+// https://github.com/befabri/trpcgo
 package trpcgo

@@ -53,9 +53,11 @@ func CreateUser(ctx context.Context, input CreateUserInput) (User, error) {
 
 func main() {
     router := trpcgo.NewRouter(
+        trpcgo.WithDev(true),
         trpcgo.WithTypeOutput("../web/gen/trpc.ts"),
         trpcgo.WithZodOutput("../web/gen/zod.ts"),
     )
+    defer router.Close()
     trpcgo.Mutation(router, "user.create", CreateUser)
 
     http.ListenAndServe(":8080", router.Handler("/trpc"))
@@ -157,7 +159,8 @@ router := trpcgo.NewRouter(
 
     // SSE subscriptions
     trpcgo.WithSSEPingInterval(5 * time.Second),
-    trpcgo.WithSSEMaxDuration(10 * time.Minute),
+    trpcgo.WithSSEMaxDuration(10 * time.Minute),     // default 30m, -1 for unlimited
+    trpcgo.WithSSEMaxConnections(1000),               // concurrent SSE limit
     trpcgo.WithSSEReconnectAfterInactivity(30 * time.Second),
 
     // Errors
@@ -241,12 +244,24 @@ Error codes follow the tRPC/JSON-RPC convention:
 |------|------|-------------|
 | `-32700` | `CodeParseError` | 400 |
 | `-32600` | `CodeBadRequest` | 400 |
+| `-32603` | `CodeInternalServerError` | 500 |
 | `-32001` | `CodeUnauthorized` | 401 |
 | `-32003` | `CodeForbidden` | 403 |
 | `-32004` | `CodeNotFound` | 404 |
-| `-32603` | `CodeInternalServerError` | 500 |
-| `-32029` | `CodeTooManyRequests` | 429 |
+| `-32005` | `CodeMethodNotSupported` | 405 |
 | `-32008` | `CodeTimeout` | 408 |
+| `-32009` | `CodeConflict` | 409 |
+| `-32012` | `CodePreconditionFailed` | 412 |
+| `-32013` | `CodePayloadTooLarge` | 413 |
+| `-32015` | `CodeUnsupportedMedia` | 415 |
+| `-32022` | `CodeUnprocessableContent` | 422 |
+| `-32028` | `CodePreconditionRequired` | 428 |
+| `-32029` | `CodeTooManyRequests` | 429 |
+| `-32099` | `CodeClientClosed` | 499 |
+| `-32501` | `CodeNotImplemented` | 501 |
+| `-32502` | `CodeBadGateway` | 502 |
+| `-32503` | `CodeServiceUnavailable` | 503 |
+| `-32504` | `CodeGatewayTimeout` | 504 |
 
 ## Server-Side Caller
 
@@ -335,7 +350,7 @@ go tool trpcgo generate -o ../web/gen/trpc.ts --zod ../web/gen/zod.ts -w
 
 ### Runtime watch (zero config)
 
-When you set `WithTypeOutput` (and optionally `WithZodOutput`) on the router, `Handler()` starts a file watcher automatically. Save a `.go` file anywhere in the project tree and types regenerate instantly — no separate process needed.
+When you set `WithDev(true)` with `WithTypeOutput` (and optionally `WithZodOutput`) on the router, `Handler()` starts a file watcher automatically. Save a `.go` file anywhere in the project tree and types regenerate instantly — no separate process needed. Call `router.Close()` to stop the watcher on shutdown.
 
 ## Frontend Setup
 
@@ -389,8 +404,10 @@ adminRouter := trpcgo.NewRouter()
 trpcgo.Mutation(adminRouter, "admin.ban", banUser)
 
 router := trpcgo.NewRouter()
-router.Merge(userRouter, adminRouter)
-// or: router := trpcgo.MergeRouters(userRouter, adminRouter)
+if err := router.Merge(userRouter, adminRouter); err != nil {
+    log.Fatal(err) // duplicate procedure path
+}
+// or: router, err := trpcgo.MergeRouters(userRouter, adminRouter)
 ```
 
 ## Example
@@ -425,9 +442,22 @@ trpcgo has two code generation paths:
 
 2. **Runtime reflection** (`Router.GenerateTS`) — uses `reflect` to inspect registered procedure types at startup. Faster but less information (no comments, no validate tags).
 
-When you use `WithTypeOutput`, both paths run: reflection generates types immediately on startup, then a file watcher runs static analysis in the background and overwrites with the richer version. On subsequent file saves, only static analysis runs.
+When you use `WithDev(true)` with `WithTypeOutput`, both paths run: reflection generates types immediately on startup, then a file watcher runs static analysis in the background and overwrites with the richer version. On subsequent file saves, only static analysis runs. In production, use `go generate` pre-build — the watcher only starts in dev mode.
 
 The file watcher is recursive — it watches all subdirectories and handles directory creation/removal automatically. Generated files are only written when content changes, avoiding spurious Vite HMR cycles.
+
+## Compatibility
+
+**Go:** Requires Go 1.26+ (uses `tool` directive, `errors.AsType`, generics).
+
+**tRPC client:** Works with `@trpc/client` v11 and `@trpc/react-query` v11. The generated `AppRouter` type uses structural typing — it matches the tRPC client's expected shape without depending on the `@trpc/server` package.
+
+**CORS:** trpcgo does not handle CORS. Use middleware from your HTTP router or a dedicated package (e.g. `rs/cors`). A typical setup wraps the trpcgo handler:
+
+```go
+handler := cors.Default().Handler(router.Handler("/trpc"))
+http.ListenAndServe(":8080", handler)
+```
 
 ## License
 
