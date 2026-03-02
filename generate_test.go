@@ -342,6 +342,11 @@ type ZodPtrExtends struct {
 	Label    string `json:"label"`
 }
 
+type ZodCyclicNode struct {
+	ZodBase  `tstype:",extends"`
+	Children []ZodCyclicNode `json:"children"`
+}
+
 // ---------- helpers ----------
 
 func generateTS(t *testing.T, r *trpcgo.Router) string {
@@ -2099,6 +2104,31 @@ func TestGenerateZodExtends(t *testing.T) {
 
 		if !strings.Contains(zod, "export const ZodBaseSchema") {
 			t.Errorf("ZodBase should be reachable through extends, but missing from output:\n%s", zod)
+		}
+	})
+
+	t.Run("cyclic type with extends uses z.lazy + .extend()", func(t *testing.T) {
+		r := trpcgo.NewRouter()
+		trpcgo.Mutation(r, "create", func(_ context.Context, input ZodCyclicNode) (string, error) {
+			return "", nil
+		})
+		zod := generateZod(t, r)
+		t.Log(zod)
+
+		// The exact expected output for the cyclic+extends case.
+		// z.lazy wraps the whole expression for the cycle; .extend chains the base.
+		want := `export const ZodCyclicNodeSchema: z.ZodType<ZodCyclicNode> = z.lazy(() => ZodBaseSchema.extend({
+  children: z.array(ZodCyclicNodeSchema),
+}));`
+		if !strings.Contains(zod, want) {
+			t.Errorf("cyclic+extends output mismatch.\nwant:\n%s\n\ngot:\n%s", want, zod)
+		}
+
+		// Base must appear before derived (topo order).
+		baseIdx := strings.Index(zod, "ZodBaseSchema =")
+		derivedIdx := strings.Index(zod, "ZodCyclicNodeSchema")
+		if baseIdx < 0 || derivedIdx < 0 || baseIdx > derivedIdx {
+			t.Errorf("ZodBaseSchema must be emitted before ZodCyclicNodeSchema:\n%s", zod)
 		}
 	})
 }
