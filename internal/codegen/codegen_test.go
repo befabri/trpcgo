@@ -646,8 +646,8 @@ func TestZodCyclicLazy(t *testing.T) {
 		t.Errorf("cyclic type should have z.ZodType<T> annotation.\nOutput:\n%s", output)
 	}
 
-	// Must close with ));
-	if !strings.Contains(output, "}));") {
+	// Must close lazy wrapper with })).
+	if !strings.Contains(output, "}))") {
 		t.Errorf("cyclic type should close z.lazy.\nOutput:\n%s", output)
 	}
 
@@ -1132,5 +1132,59 @@ func TestLeafAndNamespaceCollision(t *testing.T) {
 	// The child procedure should still appear.
 	if !strings.Contains(output, "$Query<void, User>") {
 		t.Errorf("child procedure should be emitted within namespace.\nOutput:\n%s", output)
+	}
+}
+
+func TestZodUnsupportedComment(t *testing.T) {
+	procs := []codegen.ProcEntry{
+		{Path: "create", ProcType: "mutation", InputTS: "RangeInput", OutputTS: "string"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "RangeInput",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{Name: "minVal", Type: "number", GoKind: "float64",
+					Validate: []typemap.ValidateRule{{Tag: "required"}, {Tag: "gte", Param: "0"}}},
+				{Name: "maxVal", Type: "number", GoKind: "float64",
+					Validate: []typemap.ValidateRule{{Tag: "required"}, {Tag: "gte", Param: "0"}}},
+				{Name: "label", Type: "string", GoKind: "string",
+					Validate: []typemap.ValidateRule{{Tag: "required"}, {Tag: "custom_check"}},
+					UnsupportedZod: []typemap.ValidateRule{{Tag: "custom_check"}}},
+			},
+			Refinements: []typemap.Refinement{
+				{Field: "maxVal", Op: ">=", OtherField: "minVal", Tag: "gtefield"},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+	t.Log(output)
+
+	// minVal has no unsupported tags — no comment.
+	if strings.Contains(output, "minVal: z.float64().gte(0), /*") {
+		t.Error("minVal should not have unsupported comment")
+	}
+
+	// maxVal should NOT have unsupported comment — gtefield now generates .refine().
+	if strings.Contains(output, "/* unsupported: gtefield") {
+		t.Error("gtefield should not appear as unsupported")
+	}
+
+	// Should have .refine() for gtefield.
+	if !strings.Contains(output, ".refine(") {
+		t.Errorf("expected .refine() for cross-field validation.\nOutput:\n%s", output)
+	}
+	if !strings.Contains(output, "data.maxVal >= data.minVal") {
+		t.Errorf("expected refine callback with correct field names.\nOutput:\n%s", output)
+	}
+
+	// label should have the custom_check comment.
+	if !strings.Contains(output, "/* unsupported: custom_check */") {
+		t.Errorf("label should have unsupported comment.\nOutput:\n%s", output)
 	}
 }

@@ -163,14 +163,16 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 				Validate:          f.validate,
 				ElementValidate:   f.elementValidate,
 				ElementGoKind:     f.elementGoKind,
+				UnsupportedZod:    f.unsupportedZod,
 			}
 		}
 		typeDefs[i] = typemap.TypeDef{
-			Name:       resolvedName,
-			Kind:       typemap.TypeDefInterface,
-			TypeParams: d.typeParams,
-			Extends:    d.extends,
-			Fields:     fields,
+			Name:        resolvedName,
+			Kind:        typemap.TypeDefInterface,
+			TypeParams:  d.typeParams,
+			Extends:     d.extends,
+			Refinements: d.refinements,
+			Fields:      fields,
 		}
 	}
 
@@ -178,11 +180,12 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 }
 
 type reflectDef struct {
-	name       string
-	pkgPath    string
-	typeParams []string
-	extends    []string
-	fields     []reflectField
+	name        string
+	pkgPath     string
+	typeParams  []string
+	extends     []string
+	refinements []typemap.Refinement
+	fields      []reflectField
 }
 
 type reflectField struct {
@@ -197,6 +200,7 @@ type reflectField struct {
 	elementValidate   []typemap.ValidateRule
 	elementGoKind     string
 	validateOmitempty bool
+	unsupportedZod    []typemap.ValidateRule
 }
 
 // goTypeToTS converts a reflect.Type to its TypeScript representation.
@@ -352,6 +356,7 @@ func resolveGenericStructTS(t reflect.Type, baseName, key string, paramNames []s
 	collectFieldsTS(t, defs, &fields, &extends, subs)
 	defs[key].fields = fields
 	defs[key].extends = extends
+	defs[key].refinements = extractRefinements(t, fields)
 }
 
 func resolveStructTS(t reflect.Type, defs map[string]*reflectDef) {
@@ -364,6 +369,7 @@ func resolveStructTS(t reflect.Type, defs map[string]*reflectDef) {
 	collectFieldsTS(t, defs, &fields, &extends, nil)
 	defs[key].fields = fields
 	defs[key].extends = extends
+	defs[key].refinements = extractRefinements(t, fields)
 }
 
 func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]reflectField, extends *[]string, subs map[reflect.Type]string) {
@@ -427,6 +433,10 @@ func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]refl
 		sliceRules, elemRules := typemap.SplitAtDive(allRules)
 		rf.validate = sliceRules
 		rf.elementValidate = elemRules
+		rf.unsupportedZod = typemap.UnsupportedZodRules(sliceRules)
+		if eu := typemap.UnsupportedZodRules(elemRules); len(eu) > 0 {
+			rf.unsupportedZod = append(rf.unsupportedZod, eu...)
+		}
 
 		// Extract element Go kind for slice/array fields.
 		if rf.goKind == "slice" || rf.goKind == "array" {
@@ -463,6 +473,42 @@ func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]refl
 
 		*fields = append(*fields, rf)
 	}
+}
+
+// extractRefinements scans collected fields for cross-field validate tags
+// (gtefield, ltefield, etc.) and builds Refinement entries. The Go field name
+// in the validate param is resolved to its JSON name via the struct's fields.
+func extractRefinements(t reflect.Type, fields []reflectField) []typemap.Refinement {
+	// Build Go field name → JSON name map from the struct (including promoted fields).
+	goToJSON := map[string]string{}
+	for f := range t.Fields() {
+		jsonName, _, skip := typemap.ParseJSONTag(string(f.Tag))
+		if skip {
+			continue
+		}
+		if jsonName == "" {
+			jsonName = f.Name
+		}
+		goToJSON[f.Name] = jsonName
+	}
+
+	var refs []typemap.Refinement
+	for _, rf := range fields {
+		for _, rule := range rf.validate {
+			op, ok := typemap.CrossFieldOp(rule.Tag)
+			if !ok {
+				continue
+			}
+			otherJSON := goToJSON[rule.Param]
+			if otherJSON == "" {
+				continue // referenced field not found
+			}
+			refs = append(refs, typemap.Refinement{
+				Field: rf.name, Op: op, OtherField: otherJSON, Tag: rule.Tag,
+			})
+		}
+	}
+	return refs
 }
 
 func inlineStructTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Type]string) string {

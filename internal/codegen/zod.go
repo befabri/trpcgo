@@ -96,14 +96,31 @@ func writeZodObject(w io.Writer, def typemap.TypeDef, cycles map[string]map[stri
 
 	for _, f := range def.Fields {
 		zodType := fieldToZod(f, cycles[def.Name], style)
-		_, _ = fmt.Fprintf(w, "  %s: %s,\n", typemap.QuotePropName(f.Name), zodType)
+		if f.Comment != "" {
+			zodType += fmt.Sprintf(".describe(%q)", f.Comment)
+		}
+		comment := unsupportedComment(f.UnsupportedZod)
+		_, _ = fmt.Fprintf(w, "  %s: %s,%s\n", typemap.QuotePropName(f.Name), zodType, comment)
 	}
 
+	// Close the object expression (without trailing ; — refinements may follow).
 	if isCyclic {
-		_, _ = fmt.Fprintln(w, "}));")
+		_, _ = fmt.Fprint(w, "}))")
 	} else {
-		_, _ = fmt.Fprintln(w, "});")
+		_, _ = fmt.Fprint(w, "})")
 	}
+
+	// Emit .refine() for cross-field validation rules.
+	for _, ref := range def.Refinements {
+		_, _ = fmt.Fprint(w, ".refine(\n")
+		_, _ = fmt.Fprintf(w, "  (data) => data.%s %s data.%s,\n",
+			typemap.QuotePropName(ref.Field), ref.Op, typemap.QuotePropName(ref.OtherField))
+		_, _ = fmt.Fprintf(w, "  { message: \"%s must be %s %s\", path: [\"%s\"] }\n",
+			ref.Field, ref.Op, ref.OtherField, ref.Field)
+		_, _ = fmt.Fprint(w, ")")
+	}
+	writeZodMeta(w, def)
+	_, _ = fmt.Fprintln(w, ";")
 }
 
 // extendsBaseExpr builds the Zod base expression for extends.
@@ -129,6 +146,31 @@ func extendsBaseExpr(extends []string) string {
 	return result
 }
 
+// unsupportedComment returns a trailing inline comment listing validate tags
+// that have no Zod equivalent. Returns "" when all tags are supported.
+func unsupportedComment(unsupported []typemap.ValidateRule) string {
+	if len(unsupported) == 0 {
+		return ""
+	}
+	parts := make([]string, len(unsupported))
+	for i, r := range unsupported {
+		if r.Param != "" {
+			parts[i] = r.Tag + "=" + r.Param
+		} else {
+			parts[i] = r.Tag
+		}
+	}
+	return " /* unsupported: " + strings.Join(parts, ", ") + " */"
+}
+
+// writeZodMeta emits .meta({ id: "TypeName" }) for the schema if the type
+// has a name. This enables JSON Schema $ref generation from Zod schemas.
+func writeZodMeta(w io.Writer, def typemap.TypeDef) {
+	if def.Name != "" {
+		_, _ = fmt.Fprintf(w, ".meta({ id: %q })", def.Name)
+	}
+}
+
 func writeZodEnum(w io.Writer, def typemap.TypeDef) {
 	schemaName := def.Name + "Schema"
 
@@ -141,11 +183,15 @@ func writeZodEnum(w io.Writer, def typemap.TypeDef) {
 		for i, m := range def.UnionMembers {
 			literals[i] = "z.literal(" + m + ")"
 		}
-		_, _ = fmt.Fprintf(w, "export const %s = z.union([%s]);\n", schemaName, strings.Join(literals, ", "))
+		_, _ = fmt.Fprintf(w, "export const %s = z.union([%s])", schemaName, strings.Join(literals, ", "))
+		writeZodMeta(w, def)
+		_, _ = fmt.Fprintln(w, ";")
 		return
 	}
 
-	_, _ = fmt.Fprintf(w, "export const %s = z.enum([%s]);\n", schemaName, strings.Join(def.UnionMembers, ", "))
+	_, _ = fmt.Fprintf(w, "export const %s = z.enum([%s])", schemaName, strings.Join(def.UnionMembers, ", "))
+	writeZodMeta(w, def)
+	_, _ = fmt.Fprintln(w, ";")
 }
 
 func writeZodAlias(w io.Writer, def typemap.TypeDef, style typemap.ZodStyle) {
@@ -159,7 +205,9 @@ func writeZodAlias(w io.Writer, def typemap.TypeDef, style typemap.ZodStyle) {
 	if zodStr == "" {
 		zodStr = base
 	}
-	_, _ = fmt.Fprintf(w, "export const %s = %s;\n", schemaName, zodStr)
+	_, _ = fmt.Fprintf(w, "export const %s = %s", schemaName, zodStr)
+	writeZodMeta(w, def)
+	_, _ = fmt.Fprintln(w, ";")
 }
 
 // fieldToZod converts a single field to its Zod representation.

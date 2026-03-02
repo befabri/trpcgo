@@ -307,6 +307,75 @@ func zodMini(base string, constraints string, optional bool, omitemptyLit string
 	return inner
 }
 
+// supportedZodTags is the complete set of validate tags that produce Zod output.
+// Tags not in this set are flagged as unsupported in generated schemas.
+var supportedZodTags = map[string]bool{
+	// Structural (consumed before Zod generation).
+	"required":  true,
+	"omitempty": true,
+	"dive":      true,
+	// Format tags (become Zod base types).
+	"email":     true,
+	"url":       true,
+	"uuid":      true,
+	"e164":      true,
+	"jwt":       true,
+	"base64":    true,
+	"lowercase": true,
+	"ip":        true,
+	"ipv4":      true,
+	"ipv6":      true,
+	// Enum.
+	"oneof": true,
+	// Constraints.
+	"min": true,
+	"max": true,
+	"len": true,
+	"gt":  true,
+	"gte": true,
+	"lt":  true,
+	"lte": true,
+	// Regex patterns.
+	"alphanum": true,
+	"alpha":    true,
+	"numeric":  true,
+	// Cross-field (emitted as .refine() at object level).
+	"gtefield": true,
+	"ltefield": true,
+	"gtfield":  true,
+	"ltfield":  true,
+	"eqfield":  true,
+	"nefield":  true,
+}
+
+// crossFieldOps maps cross-field validate tags to their JavaScript comparison operator.
+var crossFieldOps = map[string]string{
+	"gtefield": ">=",
+	"ltefield": "<=",
+	"gtfield":  ">",
+	"ltfield":  "<",
+	"eqfield":  "===",
+	"nefield":  "!==",
+}
+
+// CrossFieldOp returns the JavaScript comparison operator for a cross-field
+// validate tag. Returns ("", false) for non-cross-field tags.
+func CrossFieldOp(tag string) (string, bool) {
+	op, ok := crossFieldOps[tag]
+	return op, ok
+}
+
+// UnsupportedZodRules returns validate rules that have no Zod equivalent.
+func UnsupportedZodRules(rules []ValidateRule) []ValidateRule {
+	var unsupported []ValidateRule
+	for _, r := range rules {
+		if !supportedZodTags[r.Tag] {
+			unsupported = append(unsupported, r)
+		}
+	}
+	return unsupported
+}
+
 // isStringBase returns true if the Zod base type is string-like
 // (determines whether min/max mean length vs numeric bound).
 func isStringBase(base string) bool {

@@ -3,6 +3,7 @@ package trpcgo_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -345,6 +346,31 @@ type ZodPtrExtends struct {
 type ZodCyclicNode struct {
 	ZodBase  `tstype:",extends"`
 	Children []ZodCyclicNode `json:"children"`
+}
+
+// Zod unsupported tag fixture types.
+type ZodUnsupportedInput struct {
+	MinVal float64 `json:"minVal" validate:"required,gte=0"`
+	MaxVal float64 `json:"maxVal" validate:"required,gte=0,gtefield=MinVal"`
+	Label  string  `json:"label" validate:"required,custom_check"`
+}
+
+// Cross-field validation fixture types.
+type ZodCrossFieldInput struct {
+	MinVal   int32 `json:"min_val" validate:"min=1"`
+	MaxVal   int32 `json:"max_val" validate:"min=1,gtefield=MinVal"`
+	StartVal int32 `json:"start_val" validate:"min=1"`
+	EndVal   int32 `json:"end_val" validate:"min=1,gtefield=StartVal"`
+}
+
+type ZodCrossFieldAllOps struct {
+	A int32 `json:"a"`
+	B int32 `json:"b" validate:"gtefield=A"`
+	C int32 `json:"c" validate:"ltefield=A"`
+	D int32 `json:"d" validate:"gtfield=A"`
+	E int32 `json:"e" validate:"ltfield=A"`
+	F int32 `json:"f" validate:"eqfield=A"`
+	G int32 `json:"g" validate:"nefield=A"`
 }
 
 // ---------- helpers ----------
@@ -2119,7 +2145,7 @@ func TestGenerateZodExtends(t *testing.T) {
 		// z.lazy wraps the whole expression for the cycle; .extend chains the base.
 		want := `export const ZodCyclicNodeSchema: z.ZodType<ZodCyclicNode> = z.lazy(() => ZodBaseSchema.extend({
   children: z.array(ZodCyclicNodeSchema),
-}));`
+})).meta({ id: "ZodCyclicNode" });`
 		if !strings.Contains(zod, want) {
 			t.Errorf("cyclic+extends output mismatch.\nwant:\n%s\n\ngot:\n%s", want, zod)
 		}
@@ -2160,5 +2186,124 @@ func TestGenerateZodStaleFileCleanup(t *testing.T) {
 
 	if _, err := os.ReadFile(zodOut); err == nil {
 		t.Error("stale Zod file should be removed when all inputs are void")
+	}
+}
+
+func TestGenerateZodUnsupportedComment(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.Mutation(r, "spawn", func(_ context.Context, input ZodUnsupportedInput) (string, error) {
+		return "", nil
+	})
+	zod := generateZod(t, r)
+	t.Log(zod)
+
+	// minVal has only supported tags — no comment.
+	if strings.Contains(zod, "minVal: z.float64().gte(0), /*") {
+		t.Error("minVal should not have unsupported comment")
+	}
+
+	// maxVal should NOT have unsupported comment — gtefield is now supported via .refine().
+	if strings.Contains(zod, "/* unsupported: gtefield") {
+		t.Error("gtefield should not be flagged as unsupported (it generates .refine())")
+	}
+
+	// maxVal should generate .refine() for gtefield.
+	if !strings.Contains(zod, ".refine(") {
+		t.Errorf("expected .refine() for gtefield.\nOutput:\n%s", zod)
+	}
+	if !strings.Contains(zod, "data.maxVal >= data.minVal") {
+		t.Errorf("expected refine callback with correct field names.\nOutput:\n%s", zod)
+	}
+
+	// label should flag custom_check (truly unsupported custom tag).
+	if !strings.Contains(zod, "/* unsupported: custom_check */") {
+		t.Errorf("label should have unsupported comment.\nOutput:\n%s", zod)
+	}
+}
+
+func TestGenerateZodCrossField(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.Mutation(r, "update", func(_ context.Context, input ZodCrossFieldInput) (string, error) {
+		return "", nil
+	})
+	zod := generateZod(t, r)
+	t.Log(zod)
+
+	// Should have two .refine() calls for gtefield.
+	if strings.Count(zod, ".refine(") != 2 {
+		t.Errorf("expected exactly 2 .refine() calls, got %d.\nOutput:\n%s", strings.Count(zod, ".refine("), zod)
+	}
+
+	// Check correct JSON field names (snake_case, not Go PascalCase).
+	if !strings.Contains(zod, "data.max_val >= data.min_val") {
+		t.Errorf("expected refine with JSON field names max_val >= min_val.\nOutput:\n%s", zod)
+	}
+	if !strings.Contains(zod, "data.end_val >= data.start_val") {
+		t.Errorf("expected refine with JSON field names end_val >= start_val.\nOutput:\n%s", zod)
+	}
+
+	// No unsupported comments for gtefield.
+	if strings.Contains(zod, "/* unsupported") {
+		t.Errorf("no unsupported comments expected.\nOutput:\n%s", zod)
+	}
+}
+
+func TestGenerateZodCrossFieldAllOps(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.Mutation(r, "check", func(_ context.Context, input ZodCrossFieldAllOps) (string, error) {
+		return "", nil
+	})
+	zod := generateZod(t, r)
+	t.Log(zod)
+
+	tests := []struct {
+		field string
+		op    string
+	}{
+		{"b", ">="},  // gtefield
+		{"c", "<="},  // ltefield
+		{"d", ">"},   // gtfield
+		{"e", "<"},   // ltfield
+		{"f", "==="}, // eqfield
+		{"g", "!=="}, // nefield
+	}
+
+	for _, tc := range tests {
+		expected := fmt.Sprintf("data.%s %s data.a", tc.field, tc.op)
+		if !strings.Contains(zod, expected) {
+			t.Errorf("expected %q in .refine() callback.\nOutput:\n%s", expected, zod)
+		}
+	}
+
+	if strings.Count(zod, ".refine(") != 6 {
+		t.Errorf("expected 6 .refine() calls, got %d.\nOutput:\n%s", strings.Count(zod, ".refine("), zod)
+	}
+}
+
+func TestGenerateZodDescribeAndMeta(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.Mutation(r, "configure", func(_ context.Context, input WithTSDoc) (string, error) {
+		return "", nil
+	})
+	zod := generateZod(t, r)
+	t.Log(zod)
+
+	// Fields with ts_doc should have .describe().
+	if !strings.Contains(zod, `.describe("The hostname to connect to")`) {
+		t.Errorf("host field should have .describe().\nOutput:\n%s", zod)
+	}
+	if !strings.Contains(zod, `.describe("Port number (1-65535)")`) {
+		t.Errorf("port field should have .describe().\nOutput:\n%s", zod)
+	}
+
+	// Field without ts_doc should NOT have .describe().
+	// "name" has no ts_doc, so its line should be just "z.string()," with no .describe.
+	if strings.Contains(zod, "name: z.string().describe(") {
+		t.Error("name field should not have .describe()")
+	}
+
+	// Schema should have .meta({ id: "..." }).
+	if !strings.Contains(zod, `.meta({ id: "WithTSDoc" })`) {
+		t.Errorf("schema should have .meta() with type name.\nOutput:\n%s", zod)
 	}
 }

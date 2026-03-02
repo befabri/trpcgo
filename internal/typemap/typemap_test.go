@@ -1175,3 +1175,78 @@ func TestTSDocTagFallbackBehindSourceComment(t *testing.T) {
 		t.Errorf("comment = %q, want %q (source comment should take precedence)", defs[0].Fields[0].Comment, "from source")
 	}
 }
+
+func TestUnsupportedZodRules(t *testing.T) {
+	t.Run("all supported returns nil", func(t *testing.T) {
+		rules := []ValidateRule{
+			{Tag: "required"},
+			{Tag: "min", Param: "3"},
+			{Tag: "email"},
+		}
+		got := UnsupportedZodRules(rules)
+		if len(got) != 0 {
+			t.Errorf("expected nil, got %v", got)
+		}
+	})
+
+	t.Run("unsupported tags returned", func(t *testing.T) {
+		rules := []ValidateRule{
+			{Tag: "required"},
+			{Tag: "alphanum_underscore"},
+			{Tag: "custom_check"},
+		}
+		got := UnsupportedZodRules(rules)
+		if len(got) != 2 {
+			t.Fatalf("expected 2 unsupported, got %d: %v", len(got), got)
+		}
+		if got[0].Tag != "alphanum_underscore" {
+			t.Errorf("got[0] = %+v, want alphanum_underscore", got[0])
+		}
+		if got[1].Tag != "custom_check" {
+			t.Errorf("got[1] = %+v, want custom_check", got[1])
+		}
+	})
+
+	t.Run("cross-field tags are supported", func(t *testing.T) {
+		rules := []ValidateRule{
+			{Tag: "required"},
+			{Tag: "gtefield", Param: "MinVal"},
+			{Tag: "ltefield", Param: "MaxVal"},
+		}
+		got := UnsupportedZodRules(rules)
+		if len(got) != 0 {
+			t.Errorf("cross-field tags should be supported, got %v", got)
+		}
+	})
+
+	t.Run("nil input returns nil", func(t *testing.T) {
+		got := UnsupportedZodRules(nil)
+		if got != nil {
+			t.Errorf("expected nil, got %v", got)
+		}
+	})
+}
+
+func TestCrossFieldOp(t *testing.T) {
+	tests := []struct {
+		tag    string
+		wantOp string
+		wantOk bool
+	}{
+		{"gtefield", ">=", true},
+		{"ltefield", "<=", true},
+		{"gtfield", ">", true},
+		{"ltfield", "<", true},
+		{"eqfield", "===", true},
+		{"nefield", "!==", true},
+		{"min", "", false},
+		{"required", "", false},
+		{"custom", "", false},
+	}
+	for _, tc := range tests {
+		op, ok := CrossFieldOp(tc.tag)
+		if ok != tc.wantOk || op != tc.wantOp {
+			t.Errorf("CrossFieldOp(%q) = (%q, %v), want (%q, %v)", tc.tag, op, ok, tc.wantOp, tc.wantOk)
+		}
+	}
+}

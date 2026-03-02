@@ -27,10 +27,19 @@ type TypeDef struct {
 	Kind         TypeDefKind
 	Comment      string   // Go doc comment → JSDoc
 	TypeParams   []string // Generic type parameter names: ["T", "U"]
-	Extends      []string // base types for TypeScript extends clause
-	Fields       []Field  // Kind == TypeDefInterface
-	UnionMembers []string // Kind == TypeDefUnion (TS-formatted values)
-	AliasOf      string   // Kind == TypeDefAlias (e.g., "string")
+	Extends      []string     // base types for TypeScript extends clause
+	Refinements  []Refinement // cross-field validation constraints → .refine()
+	Fields       []Field      // Kind == TypeDefInterface
+	UnionMembers []string     // Kind == TypeDefUnion (TS-formatted values)
+	AliasOf      string       // Kind == TypeDefAlias (e.g., "string")
+}
+
+// Refinement represents a cross-field validation constraint emitted as .refine().
+type Refinement struct {
+	Field      string // JSON name of the constrained field
+	Op         string // JS comparison operator: ">=", "<=", ">", "<", "===", "!=="
+	OtherField string // JSON name of the referenced field
+	Tag        string // original validate tag name
 }
 
 // Field represents a field in a TypeScript interface.
@@ -46,6 +55,7 @@ type Field struct {
 	Validate          []ValidateRule // parsed validate tag rules (before dive)
 	ElementValidate   []ValidateRule // parsed validate tag rules after dive (for slice elements)
 	ElementGoKind     string         // Go kind of slice/array element type
+	UnsupportedZod    []ValidateRule // validate rules with no Zod equivalent
 }
 
 // Mapper converts Go types to TypeScript type strings and collects interface definitions.
@@ -353,6 +363,7 @@ func (m *Mapper) resolveStruct(id, name string, named *types.Named) {
 		Comment: meta.Comment,
 	}
 	m.collectFields(st, &def.Fields, &def.Extends, meta.FieldComments)
+	def.Refinements = extractStructRefinements(st, def.Fields)
 	m.defs[id] = def
 }
 
@@ -379,6 +390,7 @@ func (m *Mapper) resolveGenericStruct(id, name string, named *types.Named) {
 		TypeParams: params,
 	}
 	m.collectFields(st, &def.Fields, &def.Extends, meta.FieldComments)
+	def.Refinements = extractStructRefinements(st, def.Fields)
 	m.defs[id] = def
 }
 
@@ -502,6 +514,10 @@ func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, extends *[]str
 		sliceRules, elemRules := SplitAtDive(allRules)
 		f.Validate = sliceRules
 		f.ElementValidate = elemRules
+		f.UnsupportedZod = UnsupportedZodRules(sliceRules)
+		if eu := UnsupportedZodRules(elemRules); len(eu) > 0 {
+			f.UnsupportedZod = append(f.UnsupportedZod, eu...)
+		}
 
 		// Extract element Go kind for slice/array fields.
 		if f.GoKind == "slice" || f.GoKind == "array" {
@@ -543,6 +559,44 @@ func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, extends *[]str
 
 		*fields = append(*fields, f)
 	}
+}
+
+// extractStructRefinements scans collected fields for cross-field validate tags
+// and builds Refinement entries. Uses the types.Struct to map Go field names
+// to JSON names.
+func extractStructRefinements(st *types.Struct, fields []Field) []Refinement {
+	// Build Go field name → JSON name map.
+	goToJSON := map[string]string{}
+	for i := 0; i < st.NumFields(); i++ {
+		field := st.Field(i)
+		tag := st.Tag(i)
+		jsonName, _, skip := ParseJSONTag(tag)
+		if skip {
+			continue
+		}
+		if jsonName == "" {
+			jsonName = field.Name()
+		}
+		goToJSON[field.Name()] = jsonName
+	}
+
+	var refs []Refinement
+	for _, f := range fields {
+		for _, rule := range f.Validate {
+			op, ok := CrossFieldOp(rule.Tag)
+			if !ok {
+				continue
+			}
+			otherJSON := goToJSON[rule.Param]
+			if otherJSON == "" {
+				continue
+			}
+			refs = append(refs, Refinement{
+				Field: f.Name, Op: op, OtherField: otherJSON, Tag: rule.Tag,
+			})
+		}
+	}
+	return refs
 }
 
 // QuotePropName wraps a property name in quotes if it is not a valid
