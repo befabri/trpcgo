@@ -1,6 +1,8 @@
 # trpcgo
 
-Go-first tRPC. Write Go structs and handlers, get TypeScript types automatically.
+Write Go structs and handlers, get TypeScript types automatically.
+
+> **Warning:** This project is under active development. APIs may change and things may break.
 
 ```
 Go structs + handlers  →  trpcgo generate  →  TypeScript AppRouter + Zod schemas
