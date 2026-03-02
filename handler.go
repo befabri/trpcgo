@@ -61,10 +61,19 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create context
+	// Create context.
+	// If createContext returns a context not derived from r.Context(),
+	// we must still propagate the request's cancellation so that SSE
+	// subscriptions and long-running handlers stop when the client
+	// disconnects.
 	ctx := r.Context()
 	if h.router.opts.createContext != nil {
-		ctx = h.router.opts.createContext(r)
+		userCtx := h.router.opts.createContext(r)
+		if userCtx != ctx {
+			var cancel context.CancelFunc
+			ctx, cancel = mergeContexts(ctx, userCtx)
+			defer cancel()
+		}
 	}
 	ctx = WithResponseMetadata(ctx)
 

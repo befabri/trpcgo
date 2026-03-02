@@ -783,6 +783,58 @@ func TestCustomContextCreator(t *testing.T) {
 	}
 }
 
+func TestContextCreatorCancellationPropagation(t *testing.T) {
+	// Regression: if createContext returns a context NOT derived from r.Context(),
+	// SSE subscriptions must still cancel when the client disconnects.
+	type ctxKey string
+	cancelled := make(chan struct{})
+
+	router := trpcgo.NewRouter(trpcgo.WithContextCreator(func(r *http.Request) context.Context {
+		// Deliberately not derived from r.Context().
+		return context.WithValue(context.Background(), ctxKey("user"), "alice")
+	}))
+
+	trpcgo.VoidSubscribe(router, "hang", func(ctx context.Context) (<-chan string, error) {
+		// Verify the user value was carried through.
+		if ctx.Value(ctxKey("user")) != "alice" {
+			t.Error("missing user value in context")
+		}
+		ch := make(chan string)
+		go func() {
+			defer close(ch)
+			// Block until context is cancelled (client disconnect).
+			<-ctx.Done()
+			close(cancelled)
+		}()
+		return ch, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// Start SSE connection then immediately close it.
+	resp, err := http.Get(server.URL + "/trpc/hang")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Read the "connected" event to confirm the subscription started.
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		if strings.Contains(scanner.Text(), "connected") {
+			break
+		}
+	}
+	// Close = client disconnect.
+	resp.Body.Close()
+
+	// The subscription goroutine should be cancelled promptly.
+	select {
+	case <-cancelled:
+		// Success — cancellation propagated.
+	case <-time.After(3 * time.Second):
+		t.Fatal("subscription was not cancelled after client disconnect (context not propagated)")
+	}
+}
+
 // --- Edge Cases ---
 
 func TestNoBasePath(t *testing.T) {
