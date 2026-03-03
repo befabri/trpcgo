@@ -1816,8 +1816,8 @@ func TestGenerateTS(t *testing.T) {
 		for _, s := range []string{
 			"export type AppRouter =",
 			"type AppRouterRecord =",
-			"procedures: AppRouterRecord",
-			"record: AppRouterRecord",
+			"TRPCRouterDef<$RootTypes, AppRouterRecord>",
+			"TRPCRouterCaller<$RootTypes, AppRouterRecord>",
 		} {
 			if !strings.Contains(output, s) {
 				t.Errorf("missing %q:\n%s", s, output)
@@ -3248,6 +3248,280 @@ func TestErrorFormatterSSESerializedError(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, "sse-formatted") {
 		t.Errorf("SSE body missing formatted error, got:\n%s", bodyStr)
+	}
+}
+
+func TestErrorFormatterReceivesInput(t *testing.T) {
+	t.Run("query with input", func(t *testing.T) {
+		var gotInput json.RawMessage
+		router := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+			gotInput = input.Input
+			return input.Shape
+		}))
+
+		trpcgo.Query(router, "fail", func(ctx context.Context, in struct {
+			ID string `json:"id"`
+		}) (string, error) {
+			return "", trpcgo.NewError(trpcgo.CodeBadRequest, "bad")
+		})
+
+		server := newTestServer(t, router.Handler("/trpc"))
+		resp := mustGet(t, server, `/trpc/fail?input={"id":"42"}`)
+		_ = resp.Body.Close()
+
+		if gotInput == nil {
+			t.Fatal("ErrorFormatterInput.Input is nil, want raw JSON")
+		}
+		if string(gotInput) != `{"id":"42"}` {
+			t.Errorf("ErrorFormatterInput.Input = %s, want %s", gotInput, `{"id":"42"}`)
+		}
+	})
+
+	t.Run("mutation with input", func(t *testing.T) {
+		var gotInput json.RawMessage
+		router := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+			gotInput = input.Input
+			return input.Shape
+		}))
+
+		trpcgo.Mutation(router, "fail", func(ctx context.Context, in struct {
+			Name string `json:"name"`
+		}) (string, error) {
+			return "", trpcgo.NewError(trpcgo.CodeBadRequest, "bad")
+		})
+
+		server := newTestServer(t, router.Handler("/trpc"))
+		resp := mustPost(t, server, "/trpc/fail", `{"name":"alice"}`)
+		_ = resp.Body.Close()
+
+		if gotInput == nil {
+			t.Fatal("ErrorFormatterInput.Input is nil, want raw JSON")
+		}
+		if string(gotInput) != `{"name":"alice"}` {
+			t.Errorf("ErrorFormatterInput.Input = %s, want %s", gotInput, `{"name":"alice"}`)
+		}
+	})
+
+	t.Run("void procedure has nil input", func(t *testing.T) {
+		var gotInput json.RawMessage
+		formatterCalled := false
+		router := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+			formatterCalled = true
+			gotInput = input.Input
+			return input.Shape
+		}))
+
+		trpcgo.VoidQuery(router, "fail", func(ctx context.Context) (string, error) {
+			return "", trpcgo.NewError(trpcgo.CodeBadRequest, "bad")
+		})
+
+		server := newTestServer(t, router.Handler("/trpc"))
+		resp := mustGet(t, server, "/trpc/fail")
+		_ = resp.Body.Close()
+
+		if !formatterCalled {
+			t.Fatal("error formatter was not called")
+		}
+		if gotInput != nil {
+			t.Errorf("ErrorFormatterInput.Input = %s, want nil for void procedure", gotInput)
+		}
+	})
+
+	t.Run("not found still has input from request", func(t *testing.T) {
+		var gotInput json.RawMessage
+		formatterCalled := false
+		router := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+			formatterCalled = true
+			gotInput = input.Input
+			return input.Shape
+		}))
+
+		trpcgo.VoidQuery(router, "exists", func(ctx context.Context) (string, error) {
+			return "ok", nil
+		})
+
+		server := newTestServer(t, router.Handler("/trpc"))
+		resp := mustGet(t, server, `/trpc/missing?input={"x":1}`)
+		_ = resp.Body.Close()
+
+		if !formatterCalled {
+			t.Fatal("error formatter was not called for not-found")
+		}
+		if string(gotInput) != `{"x":1}` {
+			t.Errorf("ErrorFormatterInput.Input = %s, want %s", gotInput, `{"x":1}`)
+		}
+	})
+}
+
+func TestErrorFormatterInputInJSONLBatch(t *testing.T) {
+	var inputs []json.RawMessage
+	var mu sync.Mutex
+
+	router := trpcgo.NewRouter(
+		trpcgo.WithBatching(true),
+		trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+			mu.Lock()
+			inputs = append(inputs, input.Input)
+			mu.Unlock()
+			return input.Shape
+		}),
+	)
+
+	trpcgo.Query(router, "fail", func(ctx context.Context, in struct {
+		ID string `json:"id"`
+	}) (string, error) {
+		return "", trpcgo.NewError(trpcgo.CodeBadRequest, "bad")
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	req, _ := http.NewRequest("POST", server.URL+"/trpc/fail,fail?batch=1", strings.NewReader(`{"0":{"id":"a"},"1":{"id":"b"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("trpc-accept", "application/jsonl")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(inputs) != 2 {
+		t.Fatalf("expected 2 formatter calls, got %d", len(inputs))
+	}
+
+	// Inputs arrive in arbitrary order (concurrent), so check both are present.
+	got := map[string]bool{string(inputs[0]): true, string(inputs[1]): true}
+	if !got[`{"id":"a"}`] || !got[`{"id":"b"}`] {
+		t.Errorf("expected inputs {\"id\":\"a\"} and {\"id\":\"b\"}, got %v", got)
+	}
+}
+
+// TestErrorFormatterBypassedForPreContextErrors verifies that pre-context
+// errors (method not allowed, batching disabled) bypass the custom error
+// formatter entirely — they use defaultErrorEnvelope because ctx is nil.
+func TestErrorFormatterBypassedForPreContextErrors(t *testing.T) {
+	formatterCalled := false
+
+	router := trpcgo.NewRouter(
+		trpcgo.WithBatching(false),
+		trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+			formatterCalled = true
+			return input.Shape
+		}),
+	)
+
+	trpcgo.VoidQuery(router, "hello", func(ctx context.Context) (string, error) {
+		return "hi", nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// ?batch=1 with batching disabled hits writeErrorResponse with ctx=nil,
+	// which takes the defaultErrorEnvelope branch — formatter is never called.
+	resp := mustGet(t, server, "/trpc/hello?batch=1")
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	if formatterCalled {
+		t.Error("formatter should NOT be called for pre-context errors (ctx is nil)")
+	}
+}
+
+// TestErrorFormatterInputNilForSSEConnectionLimit verifies that the SSE
+// connection limit error calls the formatter (ctx is available) but passes
+// nil Input — writeErrorResponse doesn't have access to procedure input.
+func TestErrorFormatterInputNilForSSEConnectionLimit(t *testing.T) {
+	var gotInput json.RawMessage
+	formatterCalled := false
+
+	router := trpcgo.NewRouter(
+		trpcgo.WithSSEMaxConnections(1),
+		trpcgo.WithSSEMaxDuration(2*time.Second),
+		trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+			formatterCalled = true
+			gotInput = input.Input
+			return input.Shape
+		}),
+	)
+
+	trpcgo.VoidSubscribe(router, "stream", func(ctx context.Context) (<-chan string, error) {
+		ch := make(chan string)
+		go func() { <-ctx.Done(); close(ch) }()
+		return ch, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	// Fill the single SSE slot.
+	resp1, err := http.Get(server.URL + "/trpc/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp1.Body.Close() }()
+
+	// Second connection should be rejected with 429.
+	resp2, err := http.Get(server.URL + "/trpc/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp2.Body)
+	_ = resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d: %s", resp2.StatusCode, raw)
+	}
+	if !formatterCalled {
+		t.Fatal("formatter should be called for SSE connection limit (ctx is available)")
+	}
+	if gotInput != nil {
+		t.Errorf("SSE connection limit should pass nil Input, got %s", gotInput)
+	}
+}
+
+// TestErrorFormatterInputInSSESerializedError verifies that when an SSE
+// stream emits a serialized-error, the formatter receives the subscription's
+// original input.
+func TestErrorFormatterInputInSSESerializedError(t *testing.T) {
+	var gotInput json.RawMessage
+	formatterCalled := false
+
+	router := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+		formatterCalled = true
+		gotInput = input.Input
+		return input.Shape
+	}))
+
+	type BadData struct {
+		Ch chan int // channels can't be JSON serialized
+	}
+
+	trpcgo.Subscribe(router, "bad", func(ctx context.Context, in struct {
+		ID string `json:"id"`
+	}) (<-chan BadData, error) {
+		ch := make(chan BadData, 1)
+		ch <- BadData{Ch: make(chan int)}
+		close(ch)
+		return ch, nil
+	})
+
+	server := newTestServer(t, router.Handler("/trpc"))
+
+	resp, err := http.Get(server.URL + `/trpc/bad?input={"id":"99"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if !formatterCalled {
+		t.Fatal("formatter should be called for SSE serialized-error")
+	}
+	if string(gotInput) != `{"id":"99"}` {
+		t.Errorf("SSE error formatter Input = %s, want %s", gotInput, `{"id":"99"}`)
 	}
 }
 

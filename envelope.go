@@ -2,6 +2,7 @@ package trpcgo
 
 import (
 	"context"
+	"encoding/json"
 	"runtime"
 )
 
@@ -62,7 +63,7 @@ func defaultErrorEnvelope(err *Error, path string, isDev bool) ErrorEnvelope {
 }
 
 // formatError builds the error response, applying the custom error formatter if configured.
-func formatError(opts *routerOptions, err *Error, path string, ctx context.Context, typ ProcedureType) any {
+func formatError(opts *routerOptions, err *Error, path string, input json.RawMessage, ctx context.Context, typ ProcedureType) any {
 	shape := defaultErrorEnvelope(err, path, opts.isDev)
 	if opts.errorFormatter == nil {
 		return shape
@@ -71,6 +72,7 @@ func formatError(opts *routerOptions, err *Error, path string, ctx context.Conte
 		Error: err,
 		Type:  typ,
 		Path:  path,
+		Input: input,
 		Ctx:   ctx,
 		Shape: shape,
 	})

@@ -444,6 +444,22 @@ func countPattern(s, pattern string) int {
 	return len(re.FindAllStringIndex(s, -1))
 }
 
+// symlinkNodeModules creates a symlink to node_modules in dir so that
+// tsc can resolve @trpc/server imports in generated TypeScript.
+func symlinkNodeModules(t *testing.T, dir string) {
+	t.Helper()
+	src, err := filepath.Abs(filepath.Join("examples", "tanstack-query", "web", "node_modules"))
+	if err != nil {
+		t.Fatalf("abs path: %v", err)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Skip("node_modules not installed in examples/tanstack-query/web")
+	}
+	if err := os.Symlink(src, filepath.Join(dir, "node_modules")); err != nil {
+		t.Fatalf("symlink node_modules: %v", err)
+	}
+}
+
 // ---------- tests ----------
 
 // TestGenerateTSGenericInstantiation verifies that generic Go types are emitted
@@ -1323,6 +1339,7 @@ func TestGenerateTSTsc(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "trpc.ts"), []byte(ts), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	symlinkNodeModules(t, dir)
 	tsconfig := `{
   "compilerOptions": {
     "strict": true,
@@ -1641,6 +1658,7 @@ func TestGenerateTSTscExtended(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "trpc.ts"), []byte(ts), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	symlinkNodeModules(t, dir)
 	tsconfig := `{
   "compilerOptions": {
     "strict": true,
@@ -2033,6 +2051,7 @@ func TestGenerateTSNodeExecution(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "trpc.ts"), []byte(ts), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	symlinkNodeModules(t, dir)
 
 	// Write a structural check file that validates types via satisfies.
 	check := `import type { CgAddress, AllNumerics, TreeNode, WithBool, ExUser, ExBase, WithTSDoc } from "./trpc.js";

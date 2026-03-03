@@ -101,6 +101,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !isBatch {
 		if s, ok := results[0].response.(streamer); ok {
 			path := calls[0].path
+			sseInput := calls[0].input
 
 			// Enforce concurrent SSE connection limit.
 			if max := h.opts.sseMaxConnections; max > 0 {
@@ -119,7 +120,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				reconnectAfterInactivityMs: h.opts.sseReconnectAfterInactivityMs,
 				isDev:                      h.opts.isDev,
 				formatError: func(sseErr *Error) any {
-					return formatError(h.opts, sseErr, path, ctx, ProcedureSubscription)
+					return formatError(h.opts, sseErr, path, sseInput, ctx, ProcedureSubscription)
 				},
 			}); err != nil {
 				h.writeErrorResponse(w, NewError(CodeInternalServerError, err.Error()), "", ctx, "")
@@ -167,7 +168,7 @@ func (h *httpHandler) executeCall(ctx context.Context, r *http.Request, call par
 		if h.opts.onError != nil {
 			h.opts.onError(ctx, trpcErr, call.path)
 		}
-		return formatError(h.opts, trpcErr, call.path, ctx, ""), HTTPStatusFromCode(CodeNotFound)
+		return formatError(h.opts, trpcErr, call.path, call.input, ctx, ""), HTTPStatusFromCode(CodeNotFound)
 	}
 
 	// Inject procedure metadata into context for middleware access.
@@ -187,7 +188,7 @@ func (h *httpHandler) executeCall(ctx context.Context, r *http.Request, call par
 		if h.opts.onError != nil {
 			h.opts.onError(ctx, err, call.path)
 		}
-		return formatError(h.opts, err, call.path, ctx, proc.typ), HTTPStatusFromCode(err.Code)
+		return formatError(h.opts, err, call.path, call.input, ctx, proc.typ), HTTPStatusFromCode(err.Code)
 	}
 
 	// Decode, validate, and execute through middleware chain.
@@ -206,7 +207,7 @@ func (h *httpHandler) executeCall(ctx context.Context, r *http.Request, call par
 			// Never leak internal error details to clients.
 			trpcErr = NewError(CodeInternalServerError, "internal server error")
 		}
-		return formatError(h.opts, trpcErr, call.path, ctx, proc.typ), HTTPStatusFromCode(trpcErr.Code)
+		return formatError(h.opts, trpcErr, call.path, call.input, ctx, proc.typ), HTTPStatusFromCode(trpcErr.Code)
 	}
 
 	// Return streamers unwrapped so the handler can detect and dispatch SSE.
@@ -348,7 +349,7 @@ func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWrite
 					trpcErr := NewError(CodeInternalServerError, "internal server error")
 					ch <- indexedResult{
 						index:    idx,
-						response: formatError(h.opts, trpcErr, c.path, ctx, ""),
+						response: formatError(h.opts, trpcErr, c.path, c.input, ctx, ""),
 					}
 				}
 			}()
@@ -373,7 +374,7 @@ func (h *httpHandler) writeErrorResponse(w http.ResponseWriter, err *Error, path
 	w.Header().Set("Content-Type", "application/json")
 	var formatted any
 	if ctx != nil {
-		formatted = formatError(h.opts, err, path, ctx, typ)
+		formatted = formatError(h.opts, err, path, nil, ctx, typ)
 	} else {
 		// Pre-context errors (e.g., method not allowed) use default formatting.
 		formatted = defaultErrorEnvelope(err, path, h.opts.isDev)

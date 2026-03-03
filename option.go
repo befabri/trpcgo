@@ -2,6 +2,7 @@ package trpcgo
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 )
@@ -39,6 +40,7 @@ type ErrorFormatterInput struct {
 	Error *Error
 	Type  ProcedureType
 	Path  string
+	Input json.RawMessage // raw JSON input; nil for pre-execution errors
 	Ctx   context.Context
 	Shape ErrorEnvelope // the default tRPC error shape
 }
