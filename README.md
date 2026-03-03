@@ -450,7 +450,7 @@ The file watcher is recursive — it watches all subdirectories and handles dire
 
 **Go:** Requires Go 1.26+ (uses `tool` directive, `errors.AsType`, generics).
 
-**tRPC client:** Works with `@trpc/client` v11 and `@trpc/react-query` v11. The generated `AppRouter` type uses structural typing — it matches the tRPC client's expected shape without depending on the `@trpc/server` package.
+**tRPC client:** Works with `@trpc/client` v11 and `@trpc/react-query` v11. The generated `AppRouter` type imports from `@trpc/server` (which is a dependency of `@trpc/client`).
 
 **CORS:** trpcgo does not handle CORS. Use middleware from your HTTP router or a dedicated package (e.g. `rs/cors`). A typical setup wraps the trpcgo handler:
 
