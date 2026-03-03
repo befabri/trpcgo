@@ -28,7 +28,7 @@ type callResult struct {
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Only allow GET and POST
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		h.writeErrorResponse(w, NewError(CodeMethodNotSupported, "only GET and POST are supported"), "", http.StatusMethodNotAllowed, nil, "")
+		h.writeErrorResponse(w, NewError(CodeMethodNotSupported, "only GET and POST are supported"), "", nil, "")
 		return
 	}
 
@@ -36,7 +36,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Check if batching is allowed
 	if isBatch && !h.opts.allowBatching {
-		h.writeErrorResponse(w, NewError(CodeBadRequest, "batching is not enabled"), "", http.StatusBadRequest, nil, "")
+		h.writeErrorResponse(w, NewError(CodeBadRequest, "batching is not enabled"), "", nil, "")
 		return
 	}
 
@@ -45,13 +45,13 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if isBatch {
 		paths := parsePaths(r, h.basePath)
 		if h.opts.maxBatchSize > 0 && len(paths) > h.opts.maxBatchSize {
-			h.writeErrorResponse(w, NewError(CodeBadRequest, fmt.Sprintf("batch size %d exceeds limit of %d", len(paths), h.opts.maxBatchSize)), "", http.StatusBadRequest, nil, "")
+			h.writeErrorResponse(w, NewError(CodeBadRequest, fmt.Sprintf("batch size %d exceeds limit of %d", len(paths), h.opts.maxBatchSize)), "", nil, "")
 			return
 		}
 		// Subscriptions cannot be batched (tRPC spec).
 		for _, path := range paths {
 			if proc, ok := h.lookup(path); ok && proc.typ == ProcedureSubscription {
-				h.writeErrorResponse(w, NewError(CodeBadRequest, "subscriptions cannot be batched"), "", http.StatusBadRequest, nil, "")
+				h.writeErrorResponse(w, NewError(CodeBadRequest, "subscriptions cannot be batched"), "", nil, "")
 				return
 			}
 		}
@@ -61,9 +61,9 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	calls, err := parseRequest(r, h.basePath, isBatch, h.opts.maxBodySize)
 	if err != nil {
 		if trpcErr, ok := errors.AsType[*Error](err); ok {
-			h.writeErrorResponse(w, trpcErr, "", HTTPStatusFromCode(trpcErr.Code), nil, "")
+			h.writeErrorResponse(w, trpcErr, "", nil, "")
 		} else {
-			h.writeErrorResponse(w, NewError(CodeInternalServerError, "internal server error"), "", http.StatusInternalServerError, nil, "")
+			h.writeErrorResponse(w, NewError(CodeInternalServerError, "internal server error"), "", nil, "")
 		}
 		return
 	}
@@ -107,7 +107,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				n := h.router.sseConnections.Add(1)
 				if n > int64(max) {
 					h.router.sseConnections.Add(-1)
-					h.writeErrorResponse(w, NewError(CodeTooManyRequests, "too many concurrent subscriptions"), path, http.StatusTooManyRequests, ctx, ProcedureSubscription)
+					h.writeErrorResponse(w, NewError(CodeTooManyRequests, "too many concurrent subscriptions"), path, ctx, ProcedureSubscription)
 					return
 				}
 				defer h.router.sseConnections.Add(-1)
@@ -122,7 +122,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					return formatError(h.opts, sseErr, path, ctx, ProcedureSubscription)
 				},
 			}); err != nil {
-				h.writeErrorResponse(w, NewError(CodeInternalServerError, err.Error()), "", http.StatusInternalServerError, ctx, "")
+				h.writeErrorResponse(w, NewError(CodeInternalServerError, err.Error()), "", ctx, "")
 			}
 			return
 		}
@@ -133,7 +133,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		data, err := json.Marshal(results[0].response)
 		if err != nil {
-			h.writeErrorResponse(w, NewError(CodeInternalServerError, "failed to serialize response"), "", http.StatusInternalServerError, ctx, "")
+			h.writeErrorResponse(w, NewError(CodeInternalServerError, "failed to serialize response"), "", ctx, "")
 			return
 		}
 		applyResponseMetadata(ctx, w)
@@ -151,7 +151,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := json.Marshal(responses)
 	if err != nil {
-		h.writeErrorResponse(w, NewError(CodeInternalServerError, "failed to serialize response"), "", http.StatusInternalServerError, ctx, "")
+		h.writeErrorResponse(w, NewError(CodeInternalServerError, "failed to serialize response"), "", ctx, "")
 		return
 	}
 	statusCode := determineBatchStatus(results)
@@ -301,7 +301,7 @@ func mergeLastEventId(r *http.Request, input json.RawMessage) json.RawMessage {
 func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWriter, r *http.Request, calls []parsedRequest) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		h.writeErrorResponse(w, NewError(CodeInternalServerError, "streaming not supported"), "", http.StatusInternalServerError, ctx, "")
+		h.writeErrorResponse(w, NewError(CodeInternalServerError, "streaming not supported"), "", ctx, "")
 		return
 	}
 
@@ -315,7 +315,7 @@ func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWrite
 	}
 	headData, err := json.Marshal(head)
 	if err != nil {
-		h.writeErrorResponse(w, NewError(CodeInternalServerError, "failed to serialize response"), "", http.StatusInternalServerError, ctx, "")
+		h.writeErrorResponse(w, NewError(CodeInternalServerError, "failed to serialize response"), "", ctx, "")
 		return
 	}
 
@@ -369,7 +369,7 @@ func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWrite
 	}
 }
 
-func (h *httpHandler) writeErrorResponse(w http.ResponseWriter, err *Error, path string, status int, ctx context.Context, typ ProcedureType) {
+func (h *httpHandler) writeErrorResponse(w http.ResponseWriter, err *Error, path string, ctx context.Context, typ ProcedureType) {
 	w.Header().Set("Content-Type", "application/json")
 	var formatted any
 	if ctx != nil {
@@ -386,6 +386,6 @@ func (h *httpHandler) writeErrorResponse(w http.ResponseWriter, err *Error, path
 	if ctx != nil {
 		applyResponseMetadata(ctx, w)
 	}
-	w.WriteHeader(status)
+	w.WriteHeader(HTTPStatusFromCode(err.Code))
 	_, _ = w.Write(data)
 }

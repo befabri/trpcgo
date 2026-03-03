@@ -110,21 +110,21 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 		})
 	}
 
-	// Resolve type name tokens. goTypeToTS embeds \x00key\x00 tokens for
+	// Resolve type name tokens. goTypeToTS embeds §key§ tokens for
 	// named types. Resolve them to display names, disambiguating collisions
 	// by prefixing with the title-cased package name (e.g., NpcListInput).
 	display := resolveDisplayNames(defs)
 
 	for i := range entries {
-		entries[i].InputTS = resolveTypeTokens(entries[i].InputTS, display)
-		entries[i].OutputTS = resolveTypeTokens(entries[i].OutputTS, display)
+		entries[i].InputTS = typemap.ResolveTokens(entries[i].InputTS, display)
+		entries[i].OutputTS = typemap.ResolveTokens(entries[i].OutputTS, display)
 	}
 	for _, d := range defs {
 		for i := range d.fields {
-			d.fields[i].tsType = resolveTypeTokens(d.fields[i].tsType, display)
+			d.fields[i].Type = typemap.ResolveTokens(d.fields[i].Type, display)
 		}
 		for i := range d.extends {
-			d.extends[i] = resolveTypeTokens(d.extends[i], display)
+			d.extends[i] = typemap.ResolveTokens(d.extends[i], display)
 		}
 	}
 
@@ -148,32 +148,13 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 		if resolvedName == "" {
 			resolvedName = d.name
 		}
-
-		fields := make([]typemap.Field, len(d.fields))
-		for j, f := range d.fields {
-			fields[j] = typemap.Field{
-				Name:              f.name,
-				Type:              f.tsType,
-				Comment:           f.comment,
-				GoKind:            f.goKind,
-				Optional:          f.optional,
-				Readonly:          f.readonly,
-				Required:          f.required,
-				ValidateOmitempty: f.validateOmitempty,
-				Validate:          f.validate,
-				ElementValidate:   f.elementValidate,
-				ElementGoKind:     f.elementGoKind,
-				UnsupportedZod:    f.unsupportedZod,
-				ZodOmit:           f.zodOmit,
-			}
-		}
 		typeDefs[i] = typemap.TypeDef{
 			Name:        resolvedName,
 			Kind:        typemap.TypeDefInterface,
 			TypeParams:  d.typeParams,
 			Extends:     d.extends,
 			Refinements: d.refinements,
-			Fields:      fields,
+			Fields:      d.fields,
 		}
 	}
 
@@ -186,23 +167,7 @@ type reflectDef struct {
 	typeParams  []string
 	extends     []string
 	refinements []typemap.Refinement
-	fields      []reflectField
-}
-
-type reflectField struct {
-	name              string
-	tsType            string
-	comment           string // from ts_doc tag → JSDoc
-	optional          bool
-	readonly          bool
-	required          bool
-	goKind            string // Go kind for Zod: "string", "int", "float64", etc.
-	validate          []typemap.ValidateRule
-	elementValidate   []typemap.ValidateRule
-	elementGoKind     string
-	validateOmitempty bool
-	unsupportedZod    []typemap.ValidateRule
-	zodOmit           bool
+	fields      []typemap.Field
 }
 
 // goTypeToTS converts a reflect.Type to its TypeScript representation.
@@ -283,9 +248,9 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Ty
 
 		key := t.PkgPath() + "." + name
 		if _, ok := defs[key]; !ok {
-			resolveStructTS(t, defs)
+			resolveStructDefTS(t, name, key, nil, nil, defs)
 		}
-		return "\x00" + key + "\x00"
+		return typemap.TokenDelim + key + typemap.TokenDelim
 
 	case reflect.Interface:
 		return "unknown"
@@ -328,7 +293,7 @@ func handleGenericTS(t reflect.Type, name string, bracketIdx int, defs map[strin
 				interfaceSubs[at] = paramNames[i]
 			}
 		}
-		resolveGenericStructTS(t, baseName, genericKey, paramNames, interfaceSubs, defs)
+		resolveStructDefTS(t, baseName, genericKey, paramNames, interfaceSubs, defs)
 	}
 
 	// Convert type args to TypeScript names for the reference.
@@ -341,19 +306,19 @@ func handleGenericTS(t reflect.Type, name string, bracketIdx int, defs map[strin
 		}
 	}
 
-	return "\x00" + genericKey + "\x00" + "<" + strings.Join(argTSNames, ", ") + ">"
+	return typemap.TokenDelim + genericKey + typemap.TokenDelim + "<" + strings.Join(argTSNames, ", ") + ">"
 }
 
-// resolveGenericStructTS registers a generic interface definition.
-// subs maps concrete type arg types to parameter names (e.g., EffectRow → "T").
-func resolveGenericStructTS(t reflect.Type, baseName, key string, paramNames []string, subs map[reflect.Type]string, defs map[string]*reflectDef) {
+// resolveStructDefTS registers a struct type as a TypeScript interface definition.
+// Handles both generic and non-generic types.
+func resolveStructDefTS(t reflect.Type, name, key string, paramNames []string, subs map[reflect.Type]string, defs map[string]*reflectDef) {
 	defs[key] = &reflectDef{
-		name:       baseName,
+		name:       name,
 		pkgPath:    t.PkgPath(),
 		typeParams: paramNames,
 	}
 
-	var fields []reflectField
+	var fields []typemap.Field
 	var extends []string
 	collectFieldsTS(t, defs, &fields, &extends, subs)
 	defs[key].fields = fields
@@ -361,20 +326,7 @@ func resolveGenericStructTS(t reflect.Type, baseName, key string, paramNames []s
 	defs[key].refinements = extractRefinements(t, fields)
 }
 
-func resolveStructTS(t reflect.Type, defs map[string]*reflectDef) {
-	name := t.Name()
-	key := t.PkgPath() + "." + name
-	defs[key] = &reflectDef{name: name, pkgPath: t.PkgPath()}
-
-	var fields []reflectField
-	var extends []string
-	collectFieldsTS(t, defs, &fields, &extends, nil)
-	defs[key].fields = fields
-	defs[key].extends = extends
-	defs[key].refinements = extractRefinements(t, fields)
-}
-
-func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]reflectField, extends *[]string, subs map[reflect.Type]string) {
+func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]typemap.Field, extends *[]string, subs map[reflect.Type]string) {
 	for f := range t.Fields() {
 		jsonName, omitempty, skip := typemap.ParseJSONTag(string(f.Tag))
 		if skip {
@@ -425,64 +377,64 @@ func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, fields *[]refl
 		tsType := goTypeToTS(f.Type, defs, subs)
 		optional := omitempty || f.Type.Kind() == reflect.Pointer
 
-		rf := reflectField{name: jsonName, tsType: tsType, optional: optional}
+		field := typemap.Field{Name: jsonName, Type: tsType, Optional: optional}
 
 		// Extract Go kind for Zod type discrimination.
-		rf.goKind = reflectGoKind(f.Type)
+		field.GoKind = reflectGoKind(f.Type)
 
 		// Parse validate tag and split at dive boundary.
 		allRules := typemap.ParseValidateTag(string(f.Tag))
 		sliceRules, elemRules := typemap.SplitAtDive(allRules)
-		rf.validate = sliceRules
-		rf.elementValidate = elemRules
-		rf.unsupportedZod = typemap.UnsupportedZodRules(sliceRules)
+		field.Validate = sliceRules
+		field.ElementValidate = elemRules
+		field.UnsupportedZod = typemap.UnsupportedZodRules(sliceRules)
 		if eu := typemap.UnsupportedZodRules(elemRules); len(eu) > 0 {
-			rf.unsupportedZod = append(rf.unsupportedZod, eu...)
+			field.UnsupportedZod = append(field.UnsupportedZod, eu...)
 		}
 
 		// Extract element Go kind for slice/array fields.
-		if rf.goKind == "slice" || rf.goKind == "array" {
-			rf.elementGoKind = reflectSliceElementGoKind(f.Type)
+		if field.GoKind == "slice" || field.GoKind == "array" {
+			field.ElementGoKind = reflectSliceElementGoKind(f.Type)
 		}
 
 		// Check for validate:"required" and validate:"omitempty".
 		// Note: tstype tag overrides below take final precedence.
-		for _, rule := range rf.validate {
+		for _, rule := range field.Validate {
 			if rule.Tag == "required" {
-				rf.optional = false
+				field.Optional = false
 			}
 			if rule.Tag == "omitempty" {
-				rf.validateOmitempty = true
+				field.ValidateOmitempty = true
 			}
 		}
 
 		// Apply tstype tag overrides (final precedence over validate tags).
 		if hasTSTag {
 			if tstag.Type != "" {
-				rf.tsType = tstag.Type
+				field.Type = tstag.Type
 			}
-			rf.readonly = tstag.Readonly
+			field.Readonly = tstag.Readonly
 			if tstag.Required {
-				rf.required = true
-				rf.optional = false
+				field.Required = true
+				field.Optional = false
 			}
 		}
 
 		// Apply ts_doc tag for JSDoc.
 		if doc, ok := typemap.ParseTSDocTag(string(f.Tag)); ok {
-			rf.comment = doc
+			field.Comment = doc
 		}
 
-		rf.zodOmit = typemap.ParseZodOmitTag(string(f.Tag))
+		field.ZodOmit = typemap.ParseZodOmitTag(string(f.Tag))
 
-		*fields = append(*fields, rf)
+		*fields = append(*fields, field)
 	}
 }
 
 // extractRefinements scans collected fields for cross-field validate tags
 // (gtefield, ltefield, etc.) and builds Refinement entries. The Go field name
 // in the validate param is resolved to its JSON name via the struct's fields.
-func extractRefinements(t reflect.Type, fields []reflectField) []typemap.Refinement {
+func extractRefinements(t reflect.Type, fields []typemap.Field) []typemap.Refinement {
 	// Build Go field name → JSON name map from the struct (including promoted fields).
 	goToJSON := map[string]string{}
 	for f := range t.Fields() {
@@ -497,8 +449,8 @@ func extractRefinements(t reflect.Type, fields []reflectField) []typemap.Refinem
 	}
 
 	var refs []typemap.Refinement
-	for _, rf := range fields {
-		for _, rule := range rf.validate {
+	for _, field := range fields {
+		for _, rule := range field.Validate {
 			op, ok := typemap.CrossFieldOp(rule.Tag)
 			if !ok {
 				continue
@@ -508,7 +460,7 @@ func extractRefinements(t reflect.Type, fields []reflectField) []typemap.Refinem
 				continue // referenced field not found
 			}
 			refs = append(refs, typemap.Refinement{
-				Field: rf.name, Op: op, OtherField: otherJSON, Tag: rule.Tag,
+				Field: field.Name, Op: op, OtherField: otherJSON, Tag: rule.Tag,
 			})
 		}
 	}
@@ -550,7 +502,7 @@ func inlineStructTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflec
 		if hasTSTag && tstag.Readonly {
 			prefix = "readonly "
 		}
-		parts = append(parts, fmt.Sprintf("%s%s%s: %s", prefix, jsonName, opt, tsType))
+		parts = append(parts, fmt.Sprintf("%s%s%s: %s", prefix, typemap.QuotePropName(jsonName), opt, tsType))
 	}
 	if len(parts) == 0 {
 		return "Record<string, never>"
@@ -587,37 +539,6 @@ func resolveDisplayNames(defs map[string]*reflectDef) map[string]string {
 		}
 	}
 	return display
-}
-
-// resolveTypeTokens replaces all \x00key\x00 tokens in s with display names.
-func resolveTypeTokens(s string, display map[string]string) string {
-	if !strings.ContainsRune(s, '\x00') {
-		return s
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	for {
-		start := strings.IndexByte(s, '\x00')
-		if start < 0 {
-			b.WriteString(s)
-			break
-		}
-		b.WriteString(s[:start])
-		s = s[start+1:]
-		end := strings.IndexByte(s, '\x00')
-		if end < 0 {
-			b.WriteByte('\x00')
-			continue
-		}
-		key := s[:end]
-		if name, ok := display[key]; ok {
-			b.WriteString(name)
-		} else {
-			b.WriteString(key)
-		}
-		s = s[end+1:]
-	}
-	return b.String()
 }
 
 // reflectGoKind returns a Go kind string for Zod type discrimination.

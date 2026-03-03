@@ -78,37 +78,37 @@ func TypeID(obj types.Object) string {
 	return obj.Name()
 }
 
-// tokenDelim is the delimiter used to wrap type IDs in token strings.
+// TokenDelim is the delimiter used to wrap type IDs in token strings.
 // The § character cannot appear in valid Go identifiers or TS type strings.
-const tokenDelim = "§"
+const TokenDelim = "§"
 
 // typeToken creates a resolvable token string for a named type.
 // Tokens preserve type identity through string composition (arrays, generics, etc.).
 func (m *Mapper) typeToken(id, shortName string) string {
 	m.names[id] = shortName
 	m.resolved = nil // invalidate cache
-	return tokenDelim + id + tokenDelim
+	return TokenDelim + id + TokenDelim
 }
 
-// resolveTokens replaces all §id§ tokens in s with display names.
-func resolveTokens(s string, display map[string]string) string {
-	if !strings.Contains(s, tokenDelim) {
+// ResolveTokens replaces all §id§ tokens in s with display names.
+func ResolveTokens(s string, display map[string]string) string {
+	if !strings.Contains(s, TokenDelim) {
 		return s
 	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for {
-		start := strings.Index(s, tokenDelim)
+		start := strings.Index(s, TokenDelim)
 		if start < 0 {
 			b.WriteString(s)
 			break
 		}
 		b.WriteString(s[:start])
-		s = s[start+len(tokenDelim):]
-		end := strings.Index(s, tokenDelim)
+		s = s[start+len(TokenDelim):]
+		end := strings.Index(s, TokenDelim)
 		if end < 0 {
 			// Malformed token — write delimiter and continue.
-			b.WriteString(tokenDelim)
+			b.WriteString(TokenDelim)
 			continue
 		}
 		id := s[:end]
@@ -118,7 +118,7 @@ func resolveTokens(s string, display map[string]string) string {
 			// Unknown token — keep as-is for debugging.
 			b.WriteString(id)
 		}
-		s = s[end+len(tokenDelim):]
+		s = s[end+len(TokenDelim):]
 	}
 	return b.String()
 }
@@ -158,7 +158,7 @@ func (m *Mapper) displayNames() map[string]string {
 // Resolve resolves type tokens in a string to display names.
 // Used by codegen to resolve ProcEntry InputTS/OutputTS.
 func (m *Mapper) Resolve(s string) string {
-	return resolveTokens(s, m.displayNames())
+	return ResolveTokens(s, m.displayNames())
 }
 
 // NewMapper creates a Mapper. Pass nil for metas if no AST metadata is available.
@@ -186,15 +186,15 @@ func (m *Mapper) Defs() []TypeDef {
 		}
 		// Resolve tokens in field types.
 		for i := range d.Fields {
-			d.Fields[i].Type = resolveTokens(d.Fields[i].Type, display)
+			d.Fields[i].Type = ResolveTokens(d.Fields[i].Type, display)
 		}
 		// Resolve tokens in extends clause.
 		for i := range d.Extends {
-			d.Extends[i] = resolveTokens(d.Extends[i], display)
+			d.Extends[i] = ResolveTokens(d.Extends[i], display)
 		}
 		// Resolve tokens in alias target.
 		if d.AliasOf != "" {
-			d.AliasOf = resolveTokens(d.AliasOf, display)
+			d.AliasOf = ResolveTokens(d.AliasOf, display)
 		}
 		result = append(result, d)
 	}
@@ -248,17 +248,17 @@ func (m *Mapper) convert(t types.Type) string {
 					args = append(args, m.convert(t0))
 				}
 				originID := TypeID(t.Origin().Obj())
-				m.resolveGenericStruct(originID, name, t.Origin())
+				m.resolveStructDef(originID, name, t.Origin())
 				return fmt.Sprintf("%s<%s>", m.typeToken(originID, name), strings.Join(args, ", "))
 			}
 
 			// Generic definition: Foo[T any] — extract type params.
 			if t.TypeParams() != nil && t.TypeParams().Len() > 0 {
-				m.resolveGenericStruct(id, name, t)
+				m.resolveStructDef(id, name, t)
 				return m.typeToken(id, name)
 			}
 
-			m.resolveStruct(id, name, t)
+			m.resolveStructDef(id, name, t)
 			return m.typeToken(id, name)
 		}
 
@@ -346,37 +346,19 @@ func basicToTS(t *types.Basic) string {
 	}
 }
 
-// resolveStruct registers a named struct type as a TypeScript interface.
-func (m *Mapper) resolveStruct(id, name string, named *types.Named) {
-	if m.seen[id] {
-		return
-	}
-	m.seen[id] = true
-
-	st := named.Underlying().(*types.Struct)
-	meta := m.metas[id]
-	def := TypeDef{
-		ID:      id,
-		PkgPath: pkgPath(named.Obj()),
-		PkgName: pkgName(named.Obj()),
-		Name:    name,
-		Kind:    TypeDefInterface,
-		Comment: meta.Comment,
-	}
-	m.collectFields(st, &def.Fields, &def.Extends, meta.FieldComments)
-	def.Refinements = extractStructRefinements(st, def.Fields)
-	m.defs[id] = def
-}
-
-func (m *Mapper) resolveGenericStruct(id, name string, named *types.Named) {
+// resolveStructDef registers a named struct type as a TypeScript interface.
+// Handles both generic and non-generic types.
+func (m *Mapper) resolveStructDef(id, name string, named *types.Named) {
 	if m.seen[id] {
 		return
 	}
 	m.seen[id] = true
 
 	var params []string
-	for tparam := range named.TypeParams().TypeParams() {
-		params = append(params, tparam.Obj().Name())
+	if tp := named.TypeParams(); tp != nil {
+		for tparam := range tp.TypeParams() {
+			params = append(params, tparam.Obj().Name())
+		}
 	}
 
 	st := named.Underlying().(*types.Struct)

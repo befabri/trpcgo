@@ -61,8 +61,7 @@ func parseRequest(r *http.Request, basePath string, isBatch bool, maxBodySize in
 			return nil, NewError(CodeBadRequest, "invalid procedure path")
 		}
 	}
-	results := make([]parsedRequest, len(paths))
-
+	var indexedInputs map[string]json.RawMessage
 	if r.Method == http.MethodGet {
 		// GET batch: input is a JSON object keyed by index in the query param.
 		// r.URL.Query().Get() already percent-decodes — do NOT call
@@ -71,35 +70,29 @@ func parseRequest(r *http.Request, basePath string, isBatch bool, maxBodySize in
 		if maxBodySize > 0 && int64(len(rawInput)) > maxBodySize {
 			return nil, NewError(CodePayloadTooLarge, "query input too large")
 		}
-		var indexedInputs map[string]json.RawMessage
 		if rawInput != "" {
 			if err := json.Unmarshal([]byte(rawInput), &indexedInputs); err != nil {
 				return nil, NewError(CodeParseError, "failed to parse batch input")
 			}
 		}
-		for i, path := range paths {
-			results[i] = parsedRequest{
-				path:  path,
-				input: indexedInputs[fmt.Sprintf("%d", i)],
-			}
-		}
 	} else {
-		// POST batch: body is a JSON object keyed by index
+		// POST batch: body is a JSON object keyed by index.
 		body, err := readBody(r, maxBodySize)
 		if err != nil {
 			return nil, err
 		}
-		var indexedInputs map[string]json.RawMessage
 		if len(body) > 0 {
 			if err := json.Unmarshal(body, &indexedInputs); err != nil {
 				return nil, NewError(CodeParseError, "failed to parse batch input")
 			}
 		}
-		for i, path := range paths {
-			results[i] = parsedRequest{
-				path:  path,
-				input: indexedInputs[fmt.Sprintf("%d", i)],
-			}
+	}
+
+	results := make([]parsedRequest, len(paths))
+	for i, path := range paths {
+		results[i] = parsedRequest{
+			path:  path,
+			input: indexedInputs[fmt.Sprintf("%d", i)],
 		}
 	}
 
