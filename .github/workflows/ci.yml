@@ -11,19 +11,15 @@ permissions:
 
 jobs:
   test:
-    name: Test (Go ${{ matrix.go-version }})
+    name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        go-version: ['1.26', 'stable']
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: stable
 
       - uses: actions/setup-node@v4
         with:
@@ -50,7 +46,5 @@ jobs:
           go-version: stable
 
       - run: go vet ./...
-
       - run: go install honnef.co/go/tools/cmd/staticcheck@latest && staticcheck ./...
-
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck ./...
