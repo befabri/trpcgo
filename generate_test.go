@@ -129,7 +129,7 @@ type WithPtrEmbed struct {
 
 type WithUnexported struct {
 	Public  string `json:"public"`
-	private string //nolint:unused // intentionally unexported for test
+	private string //lint:ignore U1000 intentionally unexported for test
 }
 
 type AllNumerics struct {
@@ -244,7 +244,7 @@ type FullEntity struct {
 type NoJSONTags struct {
 	PublicName  string
 	PublicCount int
-	privateVal  string //nolint:unused
+	privateVal  string //lint:ignore U1000 intentionally unexported for test
 }
 
 // Struct with all optional patterns — pointer, omitempty, omitzero, tstype required.
