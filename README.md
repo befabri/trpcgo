@@ -1,22 +1,40 @@
 # trpcgo
 
-Write Go structs and handlers, get TypeScript types automatically.
-
 > **Warning:** This project is under active development. APIs may change and things may break.
 
-```
-Go structs + handlers  →  trpcgo generate  →  TypeScript AppRouter + Zod schemas
-```
+trpcgo is a Go implementation of the [tRPC](https://trpc.io) protocol. You get the same end-to-end type safety as a TypeScript backend, but your server is written in Go. Define your API with Go structs and handlers, and trpcgo generates the TypeScript `AppRouter` type that plugs directly into `@trpc/client` and `@trpc/react-query`. No manual type syncing, no OpenAPI specs, no protobuf.
 
-trpcgo is a Go runtime library and code generator that gives you the tRPC developer experience: change a Go struct, save the file, and your TypeScript types update instantly. No manual type syncing, no OpenAPI specs, no protobuf.
+## Table of Contents
+
+- [Why](#why)
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [Procedure Types](#procedure-types)
+- [Router Options](#router-options)
+- [Middleware](#middleware)
+- [Errors](#errors)
+- [Server-Side Caller](#server-side-caller)
+- [Struct Tags](#struct-tags)
+- [CLI](#cli)
+- [Frontend Setup](#frontend-setup)
+- [Router Merging](#router-merging)
+- [How It Works](#how-it-works)
+- [Example](#example)
+- [Compatibility](#compatibility)
+
+## Why
+
+[tRPC](https://trpc.io) gives you end-to-end typesafe APIs: change a type on the server and TypeScript catches every broken call site at compile time. But tRPC requires a TypeScript server.
+
+trpcgo removes that constraint. Write your server in Go and still get the full tRPC developer experience on the frontend. Your TypeScript client code looks exactly the same as if the server were written in TypeScript.
 
 ## Install
 
 ```bash
-# Add to your Go module
+# Add the runtime library to your Go module
 go get github.com/befabri/trpcgo@latest
 
-# Install the CLI (Go 1.26+ tool directive)
+# Install the code generator (Go 1.26+ tool directive)
 # In your go.mod:
 tool github.com/befabri/trpcgo/cmd/trpcgo
 ```
@@ -66,7 +84,7 @@ func main() {
 
 ### 2. Generated TypeScript (automatic)
 
-**`trpc.ts`** — full AppRouter type:
+`trpc.ts` (full AppRouter type):
 
 ```typescript
 export interface CreateUserInput {
@@ -83,7 +101,7 @@ export interface User {
 export type AppRouter = { /* ... structural types matching @trpc/client */ };
 ```
 
-**`zod.ts`** — validation schemas from Go `validate` tags:
+`zod.ts` (validation schemas from Go `validate` tags):
 
 ```typescript
 import { z } from "zod";
@@ -94,7 +112,7 @@ export const CreateUserInputSchema = z.object({
 });
 ```
 
-### 3. Use in your frontend
+### 3. Use with @trpc/client
 
 ```typescript
 import { createTRPCReact } from "@trpc/react-query";
@@ -102,42 +120,44 @@ import type { AppRouter } from "../gen/trpc.js";
 
 export const trpc = createTRPCReact<AppRouter>();
 
-// Fully typed — input and output inferred from Go types
+// Fully typed: input and output inferred from Go types
 const mutation = trpc.user.create.useMutation();
 mutation.mutate({ name: "Alice", email: "alice@example.com" });
 ```
 
 ## Procedure Types
 
+trpcgo supports all tRPC procedure types: queries, mutations, and subscriptions.
+
 ```go
-// Query — read operation with typed input
+// Query (read, with input)
 trpcgo.Query(router, "user.getById", func(ctx context.Context, input GetUserInput) (User, error) {
     return db.FindUser(input.ID)
 })
 
-// VoidQuery — read operation with no input
+// VoidQuery (read, no input)
 trpcgo.VoidQuery(router, "system.health", func(ctx context.Context) (HealthInfo, error) {
     return HealthInfo{OK: true}, nil
 })
 
-// Mutation — write operation with typed input
+// Mutation (write, with input)
 trpcgo.Mutation(router, "user.create", func(ctx context.Context, input CreateUserInput) (User, error) {
     return db.CreateUser(input)
 })
 
-// VoidMutation — write operation with no input
+// VoidMutation (write, no input)
 trpcgo.VoidMutation(router, "system.reset", func(ctx context.Context) (string, error) {
     return "done", nil
 })
 
-// Subscribe — SSE subscription with typed input
+// Subscribe (SSE, with input)
 trpcgo.Subscribe(router, "chat.messages", func(ctx context.Context, input RoomInput) (<-chan Message, error) {
     ch := make(chan Message)
     // push messages to ch, close when ctx.Done()
     return ch, nil
 })
 
-// VoidSubscribe — SSE subscription with no input
+// VoidSubscribe (SSE, no input)
 trpcgo.VoidSubscribe(router, "user.onCreated", func(ctx context.Context) (<-chan User, error) {
     ch := make(chan User)
     // push to ch when users are created
@@ -238,40 +258,17 @@ trpcgo.NewErrorf(trpcgo.CodeBadRequest, "invalid id: %s", id)
 trpcgo.WrapError(trpcgo.CodeInternalServerError, "db failed", err)
 ```
 
-Error codes follow the tRPC/JSON-RPC convention:
-
-| Code | Name | HTTP Status |
-|------|------|-------------|
-| `-32700` | `CodeParseError` | 400 |
-| `-32600` | `CodeBadRequest` | 400 |
-| `-32603` | `CodeInternalServerError` | 500 |
-| `-32001` | `CodeUnauthorized` | 401 |
-| `-32003` | `CodeForbidden` | 403 |
-| `-32004` | `CodeNotFound` | 404 |
-| `-32005` | `CodeMethodNotSupported` | 405 |
-| `-32008` | `CodeTimeout` | 408 |
-| `-32009` | `CodeConflict` | 409 |
-| `-32012` | `CodePreconditionFailed` | 412 |
-| `-32013` | `CodePayloadTooLarge` | 413 |
-| `-32015` | `CodeUnsupportedMedia` | 415 |
-| `-32022` | `CodeUnprocessableContent` | 422 |
-| `-32028` | `CodePreconditionRequired` | 428 |
-| `-32029` | `CodeTooManyRequests` | 429 |
-| `-32099` | `CodeClientClosed` | 499 |
-| `-32501` | `CodeNotImplemented` | 501 |
-| `-32502` | `CodeBadGateway` | 502 |
-| `-32503` | `CodeServiceUnavailable` | 503 |
-| `-32504` | `CodeGatewayTimeout` | 504 |
+All standard tRPC error codes are available (`CodeNotFound`, `CodeUnauthorized`, `CodeTooManyRequests`, etc.) and map to the correct HTTP status codes.
 
 ## Server-Side Caller
 
 Call procedures from within your Go code, running the full middleware chain:
 
 ```go
-// Typed call — input/output marshaled automatically
+// Typed call, input/output marshaled automatically
 user, err := trpcgo.Call[CreateUserInput, User](router, ctx, "user.create", input)
 
-// Raw call — JSON in, any out
+// Raw call, JSON in, any out
 result, err := router.RawCall(ctx, path, jsonBytes)
 ```
 
@@ -304,7 +301,7 @@ type User struct {
 
 ### Validation
 
-`validate` tags (go-playground/validator) generate both server-side validation and Zod schemas:
+`validate` tags ([go-playground/validator](https://github.com/go-playground/validator)) generate both server-side validation and Zod schemas:
 
 ```go
 type Input struct {
@@ -350,11 +347,11 @@ go tool trpcgo generate -o ../web/gen/trpc.ts --zod ../web/gen/zod.ts -w
 
 ### Runtime watch (zero config)
 
-When you set `WithDev(true)` with `WithTypeOutput` (and optionally `WithZodOutput`) on the router, `Handler()` starts a file watcher automatically. Save a `.go` file anywhere in the project tree and types regenerate instantly — no separate process needed. Call `router.Close()` to stop the watcher on shutdown.
+When you set `WithDev(true)` with `WithTypeOutput` (and optionally `WithZodOutput`) on the router, `Handler()` starts a file watcher automatically. Save a `.go` file anywhere in the project tree and types regenerate instantly, no separate process needed. Call `router.Close()` to stop the watcher on shutdown.
 
 ## Frontend Setup
 
-### React Query (recommended)
+### React Query
 
 ```typescript
 // trpc.ts
@@ -410,41 +407,21 @@ if err := router.Merge(userRouter, adminRouter); err != nil {
 // or: router, err := trpcgo.MergeRouters(userRouter, adminRouter)
 ```
 
-## Example
-
-See [`examples/tanstack-query/`](examples/tanstack-query/) for a full working example with:
-
-- Go server with all procedure types (Query, VoidQuery, Mutation, VoidMutation, VoidSubscribe)
-- Global and per-procedure middleware
-- Input validation with go-playground/validator
-- Custom error formatter
-- Server-side caller (`trpcgo.Call`)
-- SSE subscriptions with live broadcasting
-- React frontend with TanStack Router + React Query
-- Pagination, Zod validation, real-time feed
-
-```bash
-# Start the Go server
-cd examples/tanstack-query/go-server
-go run .
-
-# In another terminal, start the frontend
-cd examples/tanstack-query/web
-npm install
-npm run dev
-```
-
 ## How It Works
 
-trpcgo has two code generation paths:
+trpcgo implements the [tRPC HTTP protocol](https://trpc.io/docs/rpc) in Go and provides two code generation paths:
 
-1. **Static analysis** (`trpcgo generate`) — reads Go source via `go/packages`, extracts types with full fidelity (comments, validate tags, const unions). This is what generates Zod schemas.
+1. **Static analysis** (`trpcgo generate`): reads Go source via `go/packages`, extracts types with full fidelity (comments, validate tags, const unions). This is what generates Zod schemas.
 
-2. **Runtime reflection** (`Router.GenerateTS`) — uses `reflect` to inspect registered procedure types at startup. Faster but less information (no comments, no validate tags).
+2. **Runtime reflection** (`Router.GenerateTS`): uses `reflect` to inspect registered procedure types at startup. Faster but less information (no comments, no validate tags).
 
-When you use `WithDev(true)` with `WithTypeOutput`, both paths run: reflection generates types immediately on startup, then a file watcher runs static analysis in the background and overwrites with the richer version. On subsequent file saves, only static analysis runs. In production, use `go generate` pre-build — the watcher only starts in dev mode.
+When you use `WithDev(true)` with `WithTypeOutput`, both paths run: reflection generates types immediately on startup, then a file watcher runs static analysis in the background and overwrites with the richer version. On subsequent file saves, only static analysis runs. In production, use `go generate` pre-build. The watcher only starts in dev mode.
 
-The file watcher is recursive — it watches all subdirectories and handles directory creation/removal automatically. Generated files are only written when content changes, avoiding spurious Vite HMR cycles.
+The file watcher is recursive. It watches all subdirectories and handles directory creation/removal automatically. Generated files are only written when content changes, avoiding spurious Vite HMR cycles.
+
+## Example
+
+See [`examples/tanstack-query/`](examples/tanstack-query/) for a full working example with a Go server and a React frontend using TanStack Router + React Query.
 
 ## Compatibility
 
@@ -452,12 +429,9 @@ The file watcher is recursive — it watches all subdirectories and handles dire
 
 **tRPC client:** Works with `@trpc/client` v11 and `@trpc/react-query` v11. The generated `AppRouter` type imports from `@trpc/server` (which is a dependency of `@trpc/client`).
 
-**CORS:** trpcgo does not handle CORS. Use middleware from your HTTP router or a dedicated package (e.g. `rs/cors`). A typical setup wraps the trpcgo handler:
+**HTTP:** Pure `net/http`, no framework dependency. Works with any Go router or middleware.
 
-```go
-handler := cors.Default().Handler(router.Handler("/trpc"))
-http.ListenAndServe(":8080", handler)
-```
+**CORS:** trpcgo does not handle CORS. Use middleware from your HTTP router or a dedicated package (e.g. `rs/cors`).
 
 ## License
 
