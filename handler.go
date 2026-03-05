@@ -9,9 +9,9 @@ import (
 )
 
 type httpHandler struct {
-	router     *Router                // kept for executeProcedure (shared with RawCall)
-	procedures map[string]*procedure  // frozen snapshot — no lock on the hot path
-	opts       *routerOptions         // pointer to router's opts (immutable after construction)
+	router     *Router               // kept for executeProcedure (shared with RawCall)
+	procedures map[string]*procedure // frozen snapshot — no lock on the hot path
+	opts       *routerOptions        // pointer to router's opts (immutable after construction)
 	basePath   string
 }
 
@@ -122,8 +122,20 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				formatError: func(sseErr *Error) any {
 					return formatError(h.opts, sseErr, path, sseInput, ctx, ProcedureSubscription)
 				},
+				onError: func(sseErr *Error) {
+					if h.opts.onError != nil {
+						h.opts.onError(ctx, sseErr, path)
+					}
+				},
 			}); err != nil {
-				h.writeErrorResponse(w, NewError(CodeInternalServerError, err.Error()), "", ctx, "")
+				if h.opts.onError != nil {
+					if trpcErr, ok := errors.AsType[*Error](err); ok {
+						h.opts.onError(ctx, trpcErr, path)
+					} else {
+						h.opts.onError(ctx, WrapError(CodeInternalServerError, "internal server error", err), path)
+					}
+				}
+				h.writeErrorResponse(w, sanitizeReturnedError(err), "", ctx, "")
 			}
 			return
 		}

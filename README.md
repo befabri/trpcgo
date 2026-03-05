@@ -334,6 +334,42 @@ type User struct {
 }
 ```
 
+### Output Parsing
+
+Use output parsing when a procedure should validate or transform its handler result before it is sent.
+
+- `OutputParser[O, P]` is the typed form and updates generated output types to `P`.
+- `WithOutputParser(func(any) (any, error))` is the builder-friendly untyped form; codegen falls back to `unknown` unless a typed `OutputParser` override is present.
+
+```go
+// Typed: validate or transform the output
+trpcgo.MustQuery(router, "user.get", getUser,
+    trpcgo.OutputParser(func(u User) (User, error) {
+        if u.ID == "" { return User{}, errors.New("id required") }
+        return u, nil
+    }),
+)
+
+// Typed — transform (strip sensitive fields before sending to client)
+type PublicUser struct { ID string `json:"id"` }
+trpcgo.MustQuery(router, "user.get", getUser,
+    trpcgo.OutputParser(func(u User) (PublicUser, error) {
+        return PublicUser{ID: u.ID}, nil
+    }),
+)
+
+// Untyped: useful on reusable builders
+authedProcedure := trpcgo.Procedure().Use(authMW).
+    WithOutputParser(func(v any) (any, error) {
+        // validate or transform v
+        return v, nil
+    })
+```
+
+Parser failures return `INTERNAL_SERVER_ERROR`. Clients and `WithErrorFormatter(...)` see a generic `internal server error`, while `WithOnError(...)` still receives the original wrapped cause for logging.
+
+For subscriptions, the parser runs on each emitted item before `TrackedEvent` unwrapping. If it fails, the server sends a `serialized-error` SSE event and closes the stream.
+
 ### Validation
 
 `validate` tags ([go-playground/validator](https://github.com/go-playground/validator)) generate both server-side validation and Zod schemas:
