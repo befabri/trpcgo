@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -317,9 +319,9 @@ type ZodCreateItemInput struct {
 }
 
 type ZodOptionalInput struct {
-	Query  string  `json:"query,omitempty"`
-	Limit  *int    `json:"limit"`
-	Offset int     `json:"offset"`
+	Query  string `json:"query,omitempty"`
+	Limit  *int   `json:"limit"`
+	Offset int    `json:"offset"`
 }
 
 // Zod extends fixture types.
@@ -408,6 +410,16 @@ type ZodNewTagsInput struct {
 	Path    string `json:"path" validate:"contains=/api/"`
 }
 
+// Output-parser drift fixtures.
+type DriftPrivateUser struct {
+	ID          string `json:"id"`
+	SecretToken string `json:"secretToken"`
+}
+
+type DriftPublicUser struct {
+	ID string `json:"id"`
+}
+
 // ---------- helpers ----------
 
 func generateTS(t *testing.T, r *trpcgo.Router) string {
@@ -457,6 +469,81 @@ func symlinkNodeModules(t *testing.T, dir string) {
 	}
 	if err := os.Symlink(src, filepath.Join(dir, "node_modules")); err != nil {
 		t.Fatalf("symlink node_modules: %v", err)
+	}
+}
+
+func TestOutputParserTransformTypegenDriftTS(t *testing.T) {
+	r := trpcgo.NewRouter()
+
+	trpcgo.MustVoidQuery(r, "user.get", func(_ context.Context) (DriftPrivateUser, error) {
+		return DriftPrivateUser{ID: "u1", SecretToken: "top-secret"}, nil
+	}, trpcgo.OutputParser(func(u DriftPrivateUser) (any, error) {
+		return DriftPublicUser{ID: u.ID}, nil
+	}))
+
+	// Runtime behavior: parser strips secretToken.
+	resp := mustGet(t, newTestServer(t, r.Handler("/trpc")), "/trpc/user.get")
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	result, ok := body["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("result shape = %T, want object", body["result"])
+	}
+	data, ok := result["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("result.data shape = %T, want object", result["data"])
+	}
+	if _, exists := data["secretToken"]; exists {
+		t.Fatalf("runtime leak: secretToken should be stripped, got data=%v", data)
+	}
+
+	// Type contract expectation: codegen should follow the post-parser shape and
+	// therefore must not expose stripped fields.
+	ts := generateTS(t, r)
+	if strings.Contains(ts, "secretToken: string") {
+		t.Fatalf("generated TS leaked stripped field secretToken; expected output contract to match parser-transformed shape:\n%s", ts)
+	}
+}
+
+func TestOutputParserTransformTypegenDriftSubscriptionTS(t *testing.T) {
+	r := trpcgo.NewRouter()
+
+	trpcgo.MustVoidSubscribe(r, "user.stream", func(_ context.Context) (<-chan DriftPrivateUser, error) {
+		ch := make(chan DriftPrivateUser, 1)
+		ch <- DriftPrivateUser{ID: "u1", SecretToken: "top-secret"}
+		close(ch)
+		return ch, nil
+	}, trpcgo.OutputParser(func(u DriftPrivateUser) (any, error) {
+		return DriftPublicUser{ID: u.ID}, nil
+	}))
+
+	// Runtime behavior: parser strips secretToken from emitted subscription items.
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp, err := http.Get(server.URL + "/trpc/user.stream")
+	if err != nil {
+		t.Fatalf("subscription request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "secretToken") {
+		t.Fatalf("runtime leak: secretToken should be stripped from SSE payload, got:\n%s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, `"id":"u1"`) {
+		t.Fatalf("missing transformed SSE item in body:\n%s", bodyStr)
+	}
+
+	// Type contract expectation: codegen should follow parser output shape for
+	// subscription items as well.
+	ts := generateTS(t, r)
+	if strings.Contains(ts, "secretToken: string") {
+		t.Fatalf("generated TS leaked stripped field secretToken for subscription output; expected parser-transformed contract:\n%s", ts)
 	}
 }
 
@@ -2375,12 +2462,12 @@ func TestGenerateZodNewTags(t *testing.T) {
 
 	// Format tags → base types.
 	checks := map[string]string{
-		"host":    "z.hostname()",
-		"token":   "z.base64url()",
-		"id":      "z.ulid()",
-		"mac":     "z.mac()",
-		"subnet":  "z.cidrv4()",
-		"code":    "z.uppercase()",
+		"host":   "z.hostname()",
+		"token":  "z.base64url()",
+		"id":     "z.ulid()",
+		"mac":    "z.mac()",
+		"subnet": "z.cidrv4()",
+		"code":   "z.uppercase()",
 	}
 	for field, base := range checks {
 		if !strings.Contains(zod, field+": "+base) {
