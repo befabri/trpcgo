@@ -567,6 +567,178 @@ func TestZodTypeNumeric(t *testing.T) {
 	}
 }
 
+func TestZodOneofEnum(t *testing.T) {
+	tests := []struct {
+		name  string
+		field Field
+		want  string
+	}{
+		{
+			name: "string oneof → z.enum",
+			field: Field{
+				Name:   "role",
+				Type:   "string",
+				GoKind: "string",
+				Validate: []ValidateRule{
+					{Tag: "oneof", Param: "admin editor viewer"},
+				},
+			},
+			want: `z.enum(["admin", "editor", "viewer"])`,
+		},
+		{
+			name: "int oneof → z.union of literals",
+			field: Field{
+				Name:   "status",
+				Type:   "number",
+				GoKind: "int",
+				Validate: []ValidateRule{
+					{Tag: "oneof", Param: "1 2 3"},
+				},
+			},
+			want: "z.union([z.literal(1), z.literal(2), z.literal(3)])",
+		},
+		{
+			name: "int32 oneof → z.union of literals",
+			field: Field{
+				Name:   "code",
+				Type:   "number",
+				GoKind: "int32",
+				Validate: []ValidateRule{
+					{Tag: "oneof", Param: "100 200 404"},
+				},
+			},
+			want: "z.union([z.literal(100), z.literal(200), z.literal(404)])",
+		},
+		{
+			name: "uint oneof → z.union of literals",
+			field: Field{
+				Name:   "priority",
+				Type:   "number",
+				GoKind: "uint",
+				Validate: []ValidateRule{
+					{Tag: "oneof", Param: "0 1 2"},
+				},
+			},
+			want: "z.union([z.literal(0), z.literal(1), z.literal(2)])",
+		},
+		{
+			name: "float64 oneof → z.union of literals",
+			field: Field{
+				Name:   "ratio",
+				Type:   "number",
+				GoKind: "float64",
+				Validate: []ValidateRule{
+					{Tag: "oneof", Param: "0.5 1.0 2.0"},
+				},
+			},
+			want: "z.union([z.literal(0.5), z.literal(1.0), z.literal(2.0)])",
+		},
+		{
+			name: "string oneof optional",
+			field: Field{
+				Name:     "level",
+				Type:     "string",
+				GoKind:   "string",
+				Optional: true,
+				Validate: []ValidateRule{
+					{Tag: "oneof", Param: "low high"},
+				},
+			},
+			want: `z.enum(["low", "high"]).optional()`,
+		},
+		{
+			name: "int oneof optional",
+			field: Field{
+				Name:     "tier",
+				Type:     "number",
+				GoKind:   "int",
+				Optional: true,
+				Validate: []ValidateRule{
+					{Tag: "oneof", Param: "1 2 3"},
+				},
+			},
+			want: "z.union([z.literal(1), z.literal(2), z.literal(3)]).optional()",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ZodType(tt.field, ZodStandard)
+			if got != tt.want {
+				t.Errorf("ZodType = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestZodOneofEnumMini(t *testing.T) {
+	tests := []struct {
+		name  string
+		field Field
+		want  string
+	}{
+		{
+			name: "string oneof mini",
+			field: Field{
+				Name:   "role",
+				Type:   "string",
+				GoKind: "string",
+				Validate: []ValidateRule{
+					{Tag: "oneof", Param: "admin editor"},
+				},
+			},
+			want: `z.enum(["admin", "editor"])`,
+		},
+		{
+			name: "int oneof mini",
+			field: Field{
+				Name:   "status",
+				Type:   "number",
+				GoKind: "int",
+				Validate: []ValidateRule{
+					{Tag: "oneof", Param: "1 2 3"},
+				},
+			},
+			want: "z.union([z.literal(1), z.literal(2), z.literal(3)])",
+		},
+		{
+			name: "int oneof optional mini",
+			field: Field{
+				Name:     "tier",
+				Type:     "number",
+				GoKind:   "int",
+				Optional: true,
+				Validate: []ValidateRule{
+					{Tag: "oneof", Param: "1 2 3"},
+				},
+			},
+			want: "z.optional(z.union([z.literal(1), z.literal(2), z.literal(3)]))",
+		},
+		{
+			name: "string oneof optional mini",
+			field: Field{
+				Name:     "level",
+				Type:     "string",
+				GoKind:   "string",
+				Optional: true,
+				Validate: []ValidateRule{
+					{Tag: "oneof", Param: "low high"},
+				},
+			},
+			want: `z.optional(z.enum(["low", "high"]))`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ZodType(tt.field, ZodMini)
+			if got != tt.want {
+				t.Errorf("ZodType(ZodMini) = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCollisionRename(t *testing.T) {
 	authPkg := types.NewPackage("github.com/app/auth", "auth")
 	modelsPkg := types.NewPackage("github.com/app/models", "models")

@@ -131,10 +131,18 @@ func zodBaseFromKindAndType(tsType, goKind string, rules []ValidateRule) string 
 		}
 	}
 
-	// Check for oneof — becomes z.enum() replacing the base entirely.
+	// Check for oneof — becomes z.enum() for strings, z.union([z.literal()]) for numbers.
+	// z.enum() is string-only in Zod 4; numeric oneofs need z.literal() inside z.union().
 	for _, rule := range rules {
 		if rule.Tag == "oneof" && rule.Param != "" {
 			values := strings.Fields(rule.Param)
+			if isNumericKind(goKind) {
+				lits := make([]string, len(values))
+				for i, v := range values {
+					lits[i] = "z.literal(" + v + ")"
+				}
+				return fmt.Sprintf("z.union([%s])", strings.Join(lits, ", "))
+			}
 			quoted := make([]string, len(values))
 			for i, v := range values {
 				quoted[i] = fmt.Sprintf("%q", v)
@@ -444,4 +452,15 @@ func isStringBase(base string) bool {
 		base == "z.mac()" ||
 		base == "z.cidrv4()" ||
 		base == "z.cidrv6()"
+}
+
+// isNumericKind reports whether a Go kind string represents a numeric type.
+func isNumericKind(goKind string) bool {
+	switch goKind {
+	case "int", "int8", "int16", "int32", "int64",
+		"uint", "uint8", "uint16", "uint32", "uint64",
+		"float32", "float64":
+		return true
+	}
+	return false
 }
