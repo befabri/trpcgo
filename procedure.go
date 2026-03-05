@@ -22,14 +22,15 @@ type HandlerFunc func(ctx context.Context, input any) (any, error)
 
 // procedure is an internal registration entry.
 type procedure struct {
-	typ            ProcedureType
-	handler        HandlerFunc
-	wrappedHandler HandlerFunc // pre-computed: middleware chain around handler
-	middleware     []Middleware
-	meta           any
-	inputType      reflect.Type
-	outputType     reflect.Type
-	outputParser   func(any) (any, error)
+	typ             ProcedureType
+	handler         HandlerFunc
+	wrappedHandler  HandlerFunc // pre-computed: middleware chain around handler
+	middleware      []Middleware
+	meta            any
+	inputType       reflect.Type
+	outputType      reflect.Type
+	outputValidator func(any) error
+	outputParser    func(any) (any, error)
 }
 
 // ProcedureOption configures a single procedure registration.
@@ -47,6 +48,7 @@ func (f procedureOptionFunc) applyProcedureOption(c *procedureConfig) { f(c) }
 type procedureConfig struct {
 	middleware       []Middleware
 	meta             any
+	outputValidator  func(any) error
 	outputParser     func(any) (any, error)
 	parsedOutputType reflect.Type // non-nil when OutputParser[O,P] provides a concrete P
 }
@@ -75,6 +77,43 @@ func Use(mw ...Middleware) ProcedureOption {
 func WithMeta(meta any) ProcedureOption {
 	return procedureOptionFunc(func(c *procedureConfig) {
 		c.meta = meta
+	})
+}
+
+// WithOutputValidator sets a per-procedure output validator. The validator is
+// called with the handler's return value after a successful handler call. It may
+// reject invalid outputs but cannot transform them. If the validator returns an
+// error, the client receives an INTERNAL_SERVER_ERROR. For subscriptions, the
+// validator runs on each emitted item before any output parser.
+//
+// Use [OutputValidator] for a typed alternative.
+func WithOutputValidator(fn func(any) error) ProcedureOption {
+	return procedureOptionFunc(func(c *procedureConfig) {
+		c.outputValidator = fn
+	})
+}
+
+// OutputValidator creates a typed per-procedure output validator. The function
+// receives the exact output type O and returns an error if the output is
+// invalid. It cannot transform the value and does not affect generated output
+// types. If the validator returns an error the client receives an
+// INTERNAL_SERVER_ERROR.
+//
+// For subscriptions where O = [TrackedEvent][T], the validator receives the
+// full TrackedEvent before unwrapping, so the validator type should also be
+// [TrackedEvent][T]. The type assertion is checked at runtime:
+// if the output value cannot be asserted to O the validator returns
+// INTERNAL_SERVER_ERROR rather than panicking.
+func OutputValidator[O any](fn func(O) error) ProcedureOption {
+	oType := reflect.TypeFor[O]()
+	return procedureOptionFunc(func(c *procedureConfig) {
+		c.outputValidator = func(v any) error {
+			typed, err := coerceOutputValue[O](v, oType)
+			if err != nil {
+				return err
+			}
+			return fn(typed)
+		}
 	})
 }
 
@@ -119,20 +158,28 @@ func OutputParser[O, P any](fn func(O) (P, error)) ProcedureOption {
 	return procedureOptionFunc(func(c *procedureConfig) {
 		c.parsedOutputType = reflect.TypeFor[P]()
 		c.outputParser = func(v any) (any, error) {
-			if v == nil {
-				var zero O
-				if oType != nil && isNilAssignable(oType) {
-					return fn(zero)
-				}
-				return nil, fmt.Errorf("output type mismatch: expected %T, got %T", *new(O), v)
-			}
-			typed, ok := v.(O)
-			if !ok {
-				return nil, fmt.Errorf("output type mismatch: expected %T, got %T", *new(O), v)
+			typed, err := coerceOutputValue[O](v, oType)
+			if err != nil {
+				return nil, err
 			}
 			return fn(typed)
 		}
 	})
+}
+
+func coerceOutputValue[O any](v any, oType reflect.Type) (O, error) {
+	var zero O
+	if v == nil {
+		if oType != nil && isNilAssignable(oType) {
+			return zero, nil
+		}
+		return zero, fmt.Errorf("output type mismatch: expected %T, got %T", *new(O), v)
+	}
+	typed, ok := v.(O)
+	if !ok {
+		return zero, fmt.Errorf("output type mismatch: expected %T, got %T", *new(O), v)
+	}
+	return typed, nil
 }
 
 func isNilAssignable(t reflect.Type) bool {
@@ -188,7 +235,7 @@ func (b *ProcedureBuilder) WithMeta(meta any) *ProcedureBuilder {
 
 // With returns a new [ProcedureBuilder] with the given options appended.
 // Unlike [Use] (middleware-only), With accepts any [ProcedureOption], including
-// [OutputParser]. The receiver is not modified.
+// [OutputValidator] and [OutputParser]. The receiver is not modified.
 //
 // [trpcgo generate] can discover [OutputParser] calls passed directly to With.
 // [WithOutputParser] (untyped) degrades codegen to unknown — use a typed
@@ -197,6 +244,15 @@ func (b *ProcedureBuilder) With(opts ...ProcedureOption) *ProcedureBuilder {
 	next := make([]ProcedureOption, len(b.opts)+len(opts))
 	copy(next, b.opts)
 	copy(next[len(b.opts):], opts)
+	return &ProcedureBuilder{opts: next}
+}
+
+// WithOutputValidator returns a new [ProcedureBuilder] with an untyped output
+// validator set. The receiver is not modified.
+func (b *ProcedureBuilder) WithOutputValidator(fn func(any) error) *ProcedureBuilder {
+	next := make([]ProcedureOption, len(b.opts)+1)
+	copy(next, b.opts)
+	next[len(b.opts)] = WithOutputValidator(fn)
 	return &ProcedureBuilder{opts: next}
 }
 

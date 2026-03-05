@@ -334,14 +334,24 @@ type User struct {
 }
 ```
 
-### Output Parsing
+### Output Validation And Parsing
 
-Use output parsing when a procedure should validate or transform its handler result before it is sent.
+Use output hooks when a procedure should validate or transform its handler result before it is sent.
 
+- `OutputValidator[O]` validates the handler output without changing its type.
+- `WithOutputValidator(func(any) error)` is the builder-friendly untyped validator form.
 - `OutputParser[O, P]` is the typed form and updates generated output types to `P`.
 - `WithOutputParser(func(any) (any, error))` is the builder-friendly untyped form; codegen falls back to `unknown` unless a typed `OutputParser` override is present.
 
 ```go
+// Typed: validate only
+trpcgo.MustQuery(router, "user.get", getUser,
+    trpcgo.OutputValidator(func(u User) error {
+        if u.ID == "" { return errors.New("id required") }
+        return nil
+    }),
+)
+
 // Typed: validate or transform the output
 trpcgo.MustQuery(router, "user.get", getUser,
     trpcgo.OutputParser(func(u User) (User, error) {
@@ -360,6 +370,9 @@ trpcgo.MustQuery(router, "user.get", getUser,
 
 // Untyped: useful on reusable builders
 authedProcedure := trpcgo.Procedure().Use(authMW).
+    WithOutputValidator(func(v any) error {
+        return nil
+    }).
     WithOutputParser(func(v any) (any, error) {
         // validate or transform v
         return v, nil
@@ -368,7 +381,7 @@ authedProcedure := trpcgo.Procedure().Use(authMW).
 
 Parser failures return `INTERNAL_SERVER_ERROR`. Clients and `WithErrorFormatter(...)` see a generic `internal server error`, while `WithOnError(...)` still receives the original wrapped cause for logging.
 
-For subscriptions, the parser runs on each emitted item before `TrackedEvent` unwrapping. If it fails, the server sends a `serialized-error` SSE event and closes the stream.
+When both are present, the output validator runs before the output parser. For subscriptions, both run on each emitted item before `TrackedEvent` unwrapping. If either fails, the server sends a `serialized-error` SSE event and closes the stream.
 
 ### Validation
 

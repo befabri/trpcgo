@@ -24,42 +24,42 @@ func effectiveOutputType(handlerOut reflect.Type, cfg procedureConfig) reflect.T
 // Returns an error if path is already registered.
 func Query[I any, O any](r *Router, path string, fn func(ctx context.Context, input I) (O, error), opts ...ProcedureOption) error {
 	cfg := collectProcedureConfig(opts)
-	return r.register(path, ProcedureQuery, makeHandler(fn), cfg.middleware, cfg.meta, reflect.TypeFor[I](), effectiveOutputType(reflect.TypeFor[O](), cfg), cfg.outputParser)
+	return r.register(path, ProcedureQuery, makeHandler(fn), cfg.middleware, cfg.meta, reflect.TypeFor[I](), effectiveOutputType(reflect.TypeFor[O](), cfg), cfg.outputValidator, cfg.outputParser)
 }
 
 // VoidQuery registers a query procedure with no input.
 // Returns an error if path is already registered.
 func VoidQuery[O any](r *Router, path string, fn func(ctx context.Context) (O, error), opts ...ProcedureOption) error {
 	cfg := collectProcedureConfig(opts)
-	return r.register(path, ProcedureQuery, makeVoidHandler(fn), cfg.middleware, cfg.meta, nil, effectiveOutputType(reflect.TypeFor[O](), cfg), cfg.outputParser)
+	return r.register(path, ProcedureQuery, makeVoidHandler(fn), cfg.middleware, cfg.meta, nil, effectiveOutputType(reflect.TypeFor[O](), cfg), cfg.outputValidator, cfg.outputParser)
 }
 
 // Mutation registers a mutation procedure.
 // Returns an error if path is already registered.
 func Mutation[I any, O any](r *Router, path string, fn func(ctx context.Context, input I) (O, error), opts ...ProcedureOption) error {
 	cfg := collectProcedureConfig(opts)
-	return r.register(path, ProcedureMutation, makeHandler(fn), cfg.middleware, cfg.meta, reflect.TypeFor[I](), effectiveOutputType(reflect.TypeFor[O](), cfg), cfg.outputParser)
+	return r.register(path, ProcedureMutation, makeHandler(fn), cfg.middleware, cfg.meta, reflect.TypeFor[I](), effectiveOutputType(reflect.TypeFor[O](), cfg), cfg.outputValidator, cfg.outputParser)
 }
 
 // VoidMutation registers a mutation procedure with no input.
 // Returns an error if path is already registered.
 func VoidMutation[O any](r *Router, path string, fn func(ctx context.Context) (O, error), opts ...ProcedureOption) error {
 	cfg := collectProcedureConfig(opts)
-	return r.register(path, ProcedureMutation, makeVoidHandler(fn), cfg.middleware, cfg.meta, nil, effectiveOutputType(reflect.TypeFor[O](), cfg), cfg.outputParser)
+	return r.register(path, ProcedureMutation, makeVoidHandler(fn), cfg.middleware, cfg.meta, nil, effectiveOutputType(reflect.TypeFor[O](), cfg), cfg.outputValidator, cfg.outputParser)
 }
 
 // Subscribe registers a subscription procedure.
 // Returns an error if path is already registered.
 func Subscribe[I any, O any](r *Router, path string, fn func(ctx context.Context, input I) (<-chan O, error), opts ...ProcedureOption) error {
 	cfg := collectProcedureConfig(opts)
-	return r.register(path, ProcedureSubscription, makeStreamHandler(fn), cfg.middleware, cfg.meta, reflect.TypeFor[I](), effectiveOutputType(reflect.TypeFor[O](), cfg), cfg.outputParser)
+	return r.register(path, ProcedureSubscription, makeStreamHandler(fn), cfg.middleware, cfg.meta, reflect.TypeFor[I](), effectiveOutputType(reflect.TypeFor[O](), cfg), cfg.outputValidator, cfg.outputParser)
 }
 
 // VoidSubscribe registers a subscription procedure with no input.
 // Returns an error if path is already registered.
 func VoidSubscribe[O any](r *Router, path string, fn func(ctx context.Context) (<-chan O, error), opts ...ProcedureOption) error {
 	cfg := collectProcedureConfig(opts)
-	return r.register(path, ProcedureSubscription, makeVoidStreamHandler(fn), cfg.middleware, cfg.meta, nil, effectiveOutputType(reflect.TypeFor[O](), cfg), cfg.outputParser)
+	return r.register(path, ProcedureSubscription, makeVoidStreamHandler(fn), cfg.middleware, cfg.meta, nil, effectiveOutputType(reflect.TypeFor[O](), cfg), cfg.outputValidator, cfg.outputParser)
 }
 
 // MustQuery is like Query but panics if registration fails.

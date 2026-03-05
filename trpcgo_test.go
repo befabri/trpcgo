@@ -3791,6 +3791,31 @@ func TestMergePreservesMeta(t *testing.T) {
 	}
 }
 
+func TestMergePreservesOutputValidator(t *testing.T) {
+	sub := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(sub, "user", func(ctx context.Context) (User, error) {
+		return User{}, nil
+	}, trpcgo.OutputValidator(func(u User) error {
+		if u.ID == "" {
+			return fmt.Errorf("id required")
+		}
+		return nil
+	}))
+
+	main := trpcgo.NewRouter()
+	if err := main.Merge(sub); err != nil {
+		t.Fatal(err)
+	}
+
+	server := newTestServer(t, main.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/user")
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+}
+
 func TestMergeEmptyRouters(t *testing.T) {
 	r1 := trpcgo.NewRouter()
 	r2 := trpcgo.NewRouter()
@@ -4885,7 +4910,459 @@ func TestProcedureBuilderContainsNilOptionIgnored(t *testing.T) {
 	}
 }
 
-// ---- OutputParser tests ----
+// ---- Output validation and parsing tests ----
+
+func TestOutputValidatorRejectsInvalidOutput(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "bad", func(ctx context.Context) (User, error) {
+		return User{}, nil
+	}, trpcgo.OutputValidator(func(u User) error {
+		if u.ID == "" {
+			return fmt.Errorf("id is required")
+		}
+		return nil
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/bad")
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "INTERNAL_SERVER_ERROR") {
+		t.Errorf("body missing INTERNAL_SERVER_ERROR, got: %s", body)
+	}
+	if !strings.Contains(bodyStr, "internal server error") {
+		t.Errorf("body missing generic internal server error message, got: %s", body)
+	}
+	if strings.Contains(bodyStr, "id is required") {
+		t.Errorf("body leaked validator details, got: %s", body)
+	}
+}
+
+func TestOutputValidatorPassesValidOutput(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "good", func(ctx context.Context) (User, error) {
+		return User{ID: "1", Name: "Alice"}, nil
+	}, trpcgo.OutputValidator(func(u User) error {
+		if u.ID == "" {
+			return fmt.Errorf("id is required")
+		}
+		return nil
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/good")
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	data := resultData(t, body)
+	if data["id"] != "1" {
+		t.Fatalf("result.data.id = %v, want 1", data["id"])
+	}
+	if data["name"] != "Alice" {
+		t.Fatalf("result.data.name = %v, want Alice", data["name"])
+	}
+}
+
+func TestOutputValidatorWithMethodRuntime(t *testing.T) {
+	base := trpcgo.Procedure().With(trpcgo.OutputValidator(func(u User) error {
+		if u.ID == "" {
+			return fmt.Errorf("id is required")
+		}
+		return nil
+	}))
+
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "ok", func(ctx context.Context) (User, error) {
+		return User{ID: "7", Name: "Alice"}, nil
+	}, base)
+	trpcgo.MustVoidQuery(r, "bad", func(ctx context.Context) (User, error) {
+		return User{}, nil
+	}, base)
+
+	server := newTestServer(t, r.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/ok")
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		t.Fatalf("ok status = %d, want 200", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	if got := resultData(t, body)["id"]; got != "7" {
+		t.Fatalf("ok result.data.id = %v, want 7", got)
+	}
+
+	resp = mustGet(t, server, "/trpc/bad")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("bad status = %d, want 500", resp.StatusCode)
+	}
+}
+
+func TestOutputValidatorBuilderMethodRuntime(t *testing.T) {
+	base := trpcgo.Procedure().WithOutputValidator(func(v any) error {
+		u, _ := v.(User)
+		if u.ID == "" {
+			return fmt.Errorf("id is required")
+		}
+		return nil
+	})
+
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "ok", func(ctx context.Context) (User, error) {
+		return User{ID: "8", Name: "Alice"}, nil
+	}, base)
+	trpcgo.MustVoidQuery(r, "bad", func(ctx context.Context) (User, error) {
+		return User{}, nil
+	}, base)
+
+	server := newTestServer(t, r.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/ok")
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		t.Fatalf("ok status = %d, want 200", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	if got := resultData(t, body)["id"]; got != "8" {
+		t.Fatalf("ok result.data.id = %v, want 8", got)
+	}
+
+	resp = mustGet(t, server, "/trpc/bad")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("bad status = %d, want 500", resp.StatusCode)
+	}
+}
+
+func TestTypedOutputValidatorRunsOnNilAnyOutput(t *testing.T) {
+	validatorCalled := false
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "niltyped", func(ctx context.Context) (any, error) {
+		return nil, nil
+	}, trpcgo.OutputValidator(func(v any) error {
+		validatorCalled = true
+		if v != nil {
+			return fmt.Errorf("expected nil output, got %T", v)
+		}
+		return nil
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/niltyped")
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if !validatorCalled {
+		t.Fatal("typed output validator should be called for nil output")
+	}
+	body := decodeJSON(t, resp)
+	if got := resultScalar(t, body); got != nil {
+		t.Fatalf("result.data = %v, want nil", got)
+	}
+}
+
+func TestOutputValidatorRunsBeforeParser(t *testing.T) {
+	type PublicUser struct {
+		ID string `json:"id"`
+	}
+
+	var calls []string
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "user", func(ctx context.Context) (User, error) {
+		return User{ID: "9", Name: "Alice"}, nil
+	},
+		trpcgo.OutputValidator(func(u User) error {
+			calls = append(calls, "validator")
+			if u.Name == "" {
+				return fmt.Errorf("name required")
+			}
+			return nil
+		}),
+		trpcgo.OutputParser(func(u User) (PublicUser, error) {
+			calls = append(calls, "parser")
+			return PublicUser{ID: u.ID}, nil
+		}),
+	)
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/user")
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := strings.Join(calls, ","); got != "validator,parser" {
+		t.Fatalf("hook order = %q, want validator,parser", got)
+	}
+	body := decodeJSON(t, resp)
+	data := resultData(t, body)
+	if _, ok := data["name"]; ok {
+		t.Fatalf("result.data should not contain name, got %v", data)
+	}
+}
+
+func TestOutputValidatorFailureShortCircuitsParser(t *testing.T) {
+	parserCalled := false
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "user", func(ctx context.Context) (User, error) {
+		return User{}, nil
+	},
+		trpcgo.OutputValidator(func(u User) error {
+			return fmt.Errorf("id required")
+		}),
+		trpcgo.OutputParser(func(u User) (User, error) {
+			parserCalled = true
+			return u, nil
+		}),
+	)
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/user")
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	if parserCalled {
+		t.Fatal("output parser must not be called when output validator fails")
+	}
+}
+
+func TestOutputValidatorSubscription(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidSubscribe(r, "stream", func(ctx context.Context) (<-chan User, error) {
+		ch := make(chan User, 1)
+		ch <- User{}
+		close(ch)
+		return ch, nil
+	}, trpcgo.OutputValidator(func(u User) error {
+		if u.ID == "" {
+			return fmt.Errorf("id is required")
+		}
+		return nil
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp, err := http.Get(server.URL + "/trpc/stream")
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	if !strings.Contains(bodyStr, "serialized-error") {
+		t.Fatalf("body missing serialized-error event, got:\n%s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "id is required") {
+		t.Fatalf("SSE body leaked validator details, got:\n%s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "internal server error") {
+		t.Fatalf("SSE body missing generic internal server error, got:\n%s", bodyStr)
+	}
+}
+
+func TestOutputValidatorErrorFormatterSanitized(t *testing.T) {
+	secret := "validator-secret"
+	var formatterErr *trpcgo.Error
+
+	r := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+		formatterErr = input.Error
+		return input.Shape
+	}))
+	trpcgo.MustVoidQuery(r, "bad", func(ctx context.Context) (User, error) {
+		return User{}, nil
+	}, trpcgo.OutputValidator(func(u User) error {
+		return fmt.Errorf("validator failed: %s", secret)
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/bad")
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+
+	if formatterErr == nil {
+		t.Fatal("formatter error was nil")
+	}
+	if formatterErr.Cause != nil {
+		t.Fatalf("formatter should not receive validator cause, got %v", formatterErr.Cause)
+	}
+	if formatterErr.Message != "internal server error" {
+		t.Fatalf("formatter message = %q, want internal server error", formatterErr.Message)
+	}
+	if strings.Contains(string(body), secret) {
+		t.Fatalf("client response leaked validator cause: %s", body)
+	}
+}
+
+func TestOutputValidatorErrorFormatterSSESanitized(t *testing.T) {
+	secret := "validator-sse-secret"
+	var formatterErr *trpcgo.Error
+
+	r := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+		formatterErr = input.Error
+		return input.Shape
+	}))
+	trpcgo.MustVoidSubscribe(r, "stream", func(ctx context.Context) (<-chan User, error) {
+		ch := make(chan User, 1)
+		ch <- User{}
+		close(ch)
+		return ch, nil
+	}, trpcgo.OutputValidator(func(u User) error {
+		return fmt.Errorf("validator failed: %s", secret)
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp, err := http.Get(server.URL + "/trpc/stream")
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+
+	if formatterErr == nil {
+		t.Fatal("formatter error was nil")
+	}
+	if formatterErr.Cause != nil {
+		t.Fatalf("formatter should not receive SSE validator cause, got %v", formatterErr.Cause)
+	}
+	if formatterErr.Message != "internal server error" {
+		t.Fatalf("formatter message = %q, want internal server error", formatterErr.Message)
+	}
+	if strings.Contains(string(body), secret) {
+		t.Fatalf("SSE body leaked validator cause: %s", body)
+	}
+}
+
+func TestOutputValidatorOnErrorReceivesCause(t *testing.T) {
+	secret := "validator-cause"
+	var capturedErr *trpcgo.Error
+
+	r := trpcgo.NewRouter(trpcgo.WithOnError(func(ctx context.Context, err *trpcgo.Error, path string) {
+		capturedErr = err
+	}))
+	trpcgo.MustVoidQuery(r, "bad", func(ctx context.Context) (User, error) {
+		return User{}, nil
+	}, trpcgo.OutputValidator(func(u User) error {
+		return fmt.Errorf("validator failed: %s", secret)
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/bad")
+	defer func() { _ = resp.Body.Close() }()
+
+	if capturedErr == nil {
+		t.Fatal("onError was not called")
+	}
+	if capturedErr.Cause == nil || !strings.Contains(capturedErr.Cause.Error(), secret) {
+		t.Fatalf("onError cause = %v, want it to contain %q", capturedErr.Cause, secret)
+	}
+}
+
+func TestOutputValidatorOnErrorReceivesSSECause(t *testing.T) {
+	secret := "validator-sse-cause"
+	var capturedErr *trpcgo.Error
+
+	r := trpcgo.NewRouter(trpcgo.WithOnError(func(ctx context.Context, err *trpcgo.Error, path string) {
+		capturedErr = err
+	}))
+	trpcgo.MustVoidSubscribe(r, "stream", func(ctx context.Context) (<-chan User, error) {
+		ch := make(chan User, 1)
+		ch <- User{}
+		close(ch)
+		return ch, nil
+	}, trpcgo.OutputValidator(func(u User) error {
+		return fmt.Errorf("validator failed: %s", secret)
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp, err := http.Get(server.URL + "/trpc/stream")
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.ReadAll(resp.Body)
+
+	if capturedErr == nil {
+		t.Fatal("onError was not called")
+	}
+	if capturedErr.Cause == nil || !strings.Contains(capturedErr.Cause.Error(), secret) {
+		t.Fatalf("onError cause = %v, want it to contain %q", capturedErr.Cause, secret)
+	}
+}
+
+func TestRawCallOutputValidatorErrorSanitized(t *testing.T) {
+	secret := "rawcall-validator-cause"
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "bad", func(ctx context.Context) (User, error) {
+		return User{}, nil
+	}, trpcgo.OutputValidator(func(u User) error {
+		return fmt.Errorf("validator failed: %s", secret)
+	}))
+
+	_, err := r.RawCall(context.Background(), "bad", nil)
+	if err == nil {
+		t.Fatal("expected RawCall error")
+	}
+	trpcErr, ok := err.(*trpcgo.Error)
+	if !ok {
+		t.Fatalf("RawCall error type = %T, want *trpcgo.Error", err)
+	}
+	if trpcErr.Code != trpcgo.CodeInternalServerError {
+		t.Fatalf("RawCall error code = %v, want INTERNAL_SERVER_ERROR", trpcErr.Code)
+	}
+	if trpcErr.Message != "internal server error" {
+		t.Fatalf("RawCall error message = %q, want internal server error", trpcErr.Message)
+	}
+	if trpcErr.Cause != nil {
+		t.Fatalf("RawCall error should be sanitized, got cause %v", trpcErr.Cause)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("RawCall error leaked validator cause: %v", err)
+	}
+}
+
+func TestOutputValidatorCodegenReflectionKeepsHandlerType(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "user", func(ctx context.Context) (User, error) {
+		return User{ID: "1", Name: "Alice"}, nil
+	}, trpcgo.OutputValidator(func(u User) error {
+		if u.ID == "" {
+			return fmt.Errorf("id required")
+		}
+		return nil
+	}))
+
+	outputPath := filepath.Join(t.TempDir(), "trpc.ts")
+	if err := r.GenerateTS(outputPath); err != nil {
+		t.Fatalf("GenerateTS failed: %v", err)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := string(data)
+
+	if !strings.Contains(ts, "$Query<void, User>") {
+		t.Fatalf("expected validator-only output to keep User type, got:\n%s", ts)
+	}
+	if strings.Contains(ts, "$Query<void, unknown>") {
+		t.Fatalf("validator-only output should not degrade to unknown, got:\n%s", ts)
+	}
+	if !strings.Contains(ts, "name: string;") {
+		t.Fatalf("validator-only output should keep full handler shape, got:\n%s", ts)
+	}
+}
 
 func TestOutputParserRejectsInvalidOutput(t *testing.T) {
 	r := trpcgo.NewRouter()

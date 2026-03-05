@@ -51,20 +51,21 @@ func (r *Router) Use(mw ...Middleware) {
 	r.middleware = append(r.middleware, mw...)
 }
 
-func (r *Router) register(path string, typ ProcedureType, handler HandlerFunc, mw []Middleware, meta any, inputType, outputType reflect.Type, outputParser func(any) (any, error)) error {
+func (r *Router) register(path string, typ ProcedureType, handler HandlerFunc, mw []Middleware, meta any, inputType, outputType reflect.Type, outputValidator func(any) error, outputParser func(any) (any, error)) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.procedures[path]; exists {
 		return fmt.Errorf("trpcgo: procedure %q already registered", path)
 	}
 	r.procedures[path] = &procedure{
-		typ:          typ,
-		handler:      handler,
-		middleware:   mw,
-		meta:         meta,
-		inputType:    inputType,
-		outputType:   outputType,
-		outputParser: outputParser,
+		typ:             typ,
+		handler:         handler,
+		middleware:      mw,
+		meta:            meta,
+		inputType:       inputType,
+		outputType:      outputType,
+		outputValidator: outputValidator,
+		outputParser:    outputParser,
 	}
 	return nil
 }
@@ -106,13 +107,14 @@ func (r *Router) Merge(sources ...*Router) error {
 	// All checks passed — insert.
 	for _, e := range toAdd {
 		r.procedures[e.path] = &procedure{
-			typ:          e.proc.typ,
-			handler:      e.proc.handler,
-			middleware:   e.proc.middleware,
-			meta:         e.proc.meta,
-			inputType:    e.proc.inputType,
-			outputType:   e.proc.outputType,
-			outputParser: e.proc.outputParser,
+			typ:             e.proc.typ,
+			handler:         e.proc.handler,
+			middleware:      e.proc.middleware,
+			meta:            e.proc.meta,
+			inputType:       e.proc.inputType,
+			outputType:      e.proc.outputType,
+			outputValidator: e.proc.outputValidator,
+			outputParser:    e.proc.outputParser,
 		}
 	}
 	return nil
@@ -178,6 +180,22 @@ func (r *Router) Handler(basePath string) http.Handler {
 	return &httpHandler{router: r, procedures: snapshot, opts: &r.opts, basePath: basePath}
 }
 
+func applyOutputHooks(output any, outputValidator func(any) error, outputParser func(any) (any, error)) (any, error) {
+	if outputValidator != nil {
+		if err := outputValidator(output); err != nil {
+			return nil, fmt.Errorf("output validator: %w", err)
+		}
+	}
+	if outputParser != nil {
+		parsed, err := outputParser(output)
+		if err != nil {
+			return nil, fmt.Errorf("output parser: %w", err)
+		}
+		output = parsed
+	}
+	return output, nil
+}
+
 // executeProcedure decodes the raw JSON input, validates it, and calls the handler.
 // This is the single execution path shared by Handler() and RawCall.
 func (r *Router) executeProcedure(ctx context.Context, proc *procedure, raw json.RawMessage) (any, error) {
@@ -232,19 +250,18 @@ func (r *Router) executeProcedure(ctx context.Context, proc *procedure, raw json
 		return nil, err
 	}
 
-	// Run output parser if set. For subscriptions the parser is injected into the
-	// sseStream and runs per-item inside writeSSE. For queries and mutations the
-	// parser runs on the single return value, including nil, and the returned
-	// value replaces output.
-	if proc.outputParser != nil {
+	// Run output hooks if set. For subscriptions the validator/parser are
+	// injected into the sseStream and run per-item inside writeSSE. For queries
+	// and mutations they run on the single return value, including nil.
+	if proc.outputValidator != nil || proc.outputParser != nil {
 		if p, ok := output.(parsable); ok {
+			p.setOutputValidator(proc.outputValidator)
 			p.setOutputParser(proc.outputParser)
 		} else {
-			parsed, perr := proc.outputParser(output)
-			if perr != nil {
-				return nil, fmt.Errorf("output parser: %w", perr)
+			output, err = applyOutputHooks(output, proc.outputValidator, proc.outputParser)
+			if err != nil {
+				return nil, err
 			}
-			output = parsed
 		}
 	}
 

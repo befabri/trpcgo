@@ -6,7 +6,7 @@ A full-stack example using trpcgo with a Go server and a React frontend.
 
 **Server** (`go-server/`):
 - Go + [chi](https://github.com/go-chi/chi) router
-- Input validation with [go-playground/validator](https://github.com/go-playground/validator)
+- Input validation with [go-playground/validator](https://github.com/go-playground/validator) and typed output validation
 - SSE subscriptions for real-time updates
 - Custom error formatter, global and per-procedure middleware
 - Server-side caller (`trpcgo.Call`)

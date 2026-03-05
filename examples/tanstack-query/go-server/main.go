@@ -462,8 +462,18 @@ func main() {
 	trpcgo.Query(router, "user.getUserById", svc.GetUserById)
 	trpcgo.Query(router, "user.listUsers", svc.ListUsers)
 
-	// VoidQuery — no input
-	trpcgo.VoidQuery(router, "system.health", svc.ServerHealth)
+	// VoidQuery — no input, with output validation
+	trpcgo.VoidQuery(router, "system.health", svc.ServerHealth,
+		trpcgo.OutputValidator(func(info HealthInfo) error {
+			if !info.OK {
+				return fmt.Errorf("health response must be ok")
+			}
+			if info.UserCount < 0 {
+				return fmt.Errorf("user count must be non-negative")
+			}
+			return nil
+		}),
+	)
 
 	// Mutation with per-procedure middleware (Use) and metadata (WithMeta)
 	trpcgo.Mutation(router, "user.createUser", svc.CreateUser,

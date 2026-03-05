@@ -54,18 +54,22 @@ func makeVoidStreamHandler[O any](fn func(ctx context.Context) (<-chan O, error)
 	}
 }
 
-// parsable is an internal interface that allows executeProcedure to inject an output
-// parser into a stream without changing the streamer interface or sseOptions.
+// parsable is an internal interface that allows executeProcedure to inject output
+// validators and parsers into a stream without changing the streamer interface or
+// sseOptions.
 type parsable interface {
+	setOutputValidator(func(any) error)
 	setOutputParser(func(any) (any, error))
 }
 
 // sseStream wraps a typed channel for the handler to detect and stream.
 type sseStream[O any] struct {
-	ch           <-chan O
-	outputParser func(any) (any, error)
+	outputValidator func(any) error
+	outputParser    func(any) (any, error)
+	ch              <-chan O
 }
 
+func (s *sseStream[O]) setOutputValidator(fn func(any) error)     { s.outputValidator = fn }
 func (s *sseStream[O]) setOutputParser(fn func(any) (any, error)) { s.outputParser = fn }
 
 // streamer is the interface the handler checks to detect subscription results.
@@ -145,12 +149,13 @@ func (s *sseStream[O]) writeSSE(ctx context.Context, w http.ResponseWriter, opts
 				return nil
 			}
 
-			// Run the output parser on the raw item (type O) before TrackedEvent
-			// unwrapping. OutputParser[O, P] always type-matches the channel element.
-			// The parser may transform the value — use the returned item downstream.
+			// Run output hooks on the raw item (type O) before TrackedEvent
+			// unwrapping. Validators run before parsers; parsers may transform the
+			// value and the returned item is used downstream.
 			item := any(val)
-			if s.outputParser != nil {
-				parsed, perr := s.outputParser(item)
+			if s.outputValidator != nil || s.outputParser != nil {
+				var perr error
+				item, perr = applyOutputHooks(item, s.outputValidator, s.outputParser)
 				if perr != nil {
 					sseErr := WrapError(CodeInternalServerError, "internal server error", perr)
 					if opts.onError != nil {
@@ -162,7 +167,6 @@ func (s *sseStream[O]) writeSSE(ctx context.Context, w http.ResponseWriter, opts
 					flusher.Flush()
 					return nil
 				}
-				item = parsed
 			}
 
 			// Unwrap TrackedEvent from the (possibly transformed) item for serialization.
