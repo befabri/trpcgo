@@ -208,6 +208,13 @@ var registrationFuncs = map[string]funcInfo{
 	"VoidMutation":  {procType: "mutation", hasInput: false},
 	"Subscribe":     {procType: "subscription", hasInput: true, isStream: true},
 	"VoidSubscribe": {procType: "subscription", hasInput: false, isStream: true},
+	// Must* variants — identical signature and semantics; panic instead of returning error.
+	"MustQuery":         {procType: "query", hasInput: true},
+	"MustVoidQuery":     {procType: "query", hasInput: false},
+	"MustMutation":      {procType: "mutation", hasInput: true},
+	"MustVoidMutation":  {procType: "mutation", hasInput: false},
+	"MustSubscribe":     {procType: "subscription", hasInput: true, isStream: true},
+	"MustVoidSubscribe": {procType: "subscription", hasInput: false, isStream: true},
 }
 
 func extractProcedure(call *ast.CallExpr, info *types.Info) (Procedure, bool) {

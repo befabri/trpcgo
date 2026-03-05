@@ -195,3 +195,63 @@ func TestAnalyzeEnhanced(t *testing.T) {
 		}
 	})
 }
+
+func TestAnalyzeMustVariants(t *testing.T) {
+	dir := testdataDir("must")
+	result, err := analysis.Analyze([]string{"."}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]string{
+		"item.get":       "query",
+		"item.list":      "query",
+		"item.create":    "mutation",
+		"item.reset":     "mutation",
+		"item.stream":    "subscription",
+		"item.broadcast": "subscription",
+	}
+
+	if len(result.Procedures) != len(want) {
+		t.Fatalf("got %d procedures, want %d", len(result.Procedures), len(want))
+	}
+
+	byPath := make(map[string]analysis.Procedure)
+	for _, p := range result.Procedures {
+		byPath[p.Path] = p
+	}
+
+	for path, wantType := range want {
+		p, ok := byPath[path]
+		if !ok {
+			t.Errorf("missing procedure %q", path)
+			continue
+		}
+		if p.Type != wantType {
+			t.Errorf("%q type = %q, want %q", path, p.Type, wantType)
+		}
+	}
+
+	// Input-bearing variants must have a non-nil InputType.
+	for _, path := range []string{"item.get", "item.create", "item.stream"} {
+		p, ok := byPath[path]
+		if !ok {
+			t.Errorf("missing procedure %q (cannot check InputType)", path)
+			continue
+		}
+		if p.InputType == nil {
+			t.Errorf("%q should have a non-nil InputType", path)
+		}
+	}
+	// Void variants must have a nil InputType.
+	for _, path := range []string{"item.list", "item.reset", "item.broadcast"} {
+		p, ok := byPath[path]
+		if !ok {
+			t.Errorf("missing procedure %q (cannot check InputType)", path)
+			continue
+		}
+		if p.InputType != nil {
+			t.Errorf("%q should have nil InputType, got %v", path, p.InputType)
+		}
+	}
+}
