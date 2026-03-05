@@ -76,7 +76,7 @@ func main() {
         trpcgo.WithZodOutput("../web/gen/zod.ts"),
     )
     defer router.Close()
-    trpcgo.Mutation(router, "user.create", CreateUser)
+    trpcgo.MustMutation(router, "user.create", CreateUser)
 
     http.ListenAndServe(":8080", router.Handler("/trpc"))
 }
@@ -129,40 +129,47 @@ mutation.mutate({ name: "Alice", email: "alice@example.com" });
 
 trpcgo supports all tRPC procedure types: queries, mutations, and subscriptions.
 
+Each registration function returns an `error` (duplicate path). The `Must*` variants panic instead and are the idiomatic choice for application bootstrap code:
+
 ```go
 // Query (read, with input)
-trpcgo.Query(router, "user.getById", func(ctx context.Context, input GetUserInput) (User, error) {
+trpcgo.MustQuery(router, "user.getById", func(ctx context.Context, input GetUserInput) (User, error) {
     return db.FindUser(input.ID)
 })
 
 // VoidQuery (read, no input)
-trpcgo.VoidQuery(router, "system.health", func(ctx context.Context) (HealthInfo, error) {
+trpcgo.MustVoidQuery(router, "system.health", func(ctx context.Context) (HealthInfo, error) {
     return HealthInfo{OK: true}, nil
 })
 
 // Mutation (write, with input)
-trpcgo.Mutation(router, "user.create", func(ctx context.Context, input CreateUserInput) (User, error) {
+trpcgo.MustMutation(router, "user.create", func(ctx context.Context, input CreateUserInput) (User, error) {
     return db.CreateUser(input)
 })
 
 // VoidMutation (write, no input)
-trpcgo.VoidMutation(router, "system.reset", func(ctx context.Context) (string, error) {
+trpcgo.MustVoidMutation(router, "system.reset", func(ctx context.Context) (string, error) {
     return "done", nil
 })
 
 // Subscribe (SSE, with input)
-trpcgo.Subscribe(router, "chat.messages", func(ctx context.Context, input RoomInput) (<-chan Message, error) {
+trpcgo.MustSubscribe(router, "chat.messages", func(ctx context.Context, input RoomInput) (<-chan Message, error) {
     ch := make(chan Message)
     // push messages to ch, close when ctx.Done()
     return ch, nil
 })
 
 // VoidSubscribe (SSE, no input)
-trpcgo.VoidSubscribe(router, "user.onCreated", func(ctx context.Context) (<-chan User, error) {
+trpcgo.MustVoidSubscribe(router, "user.onCreated", func(ctx context.Context) (<-chan User, error) {
     ch := make(chan User)
     // push to ch when users are created
     return ch, nil
 })
+
+// Non-Must variants return error — use when you need to handle the failure:
+if err := trpcgo.Query(router, "user.getById", handler); err != nil {
+    log.Fatal(err)
+}
 ```
 
 ## Router Options
@@ -207,6 +214,7 @@ router := trpcgo.NewRouter(
     trpcgo.WithTypeOutput("../web/gen/trpc.ts"),
     trpcgo.WithZodOutput("../web/gen/zod.ts"),
     trpcgo.WithZodMini(false),                // true for zod/mini syntax
+    trpcgo.WithWatchPackages("./internal/...", "./cmd/api"), // scope watcher to specific packages
 )
 ```
 
@@ -229,7 +237,7 @@ router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
 ### Per-procedure middleware
 
 ```go
-trpcgo.Mutation(router, "user.create", handler,
+trpcgo.MustMutation(router, "user.create", handler,
     trpcgo.Use(authRequired, rateLimiter),
     trpcgo.WithMeta(map[string]string{"action": "write"}),
 )
@@ -349,6 +357,8 @@ go tool trpcgo generate -o ../web/gen/trpc.ts --zod ../web/gen/zod.ts -w
 
 When you set `WithDev(true)` with `WithTypeOutput` (and optionally `WithZodOutput`) on the router, `Handler()` starts a file watcher automatically. Save a `.go` file anywhere in the project tree and types regenerate instantly, no separate process needed. Call `router.Close()` to stop the watcher on shutdown.
 
+Use `WithWatchPackages` to restrict watching to specific packages (go/packages patterns) — useful in monorepos to avoid watching unrelated directories like frontend build output.
+
 ## Frontend Setup
 
 ### React Query
@@ -395,10 +405,10 @@ Split procedures across files and merge:
 
 ```go
 userRouter := trpcgo.NewRouter()
-trpcgo.Query(userRouter, "user.list", listUsers)
+trpcgo.MustQuery(userRouter, "user.list", listUsers)
 
 adminRouter := trpcgo.NewRouter()
-trpcgo.Mutation(adminRouter, "admin.ban", banUser)
+trpcgo.MustMutation(adminRouter, "admin.ban", banUser)
 
 router := trpcgo.NewRouter()
 if err := router.Merge(userRouter, adminRouter); err != nil {

@@ -19,11 +19,16 @@
 //
 // # Procedures
 //
-// Six registration functions cover all tRPC procedure types:
+// Six registration functions cover all tRPC procedure types — each returns an
+// error if the path is already registered:
 //
 //   - [Query] and [VoidQuery] for read operations (GET)
 //   - [Mutation] and [VoidMutation] for write operations (POST)
 //   - [Subscribe] and [VoidSubscribe] for real-time streams (SSE)
+//
+// Must* variants ([MustQuery], [MustVoidQuery], [MustMutation], [MustVoidMutation],
+// [MustSubscribe], [MustVoidSubscribe]) panic on duplicate registration and are
+// the idiomatic choice for application bootstrap code.
 //
 // # Router Options
 //
@@ -41,6 +46,7 @@
 //   - [WithOnError] — error callback for logging
 //   - [WithSSEPingInterval], [WithSSEMaxDuration], [WithSSEMaxConnections] — SSE tuning
 //   - [WithTypeOutput], [WithZodOutput], [WithZodMini] — code generation
+//   - [WithWatchPackages] — restrict dev watcher to specific package patterns
 //
 // # Middleware
 //
