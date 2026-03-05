@@ -30,6 +30,15 @@
 // [MustSubscribe], [MustVoidSubscribe]) panic on duplicate registration and are
 // the idiomatic choice for application bootstrap code.
 //
+// Use [Procedure] to create a reusable base procedure that bundles middleware
+// and metadata — the Go equivalent of tRPC's composable procedure builder:
+//
+//	authedProcedure := trpcgo.Procedure().Use(authMiddleware)
+//	adminProcedure  := authedProcedure.Use(adminCheck).WithMeta(roleMeta{})
+//
+//	trpcgo.MustQuery(r, "user.list", listUsers, authedProcedure)
+//	trpcgo.MustMutation(r, "admin.ban", banUser, adminProcedure)
+//
 // # Router Options
 //
 // Configure the router with functional options:

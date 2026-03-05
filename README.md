@@ -10,6 +10,7 @@ trpcgo is a Go implementation of the [tRPC](https://trpc.io) protocol. You get t
 - [Install](#install)
 - [Quick Start](#quick-start)
 - [Procedure Types](#procedure-types)
+- [Base Procedures](#base-procedures)
 - [Router Options](#router-options)
 - [Middleware](#middleware)
 - [Errors](#errors)
@@ -170,6 +171,32 @@ trpcgo.MustVoidSubscribe(router, "user.onCreated", func(ctx context.Context) (<-
 if err := trpcgo.Query(router, "user.getById", handler); err != nil {
     log.Fatal(err)
 }
+```
+
+## Base Procedures
+
+`trpcgo.Procedure()` creates a reusable builder that bundles middleware and metadata — the Go equivalent of tRPC's composable procedure pattern. Builders are immutable: every chain call returns a new instance, so sharing a base never causes accidental mutation.
+
+```go
+// Define reusable base procedures once
+publicProcedure := trpcgo.Procedure()
+authedProcedure := publicProcedure.Use(authMiddleware)
+adminProcedure  := authedProcedure.Use(adminCheckMiddleware).WithMeta(roleMeta{Admin: true})
+
+// Use them at every registration site
+trpcgo.MustQuery(router,    "user.list",    listUsers,  authedProcedure)
+trpcgo.MustMutation(router, "user.create",  createUser, authedProcedure)
+trpcgo.MustMutation(router, "admin.ban",    banUser,    adminProcedure)
+
+// Combine with per-procedure options — all options merge
+trpcgo.MustQuery(router, "report.get", getReport, authedProcedure, trpcgo.WithMeta(auditLog{}))
+```
+
+Builders can also be seeded from an existing builder:
+
+```go
+// Inherits all of authedProcedure's middleware, then adds more
+orgProcedure := trpcgo.Procedure(authedProcedure).Use(orgScopeMiddleware)
 ```
 
 ## Router Options
