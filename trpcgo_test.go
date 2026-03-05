@@ -248,6 +248,91 @@ func TestQueryWithInput(t *testing.T) {
 	}
 }
 
+func TestBasePathBoundaryEnforced(t *testing.T) {
+	tests := []struct {
+		name     string
+		basePath string
+	}{
+		{name: "base without trailing slash", basePath: "/trpc"},
+		{name: "base with trailing slash", basePath: "/trpc/"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router := trpcgo.NewRouter()
+			trpcgo.VoidQuery(router, "hello", func(ctx context.Context) (string, error) {
+				return "ok", nil
+			})
+			trpcgo.VoidQuery(router, "x", func(ctx context.Context) (string, error) {
+				return "should-not-match", nil
+			})
+
+			server := newTestServer(t, router.Handler(tt.basePath))
+
+			// Valid request under the configured base path.
+			valid := mustGet(t, server, "/trpc/hello")
+			if valid.StatusCode != 200 {
+				_ = valid.Body.Close()
+				t.Fatalf("valid status = %d, want 200", valid.StatusCode)
+			}
+			if got := resultScalar(t, decodeJSON(t, valid)); got != "ok" {
+				t.Fatalf("valid result.data = %v, want ok", got)
+			}
+
+			// Invalid path that shares the same prefix but not a segment boundary.
+			// Before the fix, /trpcx incorrectly matched basePath /trpc and invoked
+			// procedure path "x".
+			invalid := mustGet(t, server, "/trpcx")
+			if invalid.StatusCode != 404 {
+				_ = invalid.Body.Close()
+				t.Fatalf("invalid status = %d, want 404", invalid.StatusCode)
+			}
+			if code := errorData(t, decodeJSON(t, invalid))["code"]; code != "NOT_FOUND" {
+				t.Fatalf("invalid error.data.code = %v, want NOT_FOUND", code)
+			}
+
+			// Batch request must follow the same boundary rule.
+			invalidBatch := mustGet(t, server, "/trpcx?batch=1")
+			if invalidBatch.StatusCode != 404 {
+				_ = invalidBatch.Body.Close()
+				t.Fatalf("invalid batch status = %d, want 404", invalidBatch.StatusCode)
+			}
+			if code := errorData(t, decodeJSON(t, invalidBatch))["code"]; code != "NOT_FOUND" {
+				t.Fatalf("invalid batch error.data.code = %v, want NOT_FOUND", code)
+			}
+		})
+	}
+}
+
+func TestRootBasePathBehavior(t *testing.T) {
+	router := trpcgo.NewRouter()
+	trpcgo.VoidQuery(router, "hello", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	})
+
+	server := newTestServer(t, router.Handler("/"))
+
+	// Root base path should expose procedures directly at /<path>.
+	resp := mustGet(t, server, "/hello")
+	if resp.StatusCode != 200 {
+		_ = resp.Body.Close()
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := resultScalar(t, decodeJSON(t, resp)); got != "ok" {
+		t.Fatalf("result.data = %v, want ok", got)
+	}
+
+	// Requests with extra segments should not match.
+	notFound := mustGet(t, server, "/trpc/hello")
+	if notFound.StatusCode != 404 {
+		_ = notFound.Body.Close()
+		t.Fatalf("status = %d, want 404", notFound.StatusCode)
+	}
+	if code := errorData(t, decodeJSON(t, notFound))["code"]; code != "NOT_FOUND" {
+		t.Fatalf("error.data.code = %v, want NOT_FOUND", code)
+	}
+}
+
 // --- Mutation Tests ---
 
 func TestMutation(t *testing.T) {
@@ -1988,26 +2073,156 @@ func TestMaxBodySizeEnforced(t *testing.T) {
 
 // --- Duplicate Registration Test ---
 
-func TestDuplicateRegistrationPanics(t *testing.T) {
+func TestDuplicateRegistrationReturnsError(t *testing.T) {
 	router := trpcgo.NewRouter()
-	trpcgo.VoidQuery(router, "hello", func(ctx context.Context) (string, error) {
+	err := trpcgo.VoidQuery(router, "hello", func(ctx context.Context) (string, error) {
 		return "hi", nil
 	})
+	if err != nil {
+		t.Fatalf("first registration failed: %v", err)
+	}
 
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected panic on duplicate registration")
-		}
-		msg, ok := r.(string)
-		if !ok || !strings.Contains(msg, "hello") {
-			t.Fatalf("unexpected panic: %v", r)
-		}
-	}()
-
-	trpcgo.VoidQuery(router, "hello", func(ctx context.Context) (string, error) {
+	err = trpcgo.VoidQuery(router, "hello", func(ctx context.Context) (string, error) {
 		return "hi again", nil
 	})
+	if err == nil {
+		t.Fatal("expected duplicate registration error")
+	}
+	if !strings.Contains(err.Error(), "hello") || !strings.Contains(err.Error(), "already registered") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMustRegistrationPanicsOnDuplicate(t *testing.T) {
+	tests := []struct {
+		name    string
+		register func(r *trpcgo.Router)
+		dup     func(r *trpcgo.Router)
+		wantMsg string
+	}{
+		{
+			name: "MustQuery",
+			register: func(r *trpcgo.Router) {
+				trpcgo.MustQuery(r, "a.get", func(ctx context.Context, _ struct{}) (string, error) { return "", nil })
+			},
+			dup: func(r *trpcgo.Router) {
+				trpcgo.MustQuery(r, "a.get", func(ctx context.Context, _ struct{}) (string, error) { return "", nil })
+			},
+			wantMsg: `MustQuery "a.get"`,
+		},
+		{
+			name: "MustVoidQuery",
+			register: func(r *trpcgo.Router) {
+				trpcgo.MustVoidQuery(r, "b.get", func(ctx context.Context) (string, error) { return "", nil })
+			},
+			dup: func(r *trpcgo.Router) {
+				trpcgo.MustVoidQuery(r, "b.get", func(ctx context.Context) (string, error) { return "", nil })
+			},
+			wantMsg: `MustVoidQuery "b.get"`,
+		},
+		{
+			name: "MustMutation",
+			register: func(r *trpcgo.Router) {
+				trpcgo.MustMutation(r, "c.create", func(ctx context.Context, _ struct{}) (string, error) { return "", nil })
+			},
+			dup: func(r *trpcgo.Router) {
+				trpcgo.MustMutation(r, "c.create", func(ctx context.Context, _ struct{}) (string, error) { return "", nil })
+			},
+			wantMsg: `MustMutation "c.create"`,
+		},
+		{
+			name: "MustVoidMutation",
+			register: func(r *trpcgo.Router) {
+				trpcgo.MustVoidMutation(r, "d.reset", func(ctx context.Context) (string, error) { return "", nil })
+			},
+			dup: func(r *trpcgo.Router) {
+				trpcgo.MustVoidMutation(r, "d.reset", func(ctx context.Context) (string, error) { return "", nil })
+			},
+			wantMsg: `MustVoidMutation "d.reset"`,
+		},
+		{
+			name: "MustSubscribe",
+			register: func(r *trpcgo.Router) {
+				trpcgo.MustSubscribe(r, "e.stream", func(ctx context.Context, _ struct{}) (<-chan string, error) {
+					return make(chan string), nil
+				})
+			},
+			dup: func(r *trpcgo.Router) {
+				trpcgo.MustSubscribe(r, "e.stream", func(ctx context.Context, _ struct{}) (<-chan string, error) {
+					return make(chan string), nil
+				})
+			},
+			wantMsg: `MustSubscribe "e.stream"`,
+		},
+		{
+			name: "MustVoidSubscribe",
+			register: func(r *trpcgo.Router) {
+				trpcgo.MustVoidSubscribe(r, "f.stream", func(ctx context.Context) (<-chan string, error) {
+					return make(chan string), nil
+				})
+			},
+			dup: func(r *trpcgo.Router) {
+				trpcgo.MustVoidSubscribe(r, "f.stream", func(ctx context.Context) (<-chan string, error) {
+					return make(chan string), nil
+				})
+			},
+			wantMsg: `MustVoidSubscribe "f.stream"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := trpcgo.NewRouter()
+			tt.register(r)
+			defer func() {
+				v := recover()
+				if v == nil {
+					t.Fatal("expected panic, got none")
+				}
+				msg, ok := v.(string)
+				if !ok {
+					t.Fatalf("panic value is %T: %v", v, v)
+				}
+				if !strings.Contains(msg, tt.wantMsg) {
+					t.Fatalf("panic message %q does not contain %q", msg, tt.wantMsg)
+				}
+				if !strings.Contains(msg, "already registered") {
+					t.Fatalf("panic message %q missing 'already registered'", msg)
+				}
+			}()
+			tt.dup(r)
+		})
+	}
+}
+
+func TestMustRegistrationSucceeds(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.MustQuery(r, "q", func(ctx context.Context, _ struct{}) (string, error) { return "", nil })
+	trpcgo.MustVoidQuery(r, "vq", func(ctx context.Context) (string, error) { return "", nil })
+	trpcgo.MustMutation(r, "m", func(ctx context.Context, _ struct{}) (string, error) { return "", nil })
+	trpcgo.MustVoidMutation(r, "vm", func(ctx context.Context) (string, error) { return "", nil })
+	trpcgo.MustSubscribe(r, "s", func(ctx context.Context, _ struct{}) (<-chan string, error) { return make(chan string), nil })
+	trpcgo.MustVoidSubscribe(r, "vs", func(ctx context.Context) (<-chan string, error) { return make(chan string), nil })
+}
+
+func TestDuplicateRegistrationAcrossProcedureKindsReturnsError(t *testing.T) {
+	router := trpcgo.NewRouter()
+	err := trpcgo.Query(router, "user.get", func(ctx context.Context, input struct{ ID string }) (string, error) {
+		return input.ID, nil
+	})
+	if err != nil {
+		t.Fatalf("first registration failed: %v", err)
+	}
+
+	err = trpcgo.Mutation(router, "user.get", func(ctx context.Context, input struct{ ID string }) (string, error) {
+		return input.ID, nil
+	})
+	if err == nil {
+		t.Fatal("expected duplicate registration error")
+	}
+	if !strings.Contains(err.Error(), "user.get") || !strings.Contains(err.Error(), "already registered") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 // --- Internal Error Masking Test ---

@@ -36,8 +36,10 @@ func parseRequest(r *http.Request, basePath string, isBatch bool, maxBodySize in
 	// r.URL.Path is already decoded by Go's net/http — do NOT call
 	// PathUnescape again, as that would create a double-decode allowing
 	// double-encoded paths to bypass reverse proxy path-based ACLs.
-	rawPath := strings.TrimPrefix(r.URL.Path, basePath)
-	rawPath = strings.TrimPrefix(rawPath, "/")
+	rawPath, ok := stripBasePath(r.URL.Path, basePath)
+	if !ok {
+		return nil, NewError(CodeNotFound, "no procedure path specified")
+	}
 
 	if rawPath == "" {
 		return nil, NewError(CodeNotFound, "no procedure path specified")
@@ -147,7 +149,42 @@ func isBatchRequest(r *http.Request) bool {
 
 // parsePaths extracts procedure paths from the URL without parsing inputs.
 func parsePaths(r *http.Request, basePath string) []string {
-	rawPath := strings.TrimPrefix(r.URL.Path, basePath)
-	rawPath = strings.TrimPrefix(rawPath, "/")
+	rawPath, ok := stripBasePath(r.URL.Path, basePath)
+	if !ok || rawPath == "" {
+		return nil
+	}
 	return strings.Split(rawPath, ",")
+}
+
+// stripBasePath removes the configured handler base path from an HTTP path.
+// It enforces a path-segment boundary so basePath "/trpc" does not match
+// "/trpcx". Returns ("", true) when path == basePath.
+func stripBasePath(path, basePath string) (string, bool) {
+	if basePath == "" {
+		return strings.TrimPrefix(path, "/"), true
+	}
+
+	if !strings.HasPrefix(basePath, "/") {
+		basePath = "/" + basePath
+	}
+
+	// Normalize trailing slash so "/trpc" and "/trpc/" behave the same.
+	for len(basePath) > 1 && strings.HasSuffix(basePath, "/") {
+		basePath = strings.TrimSuffix(basePath, "/")
+	}
+
+	if basePath == "/" {
+		return strings.TrimPrefix(path, "/"), true
+	}
+
+	if path == basePath {
+		return "", true
+	}
+
+	prefix := basePath + "/"
+	if strings.HasPrefix(path, prefix) {
+		return strings.TrimPrefix(path, prefix), true
+	}
+
+	return "", false
 }

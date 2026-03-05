@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -50,11 +51,11 @@ func (r *Router) Use(mw ...Middleware) {
 	r.middleware = append(r.middleware, mw...)
 }
 
-func (r *Router) register(path string, typ ProcedureType, handler HandlerFunc, mw []Middleware, meta any, inputType, outputType reflect.Type) {
+func (r *Router) register(path string, typ ProcedureType, handler HandlerFunc, mw []Middleware, meta any, inputType, outputType reflect.Type) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.procedures[path]; exists {
-		panic(fmt.Sprintf("trpcgo: procedure %q already registered", path))
+		return fmt.Errorf("trpcgo: procedure %q already registered", path)
 	}
 	r.procedures[path] = &procedure{
 		typ:        typ,
@@ -64,6 +65,7 @@ func (r *Router) register(path string, typ ProcedureType, handler HandlerFunc, m
 		inputType:  inputType,
 		outputType: outputType,
 	}
+	return nil
 }
 
 // Merge copies all procedures from the source routers into this router.
@@ -186,7 +188,16 @@ func (r *Router) executeProcedure(ctx context.Context, proc *procedure, raw json
 				dec := json.NewDecoder(bytes.NewReader(raw))
 				dec.DisallowUnknownFields()
 				if err := dec.Decode(ptr.Interface()); err != nil {
-					return nil, NewError(CodeBadRequest, "unknown field in input")
+					var syntaxErr *json.SyntaxError
+					var typeErr *json.UnmarshalTypeError
+					switch {
+					case errors.As(err, &syntaxErr):
+						return nil, NewError(CodeParseError, "failed to parse input")
+					case errors.As(err, &typeErr):
+						return nil, NewError(CodeBadRequest, "invalid input type")
+					default:
+						return nil, NewError(CodeBadRequest, "unknown field in input")
+					}
 				}
 			} else if err := json.Unmarshal(raw, ptr.Interface()); err != nil {
 				return nil, NewError(CodeParseError, "failed to parse input")
