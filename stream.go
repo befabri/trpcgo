@@ -54,10 +54,19 @@ func makeVoidStreamHandler[O any](fn func(ctx context.Context) (<-chan O, error)
 	}
 }
 
+// parsable is an internal interface that allows executeProcedure to inject an output
+// parser into a stream without changing the streamer interface or sseOptions.
+type parsable interface {
+	setOutputParser(func(any) (any, error))
+}
+
 // sseStream wraps a typed channel for the handler to detect and stream.
 type sseStream[O any] struct {
-	ch <-chan O
+	ch           <-chan O
+	outputParser func(any) (any, error)
 }
+
+func (s *sseStream[O]) setOutputParser(fn func(any) (any, error)) { s.outputParser = fn }
 
 // streamer is the interface the handler checks to detect subscription results.
 type streamer interface {
@@ -70,6 +79,15 @@ type sseOptions struct {
 	reconnectAfterInactivityMs int
 	isDev                      bool
 	formatError                func(*Error) any
+	onError                    func(*Error)
+}
+
+func formatSSEError(opts sseOptions, err *Error) any {
+	publicErr := sanitizeErrorForClient(err)
+	if opts.formatError != nil {
+		return opts.formatError(publicErr)
+	}
+	return defaultErrorEnvelope(publicErr, "", opts.isDev)
 }
 
 func (s *sseStream[O]) writeSSE(ctx context.Context, w http.ResponseWriter, opts sseOptions) error {
@@ -127,25 +145,43 @@ func (s *sseStream[O]) writeSSE(ctx context.Context, w http.ResponseWriter, opts
 				return nil
 			}
 
-			// Check if the value is a TrackedEvent.
+			// Run the output parser on the raw item (type O) before TrackedEvent
+			// unwrapping. OutputParser[O, P] always type-matches the channel element.
+			// The parser may transform the value — use the returned item downstream.
+			item := any(val)
+			if s.outputParser != nil {
+				parsed, perr := s.outputParser(item)
+				if perr != nil {
+					sseErr := WrapError(CodeInternalServerError, "internal server error", perr)
+					if opts.onError != nil {
+						opts.onError(sseErr)
+					}
+					formatted := formatSSEError(opts, sseErr)
+					errData, _ := json.Marshal(formatted)
+					writeSSENamedEvent(w, "serialized-error", errData)
+					flusher.Flush()
+					return nil
+				}
+				item = parsed
+			}
+
+			// Unwrap TrackedEvent from the (possibly transformed) item for serialization.
 			var data []byte
 			var id string
 			var err error
-			if te, ok := any(val).(tracked); ok {
+			if te, ok := item.(tracked); ok {
 				data, err = json.Marshal(te.trackData())
 				id = te.trackID()
 			} else {
-				data, err = json.Marshal(val)
+				data, err = json.Marshal(item)
 			}
 
 			if err != nil {
 				sseErr := NewError(CodeInternalServerError, "failed to serialize subscription data")
-				var formatted any
-				if opts.formatError != nil {
-					formatted = opts.formatError(sseErr)
-				} else {
-					formatted = defaultErrorEnvelope(sseErr, "", opts.isDev)
+				if opts.onError != nil {
+					opts.onError(sseErr)
 				}
+				formatted := formatSSEError(opts, sseErr)
 				errData, _ := json.Marshal(formatted)
 				writeSSENamedEvent(w, "serialized-error", errData)
 				flusher.Flush()

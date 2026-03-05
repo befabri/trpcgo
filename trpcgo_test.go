@@ -4884,3 +4884,656 @@ func TestProcedureBuilderContainsNilOptionIgnored(t *testing.T) {
 		t.Fatalf("middleware calls = %d, want 1", calls)
 	}
 }
+
+// ---- OutputParser tests ----
+
+func TestOutputParserRejectsInvalidOutput(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "bad", func(ctx context.Context) (User, error) {
+		return User{}, nil // ID is empty — parser will reject
+	}, trpcgo.OutputParser(func(u User) (any, error) {
+		if u.ID == "" {
+			return nil, fmt.Errorf("id is required")
+		}
+		return u, nil
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/bad")
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "INTERNAL_SERVER_ERROR") {
+		t.Errorf("body missing INTERNAL_SERVER_ERROR, got: %s", body)
+	}
+	if !strings.Contains(bodyStr, "internal server error") {
+		t.Errorf("body missing generic internal server error message, got: %s", body)
+	}
+	if strings.Contains(bodyStr, "output validation failed") {
+		t.Errorf("body leaked parser-specific failure message, got: %s", body)
+	}
+}
+
+func TestOutputParserTransformsOutput(t *testing.T) {
+	// Parser can reshape the output — the transformed value is what the client sees.
+	type PublicUser struct {
+		ID string `json:"id"`
+	}
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "strip", func(ctx context.Context) (User, error) {
+		return User{ID: "42", Name: "Alice"}, nil
+	}, trpcgo.OutputParser(func(u User) (any, error) {
+		// Strip the name field before sending to client.
+		return PublicUser{ID: u.ID}, nil
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/strip")
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "Alice") {
+		t.Errorf("stripped name must not appear in response, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, `"id":"42"`) {
+		t.Errorf("id missing from response, got: %s", bodyStr)
+	}
+}
+
+func TestOutputParserPassesValidOutput(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "good", func(ctx context.Context) (User, error) {
+		return User{ID: "1", Name: "Alice"}, nil
+	}, trpcgo.OutputParser(func(u User) (any, error) {
+		if u.ID == "" {
+			return nil, fmt.Errorf("id is required")
+		}
+		return u, nil
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/good")
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	data := resultData(t, body)
+	if data["id"] != "1" {
+		t.Fatalf("result.data.id = %v, want 1", data["id"])
+	}
+	if data["name"] != "Alice" {
+		t.Fatalf("result.data.name = %v, want Alice", data["name"])
+	}
+}
+
+func TestOutputParserNotCalledOnHandlerError(t *testing.T) {
+	// When the handler itself returns an error, the output parser must not run.
+	parserCalled := false
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "fail", func(ctx context.Context) (User, error) {
+		return User{}, trpcgo.NewError(trpcgo.CodeNotFound, "not found")
+	}, trpcgo.OutputParser(func(u User) (any, error) {
+		parserCalled = true
+		return u, nil
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/fail")
+	_ = resp.Body.Close()
+
+	if parserCalled {
+		t.Error("output parser must not be called when handler returns an error")
+	}
+}
+
+func TestOutputParserRunsOnNilOutput(t *testing.T) {
+	parserCalled := false
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "nil", func(ctx context.Context) (any, error) {
+		return nil, nil
+	}, trpcgo.WithOutputParser(func(v any) (any, error) {
+		parserCalled = true
+		if v != nil {
+			return nil, fmt.Errorf("expected nil output, got %T", v)
+		}
+		return "normalized", nil
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/nil")
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if !parserCalled {
+		t.Fatal("output parser should be called for nil output")
+	}
+	body := decodeJSON(t, resp)
+	if got := resultScalar(t, body); got != "normalized" {
+		t.Fatalf("result.data = %v, want normalized", got)
+	}
+}
+
+func TestTypedOutputParserRunsOnNilAnyOutput(t *testing.T) {
+	parserCalled := false
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "niltyped", func(ctx context.Context) (any, error) {
+		return nil, nil
+	}, trpcgo.OutputParser(func(v any) (string, error) {
+		parserCalled = true
+		if v != nil {
+			return "", fmt.Errorf("expected nil output, got %T", v)
+		}
+		return "normalized", nil
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/niltyped")
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if !parserCalled {
+		t.Fatal("typed output parser should be called for nil output")
+	}
+	body := decodeJSON(t, resp)
+	if got := resultScalar(t, body); got != "normalized" {
+		t.Fatalf("result.data = %v, want normalized", got)
+	}
+}
+
+func TestOutputParserOnBuilder(t *testing.T) {
+	// WithOutputParser applied via ProcedureBuilder is propagated to the procedure.
+	base := trpcgo.Procedure().WithOutputParser(func(v any) (any, error) {
+		u, ok := v.(User)
+		if !ok {
+			return v, nil
+		}
+		if u.ID == "" {
+			return nil, fmt.Errorf("id required")
+		}
+		return u, nil
+	})
+
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "a", func(ctx context.Context) (User, error) {
+		return User{}, nil // will fail
+	}, base)
+	trpcgo.MustVoidQuery(r, "b", func(ctx context.Context) (User, error) {
+		return User{ID: "1"}, nil // will pass
+	}, base)
+
+	server := newTestServer(t, r.Handler("/trpc"))
+
+	resp := mustGet(t, server, "/trpc/a")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("a: status = %d, want 500", resp.StatusCode)
+	}
+
+	resp = mustGet(t, server, "/trpc/b")
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		t.Errorf("b: status = %d, want 200", resp.StatusCode)
+	} else {
+		body := decodeJSON(t, resp)
+		data := resultData(t, body)
+		if data["id"] != "1" {
+			t.Errorf("b: result.data.id = %v, want 1", data["id"])
+		}
+	}
+}
+
+func TestOutputParserWithMethodRuntime(t *testing.T) {
+	type PublicUser struct {
+		ID string `json:"id"`
+	}
+
+	r := trpcgo.NewRouter()
+	base := trpcgo.Procedure().With(trpcgo.OutputParser(func(u User) (PublicUser, error) {
+		return PublicUser{ID: u.ID}, nil
+	}))
+
+	trpcgo.MustVoidQuery(r, "strip", func(ctx context.Context) (User, error) {
+		return User{ID: "42", Name: "Alice"}, nil
+	}, base)
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/strip")
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	data := resultData(t, body)
+	if data["id"] != "42" {
+		t.Fatalf("result.data.id = %v, want 42", data["id"])
+	}
+	if _, ok := data["name"]; ok {
+		t.Fatalf("result.data should not contain name, got %v", data)
+	}
+}
+
+func TestOutputParserQueryWithInput(t *testing.T) {
+	type PublicUser struct {
+		ID string `json:"id"`
+	}
+
+	r := trpcgo.NewRouter()
+	trpcgo.MustQuery(r, "user.get", func(ctx context.Context, input GetUserInput) (User, error) {
+		return User{ID: input.ID, Name: "Alice"}, nil
+	}, trpcgo.OutputParser(func(u User) (PublicUser, error) {
+		return PublicUser{ID: u.ID}, nil
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/user.get?input="+url.QueryEscape(`{"id":"7"}`))
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	data := resultData(t, body)
+	if data["id"] != "7" {
+		t.Fatalf("result.data.id = %v, want 7", data["id"])
+	}
+	if _, ok := data["name"]; ok {
+		t.Fatalf("result.data should not contain name, got %v", data)
+	}
+}
+
+func TestOutputParserSubscription(t *testing.T) {
+	// When a subscription emits an item that fails the output parser, the stream
+	// must send a serialized-error event and close — same as a marshal failure.
+	// When a valid item is emitted, the parser's returned value is what is sent.
+	type PublicUser struct {
+		ID string `json:"id"`
+	}
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidSubscribe(r, "stream", func(ctx context.Context) (<-chan User, error) {
+		ch := make(chan User, 2)
+		ch <- User{ID: "1", Name: "Alice"} // valid — name will be stripped
+		ch <- User{}                       // invalid: no ID
+		close(ch)
+		return ch, nil
+	}, trpcgo.OutputParser(func(u User) (any, error) {
+		if u.ID == "" {
+			return nil, fmt.Errorf("id required")
+		}
+		return PublicUser{ID: u.ID}, nil // transform: strip name
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp, err := http.Get(server.URL + "/trpc/stream")
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	// First item: emitted with transformed value (no name field).
+	if strings.Contains(bodyStr, "Alice") {
+		t.Errorf("stripped name must not appear in SSE body, got:\n%s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, `"id":"1"`) {
+		t.Errorf("body missing first valid item id, got:\n%s", bodyStr)
+	}
+	// Second item: parser returns error → serialized-error event.
+	if !strings.Contains(bodyStr, "serialized-error") {
+		t.Errorf("body missing serialized-error event, got:\n%s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "INTERNAL_SERVER_ERROR") {
+		t.Errorf("serialized-error missing INTERNAL_SERVER_ERROR, got:\n%s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "output validation failed") {
+		t.Errorf("serialized-error leaked parser-specific failure message, got:\n%s", bodyStr)
+	}
+}
+
+func TestOutputParserErrorFormatterSanitized(t *testing.T) {
+	secret := "redis://secret-output-parser"
+	var formatterErr *trpcgo.Error
+	var formatterBody any
+
+	r := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+		formatterErr = input.Error
+		formatterBody = input.Shape
+		return input.Shape
+	}))
+	trpcgo.MustVoidQuery(r, "bad", func(ctx context.Context) (User, error) {
+		return User{}, nil
+	}, trpcgo.OutputParser(func(u User) (User, error) {
+		return User{}, fmt.Errorf("parser failed: %s", secret)
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/bad")
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+
+	if formatterErr == nil {
+		t.Fatal("formatter error was nil")
+	}
+	if formatterErr.Cause != nil {
+		t.Fatalf("formatter should not receive internal parser cause, got %v", formatterErr.Cause)
+	}
+	if got := formatterErr.Message; got != "internal server error" {
+		t.Fatalf("formatter message = %q, want internal server error", got)
+	}
+	if strings.Contains(string(body), secret) {
+		t.Fatalf("client response leaked parser cause: %s", body)
+	}
+	if formatterBody == nil {
+		t.Fatal("formatter did not receive a shape")
+	}
+}
+
+func TestOutputParserErrorFormatterSSESanitized(t *testing.T) {
+	secret := "sse-parser-secret"
+	var formatterErr *trpcgo.Error
+
+	r := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
+		formatterErr = input.Error
+		return input.Shape
+	}))
+	trpcgo.MustVoidSubscribe(r, "stream", func(ctx context.Context) (<-chan User, error) {
+		ch := make(chan User, 1)
+		ch <- User{ID: "1"}
+		close(ch)
+		return ch, nil
+	}, trpcgo.OutputParser(func(u User) (User, error) {
+		return User{}, fmt.Errorf("parser failed: %s", secret)
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp, err := http.Get(server.URL + "/trpc/stream")
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+
+	if formatterErr == nil {
+		t.Fatal("formatter error was nil")
+	}
+	if formatterErr.Cause != nil {
+		t.Fatalf("formatter should not receive SSE parser cause, got %v", formatterErr.Cause)
+	}
+	if got := formatterErr.Message; got != "internal server error" {
+		t.Fatalf("formatter message = %q, want internal server error", got)
+	}
+	if strings.Contains(string(body), secret) {
+		t.Fatalf("SSE body leaked parser cause: %s", body)
+	}
+	if strings.Contains(string(body), "output validation failed") {
+		t.Fatalf("SSE body leaked parser-specific message: %s", body)
+	}
+}
+
+func TestOutputParserOnErrorReceivesCause(t *testing.T) {
+	secret := "output-parser-cause"
+	var capturedErr *trpcgo.Error
+
+	r := trpcgo.NewRouter(trpcgo.WithOnError(func(ctx context.Context, err *trpcgo.Error, path string) {
+		capturedErr = err
+	}))
+	trpcgo.MustVoidQuery(r, "bad", func(ctx context.Context) (User, error) {
+		return User{}, nil
+	}, trpcgo.OutputParser(func(u User) (User, error) {
+		return User{}, fmt.Errorf("parser failed: %s", secret)
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp := mustGet(t, server, "/trpc/bad")
+	defer func() { _ = resp.Body.Close() }()
+
+	if capturedErr == nil {
+		t.Fatal("onError was not called")
+	}
+	if capturedErr.Cause == nil || !strings.Contains(capturedErr.Cause.Error(), secret) {
+		t.Fatalf("onError cause = %v, want it to contain %q", capturedErr.Cause, secret)
+	}
+	if capturedErr.Message != "internal server error" {
+		t.Fatalf("onError message = %q, want internal server error", capturedErr.Message)
+	}
+}
+
+func TestOutputParserOnErrorReceivesSSECause(t *testing.T) {
+	secret := "output-parser-sse-cause"
+	var capturedErr *trpcgo.Error
+
+	r := trpcgo.NewRouter(trpcgo.WithOnError(func(ctx context.Context, err *trpcgo.Error, path string) {
+		capturedErr = err
+	}))
+	trpcgo.MustVoidSubscribe(r, "stream", func(ctx context.Context) (<-chan User, error) {
+		ch := make(chan User, 1)
+		ch <- User{ID: "1"}
+		close(ch)
+		return ch, nil
+	}, trpcgo.OutputParser(func(u User) (User, error) {
+		return User{}, fmt.Errorf("parser failed: %s", secret)
+	}))
+
+	server := newTestServer(t, r.Handler("/trpc"))
+	resp, err := http.Get(server.URL + "/trpc/stream")
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.ReadAll(resp.Body)
+
+	if capturedErr == nil {
+		t.Fatal("onError was not called")
+	}
+	if capturedErr.Cause == nil || !strings.Contains(capturedErr.Cause.Error(), secret) {
+		t.Fatalf("onError cause = %v, want it to contain %q", capturedErr.Cause, secret)
+	}
+}
+
+func TestRawCallOutputParserErrorSanitized(t *testing.T) {
+	secret := "rawcall-parser-cause"
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "bad", func(ctx context.Context) (User, error) {
+		return User{}, nil
+	}, trpcgo.OutputParser(func(u User) (User, error) {
+		return User{}, fmt.Errorf("parser failed: %s", secret)
+	}))
+
+	_, err := r.RawCall(context.Background(), "bad", nil)
+	if err == nil {
+		t.Fatal("expected RawCall error")
+	}
+	trpcErr, ok := err.(*trpcgo.Error)
+	if !ok {
+		t.Fatalf("RawCall error type = %T, want *trpcgo.Error", err)
+	}
+	if trpcErr.Code != trpcgo.CodeInternalServerError {
+		t.Fatalf("RawCall error code = %v, want INTERNAL_SERVER_ERROR", trpcErr.Code)
+	}
+	if trpcErr.Message != "internal server error" {
+		t.Fatalf("RawCall error message = %q, want internal server error", trpcErr.Message)
+	}
+	if trpcErr.Cause != nil {
+		t.Fatalf("RawCall error should be sanitized, got cause %v", trpcErr.Cause)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("RawCall error leaked parser cause: %v", err)
+	}
+}
+
+func TestOutputParserCodegenReflection(t *testing.T) {
+	// When OutputParser[O, P] is used, GenerateTS must emit P as the output type,
+	// not the handler's O. This verifies the reflection codegen path.
+	type PublicUser struct {
+		ID string `json:"id"`
+	}
+
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "strip", func(ctx context.Context) (User, error) {
+		return User{}, nil
+	}, trpcgo.OutputParser(func(u User) (PublicUser, error) {
+		return PublicUser{ID: u.ID}, nil
+	}))
+
+	outputPath := filepath.Join(t.TempDir(), "trpc.ts")
+	if err := r.GenerateTS(outputPath); err != nil {
+		t.Fatalf("GenerateTS failed: %v", err)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := string(data)
+
+	// Output type must be PublicUser (P), not User (O).
+	if !strings.Contains(ts, "$Query<void, PublicUser>") {
+		t.Errorf("expected $Query<void, PublicUser> in output, got:\n%s", ts)
+	}
+	// PublicUser has no name field — if User was emitted instead, name would appear.
+	if strings.Contains(ts, "name: string;") {
+		t.Errorf("name field must not appear (would indicate User used instead of PublicUser):\n%s", ts)
+	}
+}
+
+func TestWithOutputParserCodegenReflectionUsesUnknown(t *testing.T) {
+	r := trpcgo.NewRouter()
+	base := trpcgo.Procedure().WithOutputParser(func(v any) (any, error) {
+		u, _ := v.(User)
+		return struct {
+			ID string `json:"id"`
+		}{ID: u.ID}, nil
+	})
+
+	trpcgo.MustVoidQuery(r, "strip", func(ctx context.Context) (User, error) {
+		return User{ID: "1", Name: "Alice"}, nil
+	}, base)
+
+	outputPath := filepath.Join(t.TempDir(), "trpc.ts")
+	if err := r.GenerateTS(outputPath); err != nil {
+		t.Fatalf("GenerateTS failed: %v", err)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := string(data)
+
+	if !strings.Contains(ts, "$Query<void, unknown>") {
+		t.Errorf("expected $Query<void, unknown> for untyped WithOutputParser, got:\n%s", ts)
+	}
+	if strings.Contains(ts, "name: string;") {
+		t.Errorf("untyped WithOutputParser should not expose handler output shape in generated TS:\n%s", ts)
+	}
+}
+
+func TestOutputParserPrecedenceReflection(t *testing.T) {
+	t.Run("later untyped parser degrades output to unknown", func(t *testing.T) {
+		r := trpcgo.NewRouter()
+		trpcgo.MustVoidQuery(r, "strip", func(ctx context.Context) (User, error) {
+			return User{ID: "1", Name: "Alice"}, nil
+		},
+			trpcgo.OutputParser(func(u User) (struct {
+				ID string `json:"id"`
+			}, error) {
+				return struct {
+					ID string `json:"id"`
+				}{ID: u.ID}, nil
+			}),
+			trpcgo.WithOutputParser(func(v any) (any, error) {
+				return v, nil
+			}),
+		)
+
+		outputPath := filepath.Join(t.TempDir(), "trpc.ts")
+		if err := r.GenerateTS(outputPath); err != nil {
+			t.Fatalf("GenerateTS failed: %v", err)
+		}
+		data, err := os.ReadFile(outputPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ts := string(data)
+
+		if !strings.Contains(ts, "$Query<void, unknown>") {
+			t.Fatalf("expected later untyped parser to force unknown output, got:\n%s", ts)
+		}
+	})
+
+	t.Run("later typed parser overrides earlier untyped parser", func(t *testing.T) {
+		type PublicUser struct {
+			ID string `json:"id"`
+		}
+
+		r := trpcgo.NewRouter()
+		trpcgo.MustVoidQuery(r, "strip", func(ctx context.Context) (User, error) {
+			return User{ID: "1", Name: "Alice"}, nil
+		},
+			trpcgo.WithOutputParser(func(v any) (any, error) {
+				return v, nil
+			}),
+			trpcgo.OutputParser(func(u User) (PublicUser, error) {
+				return PublicUser{ID: u.ID}, nil
+			}),
+		)
+
+		outputPath := filepath.Join(t.TempDir(), "trpc.ts")
+		if err := r.GenerateTS(outputPath); err != nil {
+			t.Fatalf("GenerateTS failed: %v", err)
+		}
+		data, err := os.ReadFile(outputPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ts := string(data)
+
+		if !strings.Contains(ts, "$Query<void, PublicUser>") {
+			t.Fatalf("expected later typed parser to win, got:\n%s", ts)
+		}
+	})
+
+	t.Run("later nil untyped parser clears earlier typed parser", func(t *testing.T) {
+		r := trpcgo.NewRouter()
+		trpcgo.MustVoidQuery(r, "strip", func(ctx context.Context) (User, error) {
+			return User{ID: "1", Name: "Alice"}, nil
+		},
+			trpcgo.OutputParser(func(u User) (struct {
+				ID string `json:"id"`
+			}, error) {
+				return struct {
+					ID string `json:"id"`
+				}{ID: u.ID}, nil
+			}),
+			trpcgo.WithOutputParser(nil),
+		)
+
+		outputPath := filepath.Join(t.TempDir(), "trpc.ts")
+		if err := r.GenerateTS(outputPath); err != nil {
+			t.Fatalf("GenerateTS failed: %v", err)
+		}
+		data, err := os.ReadFile(outputPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ts := string(data)
+
+		if !strings.Contains(ts, "$Query<void, User>") {
+			t.Fatalf("expected later nil untyped parser to clear parser and restore handler output type, got:\n%s", ts)
+		}
+	})
+}

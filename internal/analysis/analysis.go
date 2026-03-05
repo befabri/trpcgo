@@ -52,13 +52,14 @@ func Analyze(patterns []string, dir string) (*Result, error) {
 	metas := make(map[string]typemap.TypeMeta)
 
 	for _, pkg := range pkgs {
+		varDefs := buildVarDefs(pkg.Syntax, pkg.TypesInfo)
 		for _, file := range pkg.Syntax {
 			ast.Inspect(file, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
 				}
-				if proc, ok := extractProcedure(call, pkg.TypesInfo); ok {
+				if proc, ok := extractProcedure(call, pkg.TypesInfo, varDefs); ok {
 					procedures = append(procedures, proc)
 				}
 				return true
@@ -217,7 +218,7 @@ var registrationFuncs = map[string]funcInfo{
 	"MustVoidSubscribe": {procType: "subscription", hasInput: false, isStream: true},
 }
 
-func extractProcedure(call *ast.CallExpr, info *types.Info) (Procedure, bool) {
+func extractProcedure(call *ast.CallExpr, info *types.Info, varDefs map[types.Object]ast.Expr) (Procedure, bool) {
 	funcName, pkgPath := resolveFuncCall(call.Fun, info)
 	if pkgPath != trpcgoPkgPath {
 		return Procedure{}, false
@@ -281,12 +282,305 @@ func extractProcedure(call *ast.CallExpr, info *types.Info) (Procedure, bool) {
 		}
 	}
 
+	// OutputParser[O, P] overrides the output type with P. Untyped
+	// WithOutputParser falls back to any because the post-parse type is unknown.
+	parserInfo := extractOutputParserInfo(call.Args[3:], info, varDefs)
+	if parserInfo.active {
+		if parserInfo.lastWasUntyped {
+			outputType = anyType()
+		} else if parserInfo.lastTypedOverride != nil {
+			outputType = parserInfo.lastTypedOverride
+		}
+	}
+
 	return Procedure{
 		Path:       path,
 		Type:       fi.procType,
 		InputType:  inputType,
 		OutputType: outputType,
 	}, true
+}
+
+type outputParserInfo struct {
+	active            bool
+	lastTypedOverride types.Type
+	lastWasUntyped    bool
+}
+
+type walkState struct {
+	exprs map[ast.Expr]bool
+	objs  map[types.Object]bool
+}
+
+func newWalkState() *walkState {
+	return &walkState{
+		exprs: make(map[ast.Expr]bool),
+		objs:  make(map[types.Object]bool),
+	}
+}
+
+func (s *walkState) enterExpr(expr ast.Expr) bool {
+	if expr == nil {
+		return false
+	}
+	if s.exprs[expr] {
+		return false
+	}
+	s.exprs[expr] = true
+	return true
+}
+
+func (s *walkState) leaveExpr(expr ast.Expr) {
+	if expr == nil {
+		return
+	}
+	delete(s.exprs, expr)
+}
+
+func (s *walkState) enterObj(obj types.Object) bool {
+	if obj == nil {
+		return false
+	}
+	if s.objs[obj] {
+		return false
+	}
+	s.objs[obj] = true
+	return true
+}
+
+func (s *walkState) leaveObj(obj types.Object) {
+	if obj == nil {
+		return
+	}
+	delete(s.objs, obj)
+}
+
+// extractOutputParserInfo scans option arguments in runtime application order.
+// The last parser wins: typed OutputParser[O, P] sets P, while untyped
+// WithOutputParser forces a fallback to any.
+func extractOutputParserInfo(args []ast.Expr, info *types.Info, varDefs map[types.Object]ast.Expr) outputParserInfo {
+	var out outputParserInfo
+	state := newWalkState()
+	for _, arg := range args {
+		scanOptionExpr(arg, info, varDefs, &out, state)
+	}
+	return out
+}
+
+// outputParserResultType extracts P from a confirmed OutputParser call expression,
+// using types.Info.Instances to handle both explicit [O, P] and inferred type args.
+func outputParserResultType(call *ast.CallExpr, info *types.Info) types.Type {
+	funExpr := call.Fun
+	switch ie := funExpr.(type) {
+	case *ast.IndexListExpr:
+		funExpr = ie.X
+	case *ast.IndexExpr:
+		funExpr = ie.X
+	}
+	var funcIdent *ast.Ident
+	switch fn := funExpr.(type) {
+	case *ast.SelectorExpr:
+		funcIdent = fn.Sel
+	case *ast.Ident:
+		funcIdent = fn
+	}
+	if funcIdent == nil {
+		return nil
+	}
+	inst, ok := info.Instances[funcIdent]
+	if !ok || inst.TypeArgs == nil || inst.TypeArgs.Len() < 2 {
+		return nil
+	}
+	return inst.TypeArgs.At(1) // P is the second type argument
+}
+
+// scanOptionExpr recursively scans a single option argument in left-to-right
+// depth-first order matching the runtime apply order.
+// It handles:
+//   - OutputParser(fn) — typed override leaf
+//   - WithOutputParser(fn) — untyped parser leaf
+//   - Procedure(opts...) — recurse into each opt
+//   - Builder method chains (.Use, .WithMeta, etc.) — recurse into receiver
+//   - Ident references — resolve to defining expression via varDefs and recurse
+func scanOptionExpr(expr ast.Expr, info *types.Info, varDefs map[types.Object]ast.Expr, out *outputParserInfo, state *walkState) {
+	if !state.enterExpr(expr) {
+		return
+	}
+	defer state.leaveExpr(expr)
+	switch e := expr.(type) {
+	case *ast.CallExpr:
+		// Strip explicit type-argument wrappers to identify the callee.
+		funExpr := e.Fun
+		switch ie := funExpr.(type) {
+		case *ast.IndexListExpr:
+			funExpr = ie.X
+		case *ast.IndexExpr:
+			funExpr = ie.X
+		}
+		name, pkg := resolveFuncCall(funExpr, info)
+		if pkg == trpcgoPkgPath {
+			switch name {
+			case "OutputParser":
+				out.active = true
+				out.lastWasUntyped = false
+				if t := outputParserResultType(e, info); t != nil {
+					out.lastTypedOverride = t
+				}
+				return
+			case "WithOutputParser":
+				if withOutputParserIsNilArg(e, info, varDefs) {
+					out.active = false
+					out.lastWasUntyped = false
+					out.lastTypedOverride = nil
+				} else {
+					out.active = true
+					out.lastWasUntyped = true
+					out.lastTypedOverride = nil
+				}
+				return
+			case "Procedure":
+				for _, arg := range e.Args {
+					scanOptionExpr(arg, info, varDefs, out, state)
+				}
+				return
+			}
+		}
+		if sel, ok := e.Fun.(*ast.SelectorExpr); ok {
+			scanOptionExpr(sel.X, info, varDefs, out, state)
+			if isProcedureBuilder(sel.X, info) {
+				switch sel.Sel.Name {
+				case "With":
+					for _, arg := range e.Args {
+						scanOptionExpr(arg, info, varDefs, out, state)
+					}
+				case "WithOutputParser":
+					if withOutputParserIsNilArg(e, info, varDefs) {
+						out.active = false
+						out.lastWasUntyped = false
+						out.lastTypedOverride = nil
+					} else {
+						out.active = true
+						out.lastWasUntyped = true
+						out.lastTypedOverride = nil
+					}
+				}
+			}
+		}
+
+	case *ast.Ident:
+		if obj := info.Uses[e]; obj != nil {
+			if !state.enterObj(obj) {
+				return
+			}
+			defer state.leaveObj(obj)
+			if rhs, ok := varDefs[obj]; ok {
+				scanOptionExpr(rhs, info, varDefs, out, state)
+			}
+		}
+	}
+}
+
+func withOutputParserIsNilArg(call *ast.CallExpr, info *types.Info, varDefs map[types.Object]ast.Expr) bool {
+	if len(call.Args) == 0 {
+		return false
+	}
+	return isDefinitelyNilExpr(call.Args[0], info, varDefs, newWalkState())
+}
+
+func isDefinitelyNilExpr(expr ast.Expr, info *types.Info, varDefs map[types.Object]ast.Expr, state *walkState) bool {
+	if !state.enterExpr(expr) {
+		return false
+	}
+	defer state.leaveExpr(expr)
+	switch e := expr.(type) {
+	case *ast.Ident:
+		if e.Name == "nil" {
+			return true
+		}
+		if obj := info.Uses[e]; obj != nil {
+			if !state.enterObj(obj) {
+				return false
+			}
+			defer state.leaveObj(obj)
+			if rhs, ok := varDefs[obj]; ok {
+				return isDefinitelyNilExpr(rhs, info, varDefs, state)
+			}
+		}
+	case *ast.CallExpr:
+		// Typed nil conversion, e.g. (func(any) (any, error))(nil).
+		if len(e.Args) == 1 {
+			if tv, ok := info.Types[e.Fun]; ok && tv.IsType() {
+				return isDefinitelyNilExpr(e.Args[0], info, varDefs, state)
+			}
+		}
+	}
+	return false
+}
+
+func anyType() types.Type {
+	if obj := types.Universe.Lookup("any"); obj != nil {
+		return obj.Type()
+	}
+	return types.NewInterfaceType(nil, nil).Complete()
+}
+
+// isProcedureBuilder reports whether expr has type *trpcgo.ProcedureBuilder,
+// used to guard the With-method arg recursion against false matches.
+func isProcedureBuilder(expr ast.Expr, info *types.Info) bool {
+	t := exprType(info, expr)
+	if t == nil {
+		return false
+	}
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	named, ok := t.(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	return obj.Pkg() != nil && obj.Pkg().Path() == trpcgoPkgPath && obj.Name() == "ProcedureBuilder"
+}
+
+// buildVarDefs builds a best-effort map from variable objects to their initializing
+// expression. This enables scanOptionExpr to follow pre-bound option variables such as:
+//
+//	parser := trpcgo.OutputParser(fn)
+//	proc   := trpcgo.Procedure(parser)
+//
+// Only single-assignment :=-declaration sites are tracked (info.Defs). Reassignments
+// and multi-return decompositions are skipped; the walk simply finds nothing for them.
+func buildVarDefs(files []*ast.File, info *types.Info) map[types.Object]ast.Expr {
+	defs := make(map[types.Object]ast.Expr)
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch s := n.(type) {
+			case *ast.AssignStmt:
+				if len(s.Lhs) == len(s.Rhs) {
+					for i, lhs := range s.Lhs {
+						ident, ok := lhs.(*ast.Ident)
+						if !ok {
+							continue
+						}
+						if obj := info.Defs[ident]; obj != nil {
+							defs[obj] = s.Rhs[i]
+						}
+					}
+				}
+			case *ast.ValueSpec:
+				for i, name := range s.Names {
+					if i >= len(s.Values) {
+						break
+					}
+					if obj := info.Defs[name]; obj != nil {
+						defs[obj] = s.Values[i]
+					}
+				}
+			}
+			return true
+		})
+	}
+	return defs
 }
 
 func resolveFuncCall(expr ast.Expr, info *types.Info) (name string, pkgPath string) {

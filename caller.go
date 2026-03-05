@@ -34,7 +34,11 @@ func (r *Router) RawCall(ctx context.Context, path string, input json.RawMessage
 		ctx = WithResponseMetadata(ctx)
 	}
 
-	return r.executeProcedure(ctx, proc, input)
+	result, err := r.executeProcedure(ctx, proc, input)
+	if err != nil {
+		return nil, sanitizeReturnedError(err)
+	}
+	return result, nil
 }
 
 // Call invokes a typed procedure by path, running the full middleware chain.

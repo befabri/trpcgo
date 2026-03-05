@@ -64,6 +64,7 @@ func defaultErrorEnvelope(err *Error, path string, isDev bool) ErrorEnvelope {
 
 // formatError builds the error response, applying the custom error formatter if configured.
 func formatError(opts *routerOptions, err *Error, path string, input json.RawMessage, ctx context.Context, typ ProcedureType) any {
+	err = sanitizeErrorForClient(err)
 	shape := defaultErrorEnvelope(err, path, opts.isDev)
 	if opts.errorFormatter == nil {
 		return shape

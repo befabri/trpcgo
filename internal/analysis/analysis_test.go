@@ -1,6 +1,7 @@
 package analysis_test
 
 import (
+	"go/types"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -29,6 +30,18 @@ func findMeta(metas map[string]typemap.TypeMeta, shortName string) (typemap.Type
 func testdataDir(name string) string {
 	_, thisFile, _, _ := runtime.Caller(0)
 	return filepath.Join(filepath.Dir(thisFile), "testdata", name)
+}
+
+func isUnknownOutputType(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch t.String() {
+	case "any", "interface{}":
+		return true
+	default:
+		return false
+	}
 }
 
 func TestAnalyzeBasic(t *testing.T) {
@@ -192,6 +205,223 @@ func TestAnalyzeEnhanced(t *testing.T) {
 			if len(meta.ConstValues) > 0 {
 				t.Errorf("%s should have no const values, got %v", name, meta.ConstValues)
 			}
+		}
+	})
+}
+
+func TestAnalyzeOutputParser(t *testing.T) {
+	dir := testdataDir("outputparser")
+	result, err := analysis.Analyze([]string{"."}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	byPath := make(map[string]analysis.Procedure)
+	for _, p := range result.Procedures {
+		byPath[p.Path] = p
+	}
+
+	if len(byPath) != 20 {
+		t.Fatalf("got %d procedures, want 20", len(byPath))
+	}
+
+	t.Run("explicit type args override output type", func(t *testing.T) {
+		p := byPath["user.get"]
+		if p.OutputType == nil {
+			t.Fatal("user.get has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".PublicUser") {
+			t.Errorf("user.get OutputType = %q, want PublicUser", p.OutputType)
+		}
+	})
+
+	t.Run("inferred type args override output type", func(t *testing.T) {
+		p := byPath["user.list"]
+		if p.OutputType == nil {
+			t.Fatal("user.list has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".PublicUser") {
+			t.Errorf("user.list OutputType = %q, want PublicUser", p.OutputType)
+		}
+	})
+
+	t.Run("no output parser keeps handler output type", func(t *testing.T) {
+		p := byPath["user.noparser"]
+		if p.OutputType == nil {
+			t.Fatal("user.noparser has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".User") {
+			t.Errorf("user.noparser OutputType = %q, want User", p.OutputType)
+		}
+	})
+
+	t.Run("last output parser wins", func(t *testing.T) {
+		p := byPath["user.lastwins"]
+		if p.OutputType == nil {
+			t.Fatal("user.lastwins has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".PublicUser") {
+			t.Errorf("user.lastwins OutputType = %q, want PublicUser (last wins)", p.OutputType)
+		}
+	})
+
+	t.Run("OutputParser nested inside Procedure call", func(t *testing.T) {
+		p := byPath["user.procedure"]
+		if p.OutputType == nil {
+			t.Fatal("user.procedure has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".PublicUser") {
+			t.Errorf("user.procedure OutputType = %q, want PublicUser", p.OutputType)
+		}
+	})
+
+	t.Run("OutputParser in builder chain", func(t *testing.T) {
+		p := byPath["user.chain"]
+		if p.OutputType == nil {
+			t.Fatal("user.chain has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".PublicUser") {
+			t.Errorf("user.chain OutputType = %q, want PublicUser", p.OutputType)
+		}
+	})
+
+	t.Run("pre-bound option variable", func(t *testing.T) {
+		p := byPath["user.prebound"]
+		if p.OutputType == nil {
+			t.Fatal("user.prebound has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".PublicUser") {
+			t.Errorf("user.prebound OutputType = %q, want PublicUser", p.OutputType)
+		}
+	})
+
+	t.Run("OutputParser via With method", func(t *testing.T) {
+		p := byPath["user.with"]
+		if p.OutputType == nil {
+			t.Fatal("user.with has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".PublicUser") {
+			t.Errorf("user.with OutputType = %q, want PublicUser", p.OutputType)
+		}
+	})
+
+	t.Run("pre-bound builder via With method", func(t *testing.T) {
+		p := byPath["user.withprebound"]
+		if p.OutputType == nil {
+			t.Fatal("user.withprebound has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".PublicUser") {
+			t.Errorf("user.withprebound OutputType = %q, want PublicUser", p.OutputType)
+		}
+	})
+
+	t.Run("last output parser wins inside With", func(t *testing.T) {
+		p := byPath["user.withlastwins"]
+		if p.OutputType == nil {
+			t.Fatal("user.withlastwins has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".PublicUser") {
+			t.Errorf("user.withlastwins OutputType = %q, want PublicUser", p.OutputType)
+		}
+	})
+
+	t.Run("OutputParser in builder method arg", func(t *testing.T) {
+		p := byPath["user.withmethod"]
+		if p.OutputType == nil {
+			t.Fatal("user.withmethod has nil OutputType")
+		}
+		if !isUnknownOutputType(p.OutputType) {
+			t.Errorf("user.withmethod OutputType = %q, want any/interface{}", p.OutputType)
+		}
+	})
+
+	t.Run("direct untyped option falls back to unknown", func(t *testing.T) {
+		p := byPath["user.withoption"]
+		if p.OutputType == nil {
+			t.Fatal("user.withoption has nil OutputType")
+		}
+		if !isUnknownOutputType(p.OutputType) {
+			t.Errorf("user.withoption OutputType = %q, want any/interface{}", p.OutputType)
+		}
+	})
+
+	t.Run("later untyped parser overrides earlier typed parser", func(t *testing.T) {
+		p := byPath["user.typedthenuntyped"]
+		if p.OutputType == nil {
+			t.Fatal("user.typedthenuntyped has nil OutputType")
+		}
+		if !isUnknownOutputType(p.OutputType) {
+			t.Errorf("user.typedthenuntyped OutputType = %q, want any/interface{}", p.OutputType)
+		}
+	})
+
+	t.Run("later typed parser overrides earlier untyped parser", func(t *testing.T) {
+		p := byPath["user.untypedthentyped"]
+		if p.OutputType == nil {
+			t.Fatal("user.untypedthentyped has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".PublicUser") {
+			t.Errorf("user.untypedthentyped OutputType = %q, want PublicUser", p.OutputType)
+		}
+	})
+
+	t.Run("later nil untyped parser clears earlier typed parser", func(t *testing.T) {
+		p := byPath["user.typedthennil"]
+		if p.OutputType == nil {
+			t.Fatal("user.typedthennil has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".User") {
+			t.Errorf("user.typedthennil OutputType = %q, want User", p.OutputType)
+		}
+	})
+
+	t.Run("later nil-parser variable clears earlier typed parser", func(t *testing.T) {
+		p := byPath["user.typedthennilvar"]
+		if p.OutputType == nil {
+			t.Fatal("user.typedthennilvar has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".User") {
+			t.Errorf("user.typedthennilvar OutputType = %q, want User", p.OutputType)
+		}
+	})
+
+	t.Run("pre-bound builder variable", func(t *testing.T) {
+		p := byPath["user.varbuilder"]
+		if p.OutputType == nil {
+			t.Fatal("user.varbuilder has nil OutputType")
+		}
+		if !isUnknownOutputType(p.OutputType) {
+			t.Errorf("user.varbuilder OutputType = %q, want any/interface{}", p.OutputType)
+		}
+	})
+
+	t.Run("builder nil untyped parser clears earlier typed parser", func(t *testing.T) {
+		p := byPath["user.buildertypedthennil"]
+		if p.OutputType == nil {
+			t.Fatal("user.buildertypedthennil has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".User") {
+			t.Errorf("user.buildertypedthennil OutputType = %q, want User", p.OutputType)
+		}
+	})
+
+	t.Run("very indirect typed builder chain stays typed", func(t *testing.T) {
+		p := byPath["user.deepwith"]
+		if p.OutputType == nil {
+			t.Fatal("user.deepwith has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".PublicUser") {
+			t.Errorf("user.deepwith OutputType = %q, want PublicUser", p.OutputType)
+		}
+	})
+
+	t.Run("very indirect nil parser chain still clears", func(t *testing.T) {
+		p := byPath["user.deepnilclear"]
+		if p.OutputType == nil {
+			t.Fatal("user.deepnilclear has nil OutputType")
+		}
+		if !strings.HasSuffix(p.OutputType.String(), ".User") {
+			t.Errorf("user.deepnilclear OutputType = %q, want User", p.OutputType)
 		}
 	})
 }
