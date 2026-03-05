@@ -2095,10 +2095,10 @@ func TestDuplicateRegistrationReturnsError(t *testing.T) {
 
 func TestMustRegistrationPanicsOnDuplicate(t *testing.T) {
 	tests := []struct {
-		name    string
+		name     string
 		register func(r *trpcgo.Router)
-		dup     func(r *trpcgo.Router)
-		wantMsg string
+		dup      func(r *trpcgo.Router)
+		wantMsg  string
 	}{
 		{
 			name: "MustQuery",
@@ -4677,5 +4677,210 @@ func TestRawCallWithoutMetadataIsNoop(t *testing.T) {
 	cookies := trpcgo.GetResponseCookies(ctx)
 	if len(cookies) != 0 {
 		t.Errorf("got %d cookies, want 0 (metadata not pre-injected)", len(cookies))
+	}
+}
+
+// ---- ProcedureBuilder tests ----
+
+func TestProcedureBuilderMiddlewareOrder(t *testing.T) {
+	// Middleware registered via Procedure().Use() must execute in the same order
+	// as middleware registered directly with Use() on the same call.
+	var orderA, orderB []string
+
+	mw := func(tag string, out *[]string) trpcgo.Middleware {
+		return func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+			return func(ctx context.Context, input any) (any, error) {
+				*out = append(*out, tag)
+				return next(ctx, input)
+			}
+		}
+	}
+
+	// Path A: flat Use() on registration call
+	routerA := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(routerA, "ping", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	}, trpcgo.Use(mw("1", &orderA), mw("2", &orderA)))
+
+	// Path B: Procedure().Use() builder
+	base := trpcgo.Procedure().Use(mw("1", &orderB), mw("2", &orderB))
+	routerB := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(routerB, "ping", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	}, base)
+
+	call := func(r *trpcgo.Router) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/trpc/ping", nil)
+		req.Header.Set("Accept", "application/json")
+		w := httptest.NewRecorder()
+		r.Handler("/trpc").ServeHTTP(w, req)
+	}
+
+	call(routerA)
+	call(routerB)
+
+	if !slices.Equal(orderA, orderB) {
+		t.Errorf("middleware order mismatch: flat=%v builder=%v", orderA, orderB)
+	}
+}
+
+func TestProcedureBuilderImmutable(t *testing.T) {
+	// Chaining on a builder must not modify the original.
+	base := trpcgo.Procedure().Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return next
+	})
+
+	var calls int
+	extraMW := func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input any) (any, error) {
+			calls++
+			return next(ctx, input)
+		}
+	}
+
+	derived := base.Use(extraMW)
+
+	// Register using base (should not run extraMW)
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "a", func(ctx context.Context) (string, error) { return "ok", nil }, base)
+	trpcgo.MustVoidQuery(r, "b", func(ctx context.Context) (string, error) { return "ok", nil }, derived)
+
+	do := func(path string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/trpc/"+path, nil)
+		req.Header.Set("Accept", "application/json")
+		w := httptest.NewRecorder()
+		r.Handler("/trpc").ServeHTTP(w, req)
+	}
+
+	calls = 0
+	do("a")
+	if calls != 0 {
+		t.Errorf("base procedure ran extraMW (calls=%d); builder is not immutable", calls)
+	}
+
+	calls = 0
+	do("b")
+	if calls != 1 {
+		t.Errorf("derived procedure should run extraMW once, got calls=%d", calls)
+	}
+}
+
+func TestProcedureBuilderComposesWithOtherOpts(t *testing.T) {
+	// A builder and a plain WithMeta() can be passed together; both apply.
+	type role struct{ Admin bool }
+
+	var gotMeta any
+	r := trpcgo.NewRouter()
+	r.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input any) (any, error) {
+			m, _ := trpcgo.GetProcedureMeta(ctx)
+			gotMeta = m.Meta
+			return next(ctx, input)
+		}
+	})
+
+	base := trpcgo.Procedure().Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc { return next })
+	trpcgo.MustVoidQuery(r, "check", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	}, base, trpcgo.WithMeta(role{Admin: true}))
+
+	req := httptest.NewRequest(http.MethodGet, "/trpc/check", nil)
+	req.Header.Set("Accept", "application/json")
+	w := httptest.NewRecorder()
+	r.Handler("/trpc").ServeHTTP(w, req)
+
+	meta, ok := gotMeta.(role)
+	if !ok || !meta.Admin {
+		t.Errorf("expected meta role{Admin:true}, got %v", gotMeta)
+	}
+}
+
+func TestProcedureBuilderNestedComposition(t *testing.T) {
+	// Procedure(base) inherits base's middleware; further Use() appends to it.
+	var order []string
+	mw := func(tag string) trpcgo.Middleware {
+		return func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+			return func(ctx context.Context, input any) (any, error) {
+				order = append(order, tag)
+				return next(ctx, input)
+			}
+		}
+	}
+
+	base := trpcgo.Procedure().Use(mw("auth"))
+	admin := trpcgo.Procedure(base).Use(mw("admin"))
+
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "admin.action", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	}, admin)
+
+	req := httptest.NewRequest(http.MethodGet, "/trpc/admin.action", nil)
+	req.Header.Set("Accept", "application/json")
+	w := httptest.NewRecorder()
+	r.Handler("/trpc").ServeHTTP(w, req)
+
+	want := []string{"auth", "admin"}
+	if !slices.Equal(order, want) {
+		t.Errorf("middleware order = %v, want %v", order, want)
+	}
+}
+
+func TestProcedureOptionNilIgnored(t *testing.T) {
+	r := trpcgo.NewRouter()
+
+	var nilOpt trpcgo.ProcedureOption
+	trpcgo.MustVoidQuery(r, "ping", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	}, nilOpt)
+
+	resp := mustGet(t, newTestServer(t, r.Handler("/trpc")), "/trpc/ping")
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestProcedureBuilderNilReceiverIgnored(t *testing.T) {
+	r := trpcgo.NewRouter()
+
+	var base *trpcgo.ProcedureBuilder
+	trpcgo.MustVoidQuery(r, "ping", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	}, base, trpcgo.WithMeta("ok"))
+
+	resp := mustGet(t, newTestServer(t, r.Handler("/trpc")), "/trpc/ping")
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestProcedureBuilderContainsNilOptionIgnored(t *testing.T) {
+	r := trpcgo.NewRouter()
+
+	var calls int
+	mw := func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input any) (any, error) {
+			calls++
+			return next(ctx, input)
+		}
+	}
+
+	var nilOpt trpcgo.ProcedureOption
+	base := trpcgo.Procedure(nilOpt, trpcgo.Use(mw))
+	trpcgo.MustVoidQuery(r, "ping", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	}, base)
+
+	resp := mustGet(t, newTestServer(t, r.Handler("/trpc")), "/trpc/ping")
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if calls != 1 {
+		t.Fatalf("middleware calls = %d, want 1", calls)
 	}
 }
