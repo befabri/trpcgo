@@ -124,3 +124,103 @@ func TestHandleDirEvent_FileIgnored(t *testing.T) {
 		t.Errorf("file Create event should not add watches, got %d -> %d", before, after)
 	}
 }
+
+func TestWatchRecursiveIncludesEmptyDirs(t *testing.T) {
+	// Regression: pre-existing directories with no .go files must be watched
+	// so that creating the first .go file there fires a watcher event.
+	root := t.TempDir()
+
+	// A dir that exists but has no .go files.
+	emptyDir := filepath.Join(root, "internal", "newpkg")
+	if err := os.MkdirAll(emptyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// An unrelated dir with a .go file, so WatchGoRecursive would watch root.
+	goDir := filepath.Join(root, "cmd")
+	if err := os.MkdirAll(goDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(goDir, "main.go"), []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = watcher.Close() }()
+
+	if err := WatchRecursive(watcher, root); err != nil {
+		t.Fatal(err)
+	}
+
+	watched := map[string]bool{}
+	for _, p := range watcher.WatchList() {
+		watched[p] = true
+	}
+
+	if !watched[emptyDir] {
+		t.Errorf("pre-existing empty dir %q is not watched; first .go file creation would be missed", emptyDir)
+	}
+}
+
+func TestWatchGoRecursive(t *testing.T) {
+	root := t.TempDir()
+
+	mustMkdir := func(rel string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, rel), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite := func(rel string) {
+		t.Helper()
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("package p"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mustMkdir("frontend/src")
+	mustMkdir("pkg/a")
+	mustMkdir("tools/gen")
+	mustMkdir("node_modules/lib")
+
+	mustWrite("pkg/a/a.go")
+	mustWrite("tools/gen/main.go")
+	mustWrite("node_modules/lib/ignored.go")
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = watcher.Close() }()
+
+	if err := WatchGoRecursive(watcher, root); err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]bool{}
+	for _, p := range watcher.WatchList() {
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[rel] = true
+	}
+
+	for _, want := range []string{".", "pkg", filepath.Join("pkg", "a"), "tools", filepath.Join("tools", "gen")} {
+		if !got[want] {
+			t.Errorf("expected %q to be watched", want)
+		}
+	}
+
+	for _, notWant := range []string{"frontend", filepath.Join("frontend", "src"), "node_modules", filepath.Join("node_modules", "lib")} {
+		if got[notWant] {
+			t.Errorf("expected %q not to be watched", notWant)
+		}
+	}
+}

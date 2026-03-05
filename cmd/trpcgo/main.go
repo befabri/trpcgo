@@ -81,7 +81,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Printf("Watching %s for changes (recursive)...", absDir)
+	log.Printf("Watching directories under %s...", absDir)
 
 	// Debounce: regenerate at most once per 200ms.
 	var debounce <-chan time.Time
@@ -92,7 +92,7 @@ func main() {
 				return
 			}
 			// Handle directory creation/removal for recursive watching.
-			fsutil.HandleDirEvent(watcher, event)
+			fsutil.HandleDirEventWith(watcher, event, fsutil.WatchRecursive)
 
 			if filepath.Ext(event.Name) != ".go" {
 				continue

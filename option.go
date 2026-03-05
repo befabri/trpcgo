@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-const defaultMaxBodySize int64 = 1 << 20        // 1 MB
-const defaultMaxBatchSize int = 10               //
-const defaultSSEMaxDuration = 30 * time.Minute   // 30 minutes
+const defaultMaxBodySize int64 = 1 << 20       // 1 MB
+const defaultMaxBatchSize int = 10             //
+const defaultSSEMaxDuration = 30 * time.Minute // 30 minutes
 
 type routerOptions struct {
 	allowBatching                 bool
@@ -29,6 +29,7 @@ type routerOptions struct {
 	typeOutput                    string
 	zodOutput                     string
 	zodMini                       bool
+	watchPackages                 []string
 }
 
 // ErrorFormatterInput is passed to a custom error formatter.
@@ -222,5 +223,26 @@ func WithZodOutput(path string) Option {
 func WithZodMini(enabled bool) Option {
 	return func(o *routerOptions) {
 		o.zodMini = enabled
+	}
+}
+
+// WithWatchPackages restricts dev watcher + static regeneration to the given
+// Go package patterns (go/packages syntax, e.g. "./cmd/api", "./internal/...").
+//
+// When unset, the watcher auto-detects Go directories under the working
+// directory. This option is only used by the dev watcher path
+// (WithDev + WithTypeOutput).
+func WithWatchPackages(patterns ...string) Option {
+	return func(o *routerOptions) {
+		out := make([]string, 0, len(patterns))
+		for _, p := range patterns {
+			if p == "" {
+				continue
+			}
+			out = append(out, p)
+		}
+		if len(out) > 0 {
+			o.watchPackages = out
+		}
 	}
 }

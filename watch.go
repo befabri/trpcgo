@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/befabri/trpcgo/internal/analysis"
@@ -17,6 +18,7 @@ import (
 // watchOpts holds resolved paths for the watcher goroutine.
 type watchOpts struct {
 	dir       string
+	patterns  []string
 	output    string
 	zodOutput string
 	zodStyle  typemap.ZodStyle
@@ -41,6 +43,11 @@ func (r *Router) startWatcher() {
 		return
 	}
 
+	patterns := []string{"."}
+	if len(r.opts.watchPackages) > 0 {
+		patterns = append([]string(nil), r.opts.watchPackages...)
+	}
+
 	output = absPath(output)
 	zodOutput := absPath(r.opts.zodOutput)
 
@@ -50,13 +57,36 @@ func (r *Router) startWatcher() {
 		return
 	}
 
-	if err := fsutil.WatchRecursive(watcher, cwd); err != nil {
-		log.Printf("trpcgo: watcher: failed to watch %s: %v", cwd, err)
-		_ = watcher.Close()
-		return
+	usingPackageScope := false
+	var patternRoots []string
+	if len(r.opts.watchPackages) > 0 {
+		patternRoots = fsutil.PatternRoots(r.opts.watchPackages, cwd)
+		if err := fsutil.WatchScopedRecursive(watcher, patternRoots, cwd); err != nil {
+			log.Printf("trpcgo: watcher: failed to watch package-scoped dirs, falling back to full watch: %v", err)
+		} else {
+			usingPackageScope = true
+			log.Printf("trpcgo: watching package-scoped directories under %s (patterns: %s)", cwd, strings.Join(r.opts.watchPackages, ", "))
+		}
 	}
 
-	log.Printf("trpcgo: watching %s for Go file changes (recursive)", cwd)
+	if !usingPackageScope {
+		// Reset patterns so regeneration uses "." rather than the package
+		// patterns that triggered the fallback.
+		patterns = []string{"."}
+		if err := fsutil.WatchRecursive(watcher, cwd); err != nil {
+			log.Printf("trpcgo: watcher: failed to watch %s: %v", cwd, err)
+			_ = watcher.Close()
+			return
+		}
+		log.Printf("trpcgo: watching Go directories under %s", cwd)
+	}
+
+	// In package-scope mode, restrict newly created dirs to the pattern roots
+	// so ancestor create events don't pull in unrelated trees (e.g. frontend).
+	handleDirCreate := fsutil.WatchRecursive
+	if usingPackageScope {
+		handleDirCreate = fsutil.WatchGoInScope(patternRoots)
+	}
 
 	zodStyle := typemap.ZodStandard
 	if r.opts.zodMini {
@@ -65,6 +95,7 @@ func (r *Router) startWatcher() {
 
 	opts := watchOpts{
 		dir:       cwd,
+		patterns:  patterns,
 		output:    output,
 		zodOutput: zodOutput,
 		zodStyle:  zodStyle,
@@ -88,7 +119,7 @@ func (r *Router) startWatcher() {
 					return
 				}
 				// Handle directory creation/removal for recursive watching.
-				fsutil.HandleDirEvent(watcher, event)
+				fsutil.HandleDirEventWith(watcher, event, handleDirCreate)
 
 				if filepath.Ext(event.Name) != ".go" {
 					continue
@@ -130,7 +161,7 @@ func absPath(p string) string {
 // regenerate TypeScript types (and optionally Zod schemas). If the source
 // has errors, the previous files are preserved.
 func regenerateFromSource(opts watchOpts) {
-	result, err := analysis.Analyze([]string{"."}, opts.dir)
+	result, err := analysis.Analyze(opts.patterns, opts.dir)
 	if err != nil {
 		// Source is broken — keep previous types.
 		log.Printf("trpcgo: source has errors, keeping previous types")
