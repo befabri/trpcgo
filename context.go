@@ -34,10 +34,6 @@ func GetMeta[T any](ctx context.Context) (T, bool) {
 	return val, ok
 }
 
-func withProcedureMeta(ctx context.Context, pm ProcedureMeta) context.Context {
-	return context.WithValue(ctx, ctxKeyProcedureMeta, pm)
-}
-
 // mergeContexts returns a context that carries values from valuesCtx but
 // cancels when either cancelCtx or valuesCtx is done (whichever fires first).
 // This ensures that request cancellation propagates even when a user-supplied

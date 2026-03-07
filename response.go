@@ -33,25 +33,6 @@ func getResponseMetadata(ctx context.Context) *responseMetadata {
 	return rm
 }
 
-// applyResponseMetadata writes any accumulated cookies and headers to the
-// ResponseWriter. Must be called before WriteHeader.
-func applyResponseMetadata(ctx context.Context, w http.ResponseWriter) {
-	rm := getResponseMetadata(ctx)
-	if rm == nil {
-		return
-	}
-	rm.mu.Lock()
-	defer rm.mu.Unlock()
-	for key, values := range rm.headers {
-		for _, v := range values {
-			w.Header().Add(key, v)
-		}
-	}
-	for _, c := range rm.cookies {
-		http.SetCookie(w, c)
-	}
-}
-
 // SetCookie adds a cookie to be set on the HTTP response. Call this from
 // within a procedure handler or middleware. If the context does not carry
 // response metadata (e.g. called outside the HTTP handler), this is a no-op.

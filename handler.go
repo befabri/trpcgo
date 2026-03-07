@@ -9,15 +9,14 @@ import (
 )
 
 type httpHandler struct {
-	router     *Router               // kept for executeProcedure (shared with RawCall)
-	procedures map[string]*procedure // frozen snapshot — no lock on the hot path
-	opts       *routerOptions        // pointer to router's opts (immutable after construction)
+	router     *Router          // kept for ExecuteEntry (shared with RawCall)
+	procedures *ProcedureMap    // frozen snapshot — no lock on the hot path
+	opts       *routerOptions   // pointer to router's opts (immutable after construction)
 	basePath   string
 }
 
-func (h *httpHandler) lookup(path string) (*procedure, bool) {
-	p, ok := h.procedures[path]
-	return p, ok
+func (h *httpHandler) lookup(path string) (*ProcedureEntry, bool) {
+	return h.procedures.Lookup(path)
 }
 
 type callResult struct {
@@ -135,7 +134,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						h.opts.onError(ctx, WrapError(CodeInternalServerError, "internal server error", err), path)
 					}
 				}
-				h.writeErrorResponse(w, sanitizeReturnedError(err), "", ctx, "")
+				h.writeErrorResponse(w, SanitizeError(err), "", ctx, "")
 			}
 			return
 		}
@@ -149,7 +148,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.writeErrorResponse(w, NewError(CodeInternalServerError, "failed to serialize response"), "", ctx, "")
 			return
 		}
-		applyResponseMetadata(ctx, w)
+		ApplyResponseMetadata(ctx, w)
 		w.WriteHeader(results[0].status)
 		_, _ = w.Write(data)
 		return
@@ -168,7 +167,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	statusCode := determineBatchStatus(results)
-	applyResponseMetadata(ctx, w)
+	ApplyResponseMetadata(ctx, w)
 	w.WriteHeader(statusCode)
 	_, _ = w.Write(data)
 }
@@ -184,7 +183,7 @@ func (h *httpHandler) executeCall(ctx context.Context, r *http.Request, call par
 	}
 
 	// Inject procedure metadata into context for middleware access.
-	ctx = withProcedureMeta(ctx, ProcedureMeta{
+	ctx = WithProcedureMeta(ctx, ProcedureMeta{
 		Path: call.path,
 		Type: proc.typ,
 		Meta: proc.meta,
@@ -204,7 +203,7 @@ func (h *httpHandler) executeCall(ctx context.Context, r *http.Request, call par
 	}
 
 	// Decode, validate, and execute through middleware chain.
-	result, err := h.router.executeProcedure(ctx, proc, call.input)
+	result, err := h.router.ExecuteEntry(ctx, proc, call.input)
 	if err != nil {
 		trpcErr, ok := errors.AsType[*Error](err)
 		if h.opts.onError != nil {
@@ -339,7 +338,7 @@ func (h *httpHandler) writeJSONLStream(ctx context.Context, w http.ResponseWrite
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Transfer-Encoding", "chunked")
 	w.Header().Set("Vary", "trpc-accept")
-	applyResponseMetadata(ctx, w)
+	ApplyResponseMetadata(ctx, w)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(headData)
 	_, _ = w.Write([]byte("\n"))
@@ -397,7 +396,7 @@ func (h *httpHandler) writeErrorResponse(w http.ResponseWriter, err *Error, path
 		return
 	}
 	if ctx != nil {
-		applyResponseMetadata(ctx, w)
+		ApplyResponseMetadata(ctx, w)
 	}
 	w.WriteHeader(HTTPStatusFromCode(err.Code))
 	_, _ = w.Write(data)

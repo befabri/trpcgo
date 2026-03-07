@@ -1,7 +1,6 @@
 package trpcgo
 
 import (
-	"errors"
 	"fmt"
 )
 
@@ -48,12 +47,3 @@ func sanitizeErrorForClient(err *Error) *Error {
 	return err
 }
 
-func sanitizeReturnedError(err error) *Error {
-	if err == nil {
-		return nil
-	}
-	if trpcErr, ok := errors.AsType[*Error](err); ok {
-		return sanitizeErrorForClient(trpcErr)
-	}
-	return NewError(CodeInternalServerError, "internal server error")
-}

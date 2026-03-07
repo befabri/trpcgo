@@ -77,6 +77,24 @@ type streamer interface {
 	writeSSE(ctx context.Context, w http.ResponseWriter, opts sseOptions) error
 }
 
+func (s *sseStream[O]) streamConsumer() *StreamConsumer {
+	return &StreamConsumer{
+		recv: func(ctx context.Context) (any, bool) {
+			select {
+			case <-ctx.Done():
+				return nil, false
+			case val, ok := <-s.ch:
+				if !ok {
+					return nil, false
+				}
+				return any(val), true
+			}
+		},
+		outputValidator: s.outputValidator,
+		outputParser:    s.outputParser,
+	}
+}
+
 type sseOptions struct {
 	pingInterval               time.Duration
 	maxDuration                time.Duration
@@ -105,7 +123,7 @@ func (s *sseStream[O]) writeSSE(ctx context.Context, w http.ResponseWriter, opts
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Connection", "keep-alive")
-	applyResponseMetadata(ctx, w)
+	ApplyResponseMetadata(ctx, w)
 	w.WriteHeader(http.StatusOK)
 
 	// Send connected event with client options.

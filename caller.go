@@ -25,7 +25,7 @@ func (r *Router) RawCall(ctx context.Context, path string, input json.RawMessage
 	// Inject procedure metadata and response metadata into context.
 	// Response metadata allows handlers to call SetCookie/SetResponseHeader
 	// even via RawCall (callers can retrieve it with GetResponseMetadata).
-	ctx = withProcedureMeta(ctx, ProcedureMeta{
+	ctx = WithProcedureMeta(ctx, ProcedureMeta{
 		Path: path,
 		Type: proc.typ,
 		Meta: proc.meta,
@@ -36,7 +36,7 @@ func (r *Router) RawCall(ctx context.Context, path string, input json.RawMessage
 
 	result, err := r.executeProcedure(ctx, proc, input)
 	if err != nil {
-		return nil, sanitizeReturnedError(err)
+		return nil, SanitizeError(err)
 	}
 	return result, nil
 }

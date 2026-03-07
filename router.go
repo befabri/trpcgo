@@ -1,10 +1,8 @@
 package trpcgo
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -164,20 +162,9 @@ func (r *Router) Handler(basePath string) http.Handler {
 
 	// Pre-compute middleware chains and snapshot the procedures map so
 	// the HTTP handler needs no locking on the hot path.
-	// IMPORTANT: create new procedure copies — do NOT mutate the originals.
-	// r.procedures entries are shared with RawCall(), which reads them
-	// concurrently under RLock. Writing wrappedHandler on the original
-	// would race with executeProcedure reading it.
-	r.mu.RLock()
-	snapshot := make(map[string]*procedure, len(r.procedures))
-	for path, proc := range r.procedures {
-		snap := *proc // shallow copy
-		snap.wrappedHandler = applyMiddleware(proc.handler, r.middleware, proc.middleware)
-		snapshot[path] = &snap
-	}
-	r.mu.RUnlock()
+	pm := r.BuildProcedureMap()
 
-	return &httpHandler{router: r, procedures: snapshot, opts: &r.opts, basePath: basePath}
+	return &httpHandler{router: r, procedures: pm, opts: &r.opts, basePath: basePath}
 }
 
 func applyOutputHooks(output any, outputValidator func(any) error, outputParser func(any) (any, error)) (any, error) {
@@ -197,73 +184,12 @@ func applyOutputHooks(output any, outputValidator func(any) error, outputParser 
 }
 
 // executeProcedure decodes the raw JSON input, validates it, and calls the handler.
-// This is the single execution path shared by Handler() and RawCall.
+// Used by RawCall where the procedure comes from r.procedures (not a snapshot).
 func (r *Router) executeProcedure(ctx context.Context, proc *procedure, raw json.RawMessage) (any, error) {
-	// Decode the raw input into the registered type.
-	var input any
-	if proc.inputType != nil {
-		ptr := reflect.New(proc.inputType)
-		if len(raw) > 0 {
-			if r.opts.strictInput {
-				dec := json.NewDecoder(bytes.NewReader(raw))
-				dec.DisallowUnknownFields()
-				if err := dec.Decode(ptr.Interface()); err != nil {
-					var syntaxErr *json.SyntaxError
-					var typeErr *json.UnmarshalTypeError
-					switch {
-					case errors.As(err, &syntaxErr):
-						return nil, NewError(CodeParseError, "failed to parse input")
-					case errors.As(err, &typeErr):
-						return nil, NewError(CodeBadRequest, "invalid input type")
-					default:
-						return nil, NewError(CodeBadRequest, "unknown field in input")
-					}
-				}
-			} else if err := json.Unmarshal(raw, ptr.Interface()); err != nil {
-				return nil, NewError(CodeParseError, "failed to parse input")
-			}
-		}
-		input = ptr.Elem().Interface()
-	}
-
-	// Validate the decoded struct.
-	if r.opts.validator != nil && proc.inputType != nil && input != nil {
-		t := proc.inputType
-		for t.Kind() == reflect.Pointer {
-			t = t.Elem()
-		}
-		if t.Kind() == reflect.Struct {
-			if err := r.opts.validator(input); err != nil {
-				return nil, WrapError(CodeBadRequest, "input validation failed", err)
-			}
-		}
-	}
-
 	// Use pre-computed chain if available, otherwise build on the fly.
 	handler := proc.wrappedHandler
 	if handler == nil {
 		handler = applyMiddleware(proc.handler, r.middleware, proc.middleware)
 	}
-
-	output, err := handler(ctx, input)
-	if err != nil {
-		return nil, err
-	}
-
-	// Run output hooks if set. For subscriptions the validator/parser are
-	// injected into the sseStream and run per-item inside writeSSE. For queries
-	// and mutations they run on the single return value, including nil.
-	if proc.outputValidator != nil || proc.outputParser != nil {
-		if p, ok := output.(parsable); ok {
-			p.setOutputValidator(proc.outputValidator)
-			p.setOutputParser(proc.outputParser)
-		} else {
-			output, err = applyOutputHooks(output, proc.outputValidator, proc.outputParser)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	return output, nil
+	return r.executeCommon(ctx, handler, proc.inputType, raw, proc.outputValidator, proc.outputParser)
 }
