@@ -23,6 +23,7 @@ type ProcedureEntry struct {
 	handler         HandlerFunc
 	outputValidator func(any) error
 	outputParser    func(any) (any, error)
+	route           Route
 }
 
 // Type returns the procedure type (query, mutation, subscription).
@@ -36,6 +37,9 @@ func (e *ProcedureEntry) InputType() reflect.Type { return e.inputType }
 
 // OutputType returns the Go output type.
 func (e *ProcedureEntry) OutputType() reflect.Type { return e.outputType }
+
+// Route returns the HTTP routing metadata for this procedure.
+func (e *ProcedureEntry) Route() Route { return e.route }
 
 // ProcedureMap is a frozen snapshot of registered procedures with
 // pre-computed middleware chains. Safe for concurrent use without locking.
@@ -89,6 +93,7 @@ func (r *Router) BuildProcedureMap() *ProcedureMap {
 			handler:         applyMiddleware(proc.handler, r.middleware, proc.middleware),
 			outputValidator: proc.outputValidator,
 			outputParser:    proc.outputParser,
+			route:           proc.route,
 		}
 	}
 	return &ProcedureMap{entries: entries}

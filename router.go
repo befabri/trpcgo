@@ -49,7 +49,7 @@ func (r *Router) Use(mw ...Middleware) {
 	r.middleware = append(r.middleware, mw...)
 }
 
-func (r *Router) register(path string, typ ProcedureType, handler HandlerFunc, mw []Middleware, meta any, inputType, outputType reflect.Type, outputValidator func(any) error, outputParser func(any) (any, error)) error {
+func (r *Router) register(path string, typ ProcedureType, handler HandlerFunc, mw []Middleware, meta any, inputType, outputType reflect.Type, outputValidator func(any) error, outputParser func(any) (any, error), route Route) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.procedures[path]; exists {
@@ -64,6 +64,7 @@ func (r *Router) register(path string, typ ProcedureType, handler HandlerFunc, m
 		outputType:      outputType,
 		outputValidator: outputValidator,
 		outputParser:    outputParser,
+		route:           route,
 	}
 	return nil
 }
@@ -113,6 +114,7 @@ func (r *Router) Merge(sources ...*Router) error {
 			outputType:      e.proc.outputType,
 			outputValidator: e.proc.outputValidator,
 			outputParser:    e.proc.outputParser,
+			route:           e.proc.route,
 		}
 	}
 	return nil

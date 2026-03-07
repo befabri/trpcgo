@@ -31,6 +31,31 @@ type procedure struct {
 	outputType      reflect.Type
 	outputValidator func(any) error
 	outputParser    func(any) (any, error)
+	route           Route // oRPC route metadata (ignored by tRPC handler)
+}
+
+// Route configures HTTP routing for a procedure. Used by oRPC to map
+// procedures to REST-like endpoints with explicit methods and paths.
+// The tRPC handler ignores these fields.
+type Route struct {
+	// Method is the HTTP method (GET, POST, PUT, DELETE, PATCH).
+	// Empty means the protocol handler picks the default.
+	Method string
+	// Path is the HTTP path pattern (e.g., "/planets/{id}").
+	// Empty means the path is derived from the procedure's dot-separated name.
+	Path string
+	// Tags are OpenAPI tags for grouping endpoints.
+	Tags []string
+	// Summary is a short description for OpenAPI documentation.
+	Summary string
+	// Description is a longer description for OpenAPI documentation.
+	Description string
+	// OperationID is the OpenAPI operationId.
+	OperationID string
+	// Deprecated marks the procedure as deprecated in OpenAPI.
+	Deprecated bool
+	// SuccessStatus overrides the default success HTTP status code (200).
+	SuccessStatus int
 }
 
 // ProcedureOption configures a single procedure registration.
@@ -51,6 +76,7 @@ type procedureConfig struct {
 	outputValidator  func(any) error
 	outputParser     func(any) (any, error)
 	parsedOutputType reflect.Type // non-nil when OutputParser[O,P] provides a concrete P
+	route            Route
 }
 
 func collectProcedureConfig(opts []ProcedureOption) procedureConfig {
@@ -164,6 +190,57 @@ func OutputParser[O, P any](fn func(O) (P, error)) ProcedureOption {
 			}
 			return fn(typed)
 		}
+	})
+}
+
+// WithRoute sets HTTP routing metadata for a procedure. Used by oRPC
+// to map procedures to REST-like endpoints. The tRPC handler ignores this.
+func WithRoute(method, path string) ProcedureOption {
+	return procedureOptionFunc(func(c *procedureConfig) {
+		c.route.Method = method
+		c.route.Path = path
+	})
+}
+
+// WithTags sets OpenAPI tags for a procedure.
+func WithTags(tags ...string) ProcedureOption {
+	return procedureOptionFunc(func(c *procedureConfig) {
+		c.route.Tags = tags
+	})
+}
+
+// WithSummary sets the OpenAPI summary for a procedure.
+func WithSummary(summary string) ProcedureOption {
+	return procedureOptionFunc(func(c *procedureConfig) {
+		c.route.Summary = summary
+	})
+}
+
+// WithDescription sets the OpenAPI description for a procedure.
+func WithDescription(description string) ProcedureOption {
+	return procedureOptionFunc(func(c *procedureConfig) {
+		c.route.Description = description
+	})
+}
+
+// WithOperationID sets the OpenAPI operation ID for a procedure.
+func WithOperationID(id string) ProcedureOption {
+	return procedureOptionFunc(func(c *procedureConfig) {
+		c.route.OperationID = id
+	})
+}
+
+// WithDeprecated marks a procedure as deprecated in OpenAPI documentation.
+func WithDeprecated(deprecated bool) ProcedureOption {
+	return procedureOptionFunc(func(c *procedureConfig) {
+		c.route.Deprecated = deprecated
+	})
+}
+
+// WithSuccessStatus overrides the default success HTTP status (200) for a procedure.
+func WithSuccessStatus(status int) ProcedureOption {
+	return procedureOptionFunc(func(c *procedureConfig) {
+		c.route.SuccessStatus = status
 	})
 }
 
