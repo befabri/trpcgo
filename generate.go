@@ -37,6 +37,28 @@ func (r *Router) GenerateTS(outputPath string) error {
 	return os.WriteFile(outputPath, buf.Bytes(), 0o644)
 }
 
+// GenerateORPC writes oRPC RouterClient TypeScript type definitions for all
+// registered procedures. Like GenerateTS but emits @orpc/client types instead
+// of @trpc/server types.
+func (r *Router) GenerateORPC(outputPath string) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	dir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating output directory: %w", err)
+	}
+
+	procs, defs := r.convertProcedures()
+
+	var buf bytes.Buffer
+	if err := codegen.WriteORPCRouter(&buf, procs, defs); err != nil {
+		return fmt.Errorf("generating oRPC types: %w", err)
+	}
+
+	return os.WriteFile(outputPath, buf.Bytes(), 0o644)
+}
+
 // GenerateZod writes Zod validation schemas for all registered procedure
 // input types. Uses the same reflect-based type information as GenerateTS,
 // enriched with Go kind and validate tag metadata.

@@ -1407,3 +1407,53 @@ func TestZodOmitE2E(t *testing.T) {
 		}
 	})
 }
+
+func generateORPCFromFixture(t *testing.T, name string) string {
+	t.Helper()
+	dir := testdataDir(name)
+	result, err := analysis.Analyze([]string{"."}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if _, err := codegen.GenerateORPC(&buf, result, result.TypeMetas); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
+}
+
+func TestGenerateORPCFromBasicFixture(t *testing.T) {
+	output := generateORPCFromFixture(t, "basic")
+
+	checks := []string{
+		"@orpc/client",
+		"export interface User {",
+		"export interface GetUserByIdInput {",
+		"export interface CreateUserInput {",
+		"export type RouterClient =",
+		"$Proc<GetUserByIdInput, User>",
+		"$Proc<void, User[]>",
+		"$Proc<CreateUserInput, User>",
+		"$Sub<void, User>",
+		"user: {",
+	}
+	for _, c := range checks {
+		if !strings.Contains(output, c) {
+			t.Errorf("output missing %q\nOutput:\n%s", c, output)
+		}
+	}
+
+	// Must NOT contain tRPC-specific types.
+	trpcOnly := []string{
+		"@trpc/server",
+		"TRPCQueryProcedure",
+		"TRPCMutationProcedure",
+		"AppRouter",
+		"TRPCRouterDef",
+	}
+	for _, c := range trpcOnly {
+		if strings.Contains(output, c) {
+			t.Errorf("oRPC output should NOT contain tRPC type %q", c)
+		}
+	}
+}
