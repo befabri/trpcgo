@@ -223,6 +223,89 @@ func TestHandler_Subscription(t *testing.T) {
 	}
 }
 
+func TestHandler_PathTraversal(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc")
+
+	req := httptest.NewRequest(http.MethodGet, "/trpc/../etc/passwd", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest && rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 400 or 404 for path traversal, got %d", rec.Code)
+	}
+}
+
+func TestHandler_MutationGETNotAllowed(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc")
+
+	req := httptest.NewRequest(http.MethodGet, "/trpc/greet", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 (mutations use POST), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_EmptyBasePath(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "")
+
+	req := httptest.NewRequest(http.MethodGet, "/ping", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_ErrorCallback(t *testing.T) {
+	var calledPath string
+	r := trpcgo.NewRouter(
+		trpcgo.WithOnError(func(ctx context.Context, err *trpcgo.Error, path string) {
+			calledPath = path
+		}),
+	)
+	if err := trpcgo.Query(r, "echo", func(ctx context.Context, input echoInput) (echoOutput, error) {
+		return echoOutput{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := trpc.NewHandler(r, "/trpc")
+	req := httptest.NewRequest(http.MethodGet, "/trpc/nonexistent", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+	if calledPath != "nonexistent" {
+		t.Fatalf("expected error callback for path 'nonexistent', got %q", calledPath)
+	}
+}
+
+func TestHandler_BatchDisabled(t *testing.T) {
+	r := trpcgo.NewRouter(trpcgo.WithBatching(false))
+	if err := trpcgo.VoidQuery(r, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := trpc.NewHandler(r, "/trpc")
+	req := httptest.NewRequest(http.MethodGet, "/trpc/ping,ping?batch=1", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for disabled batching, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandler_VoidQuery(t *testing.T) {
 	r := setupRouter(t)
 	h := trpc.NewHandler(r, "/trpc")

@@ -140,12 +140,17 @@ func (r *Router) Close() error {
 	return nil
 }
 
-// Handler returns an http.Handler that serves all registered procedures.
+// Handler returns an http.Handler that serves all registered procedures
+// using the tRPC wire format.
 // basePath is stripped from incoming request URLs before procedure lookup.
 //
 // When WithDev and WithTypeOutput are both set, the TypeScript type file
 // is generated and a file watcher is started to regenerate types when
 // Go source changes. Call Close() to stop the watcher.
+//
+// Deprecated: Use [trpc.NewHandler] or [orpc.NewHandler] from the protocol
+// sub-packages instead. They provide the same functionality while keeping
+// protocol handling decoupled from the core router.
 func (r *Router) Handler(basePath string) http.Handler {
 	if r.opts.zodOutput != "" && r.opts.typeOutput == "" {
 		log.Printf("trpcgo: WithZodOutput is set but WithTypeOutput is not — Zod schemas will not be generated")

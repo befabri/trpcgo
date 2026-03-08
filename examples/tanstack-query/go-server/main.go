@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/befabri/trpcgo"
+	"github.com/befabri/trpcgo/orpc"
+	"github.com/befabri/trpcgo/trpc"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-playground/validator/v10"
@@ -507,7 +509,11 @@ func main() {
 		})
 	})
 
-	r.Handle("/trpc/*", router.Handler("/trpc"))
+	// Serve both tRPC and oRPC from the same router.
+	// tRPC: /trpc/user.getUserById  (dot-separated, @trpc/client)
+	// oRPC: /rpc/user/getUserById   (slash-separated, @orpc/client)
+	r.Handle("/trpc/*", trpc.NewHandler(router, "/trpc"))
+	r.Handle("/rpc/*", orpc.NewHandler(router, "/rpc"))
 
 	log.Println("Go tRPC server listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", r))

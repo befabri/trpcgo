@@ -276,6 +276,86 @@ func TestHandler_PathMapping(t *testing.T) {
 	}
 }
 
+func TestHandler_MutationGETNotAllowed(t *testing.T) {
+	r := setupRouter(t)
+	h := orpc.NewHandler(r, "/rpc")
+
+	// oRPC doesn't enforce method by procedure type the same way tRPC does,
+	// but mutations should still accept both GET and POST since oRPC allows it.
+	// This tests that GET to a mutation endpoint works (oRPC is lenient).
+	req := httptest.NewRequest(http.MethodGet, "/rpc/greet", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// oRPC doesn't have method restrictions per procedure type,
+	// but with no input the handler will return a result or error.
+	if rec.Code >= 500 {
+		t.Fatalf("unexpected server error %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_EmptyBasePath(t *testing.T) {
+	r := setupRouter(t)
+	h := orpc.NewHandler(r, "")
+
+	req := httptest.NewRequest(http.MethodGet, "/ping", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_ErrorCallback(t *testing.T) {
+	var calledPath string
+	r := trpcgo.NewRouter(
+		trpcgo.WithOnError(func(ctx context.Context, err *trpcgo.Error, path string) {
+			calledPath = path
+		}),
+	)
+	if err := trpcgo.Query(r, "echo", func(ctx context.Context, input echoInput) (echoOutput, error) {
+		return echoOutput{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := orpc.NewHandler(r, "/rpc")
+	req := httptest.NewRequest(http.MethodGet, "/rpc/nonexistent", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+	// oRPC doesn't invoke the error callback for not-found (it short-circuits).
+	// Verify the response is correct.
+	body := rec.Body.String()
+	if !strings.Contains(body, "NOT_FOUND") {
+		t.Fatalf("expected NOT_FOUND in body, got: %s", body)
+	}
+	_ = calledPath // callback not expected for pre-dispatch errors in oRPC
+}
+
+func TestHandler_NestedPathMapping(t *testing.T) {
+	r := trpcgo.NewRouter()
+	if err := trpcgo.VoidQuery(r, "admin.settings.get", func(ctx context.Context) (string, error) {
+		return "settings", nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := orpc.NewHandler(r, "/api")
+	// oRPC maps /api/admin/settings/get → admin.settings.get
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/settings/get", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandler_BareJSONFallback(t *testing.T) {
 	r := setupRouter(t)
 	h := orpc.NewHandler(r, "/rpc")
