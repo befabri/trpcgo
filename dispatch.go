@@ -280,6 +280,28 @@ func (r *Router) ErrorCallback() func(context.Context, *Error, string) {
 	return r.opts.onError
 }
 
+// AllowBatching reports whether batch requests are enabled.
+func (r *Router) AllowBatching() bool { return r.opts.allowBatching }
+
+// MaxBatchSize returns the maximum batch size. Returns 0 for unlimited.
+func (r *Router) MaxBatchSize() int { return r.opts.maxBatchSize }
+
+// AllowMethodOverride reports whether queries can be sent as POST.
+func (r *Router) AllowMethodOverride() bool { return r.opts.allowMethodOverride }
+
+// StrictInput reports whether strict input parsing is enabled.
+func (r *Router) StrictInput() bool { return r.opts.strictInput }
+
+// ErrorFormatter returns the user-supplied error formatter function, or nil.
+func (r *Router) ErrorFormatter() func(ErrorFormatterInput) any {
+	return r.opts.errorFormatter
+}
+
+// Validator returns the user-supplied input validator function, or nil.
+func (r *Router) Validator() func(any) error {
+	return r.opts.validator
+}
+
 // --- Exported helpers for protocol handler packages ---
 
 // WithProcedureMeta injects procedure metadata into the context.
