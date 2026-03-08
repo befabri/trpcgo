@@ -15,7 +15,8 @@
 //		return User{ID: input.ID, Name: "Alice"}, nil
 //	})
 //
-//	http.Handle("/trpc/", r.Handler("/trpc"))
+//	// import "github.com/befabri/trpcgo/trpc"
+//	http.Handle("/trpc/", trpc.NewHandler(r, "/trpc"))
 //
 // # Procedures
 //

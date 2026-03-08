@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/befabri/trpcgo"
+	"github.com/befabri/trpcgo/trpc"
 )
 
 func ExampleNewRouter() {
@@ -202,7 +203,7 @@ func ExampleMergeRouters() {
 		fmt.Println(err)
 		return
 	}
-	_ = app.Handler("/trpc")
+	_ = trpc.NewHandler(app, "/trpc")
 
 	fmt.Println("merged")
 	// Output: merged

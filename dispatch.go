@@ -159,7 +159,7 @@ func (r *Router) executeCommon(ctx context.Context, handler HandlerFunc, inputTy
 	}
 
 	// Run output hooks. For subscriptions the validator/parser are
-	// injected into the sseStream and run per-item inside writeSSE or
+	// injected into the sseStream and run per-item inside
 	// StreamConsumer.Recv. For queries and mutations they run here.
 	if outputValidator != nil || outputParser != nil {
 		if p, ok := output.(parsable); ok {
@@ -179,7 +179,7 @@ func (r *Router) executeCommon(ctx context.Context, handler HandlerFunc, inputTy
 // IsStreamResult reports whether a procedure result is a subscription stream.
 // Protocol handler packages use this to detect streams and switch to SSE handling.
 func IsStreamResult(result any) bool {
-	_, ok := result.(streamer)
+	_, ok := result.(streamConsumable)
 	return ok
 }
 
@@ -196,8 +196,7 @@ type StreamConsumer struct {
 // Returns nil if the result is not a stream. The consumer reads items from the
 // underlying channel with output validation/parsing applied.
 //
-// After calling ConsumeStream, do not also call the tRPC-specific writeSSE
-// method on the same result — the stream should be consumed by exactly one reader.
+// The stream should be consumed by exactly one reader.
 func ConsumeStream(result any) *StreamConsumer {
 	if sc, ok := result.(streamConsumable); ok {
 		return sc.streamConsumer()

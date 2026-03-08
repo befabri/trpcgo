@@ -34,17 +34,3 @@ func GetMeta[T any](ctx context.Context) (T, bool) {
 	return val, ok
 }
 
-// mergeContexts returns a context that carries values from valuesCtx but
-// cancels when either cancelCtx or valuesCtx is done (whichever fires first).
-// This ensures that request cancellation propagates even when a user-supplied
-// createContext function returns a context not derived from the HTTP request.
-func mergeContexts(cancelCtx, valuesCtx context.Context) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancelCause(valuesCtx)
-	stop := context.AfterFunc(cancelCtx, func() {
-		cancel(cancelCtx.Err())
-	})
-	return ctx, func() {
-		stop()
-		cancel(nil)
-	}
-}

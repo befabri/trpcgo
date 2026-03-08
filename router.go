@@ -4,15 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
-	"net/http"
 	"reflect"
 	"sync"
 	"sync/atomic"
 )
 
-// Router holds registered procedures and produces an http.Handler
-// implementing the tRPC HTTP wire protocol.
+// Router holds registered procedures. Use [trpc.NewHandler] from the
+// protocol sub-package to serve them over HTTP.
 type Router struct {
 	mu             sync.RWMutex
 	procedures     map[string]*procedure
@@ -138,40 +136,6 @@ func (r *Router) Close() error {
 		close(r.done)
 	})
 	return nil
-}
-
-// Handler returns an http.Handler that serves all registered procedures
-// using the tRPC wire format.
-// basePath is stripped from incoming request URLs before procedure lookup.
-//
-// When WithDev and WithTypeOutput are both set, the TypeScript type file
-// is generated and a file watcher is started to regenerate types when
-// Go source changes. Call Close() to stop the watcher.
-//
-// Deprecated: Use [trpc.NewHandler] or [orpc.NewHandler] from the protocol
-// sub-packages instead. They provide the same functionality while keeping
-// protocol handling decoupled from the core router.
-func (r *Router) Handler(basePath string) http.Handler {
-	if r.opts.zodOutput != "" && r.opts.typeOutput == "" {
-		log.Printf("trpcgo: WithZodOutput is set but WithTypeOutput is not — Zod schemas will not be generated")
-	}
-	if r.opts.typeOutput != "" && r.opts.isDev {
-		if err := r.GenerateTS(r.opts.typeOutput); err != nil {
-			log.Printf("trpcgo: failed to generate TypeScript types: %v", err)
-		}
-		if r.opts.zodOutput != "" {
-			if err := r.GenerateZod(r.opts.zodOutput); err != nil {
-				log.Printf("trpcgo: failed to generate Zod schemas: %v", err)
-			}
-		}
-		r.watcherOnce.Do(r.startWatcher)
-	}
-
-	// Pre-compute middleware chains and snapshot the procedures map so
-	// the HTTP handler needs no locking on the hot path.
-	pm := r.BuildProcedureMap()
-
-	return &httpHandler{router: r, procedures: pm, opts: &r.opts, basePath: basePath}
 }
 
 func applyOutputHooks(output any, outputValidator func(any) error, outputParser func(any) (any, error)) (any, error) {

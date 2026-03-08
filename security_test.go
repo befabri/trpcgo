@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/befabri/trpcgo"
+	"github.com/befabri/trpcgo/trpc"
 )
 
 // --- Batch Amplification ---
@@ -31,7 +32,7 @@ func TestBatchSizeLimitEnforcedBeforeParsing(t *testing.T) {
 		return "ok", nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	// Build a batch with 100 paths (well over the limit of 3).
 	paths := make([]string, 100)
@@ -70,7 +71,7 @@ func TestBatchSizeLimitAtExactBoundary(t *testing.T) {
 	trpcgo.VoidQuery(r, "a", func(ctx context.Context) (string, error) { return "a", nil })
 	trpcgo.VoidQuery(r, "b", func(ctx context.Context) (string, error) { return "b", nil })
 	trpcgo.VoidQuery(r, "c", func(ctx context.Context) (string, error) { return "c", nil })
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	// Exactly at limit — should succeed.
 	resp := mustGet(t, server, "/trpc/a,b?batch=1")
@@ -103,7 +104,7 @@ func TestSSEEventIDNewlineSanitized(t *testing.T) {
 		return ch, nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 	resp, err := http.Get(server.URL + "/trpc/events")
 	if err != nil {
 		t.Fatal(err)
@@ -152,7 +153,7 @@ func TestSSEEventIDCarriageReturnSanitized(t *testing.T) {
 		return ch, nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 	resp, err := http.Get(server.URL + "/trpc/events")
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +184,7 @@ func TestInternalErrorMessageNeverLeaked(t *testing.T) {
 		return "", fmt.Errorf("%s", secretMsg)
 	}, trpcgo.WithMeta("test"))
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	tests := []struct {
 		name string
@@ -235,7 +236,7 @@ func TestInternalErrorLeakedToOnErrorCallback(t *testing.T) {
 		return "", fmt.Errorf("%s", secretMsg)
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 	resp := mustGet(t, server, "/trpc/boom")
 	defer func() { _ = resp.Body.Close() }()
 
@@ -258,7 +259,7 @@ func TestStackTraceNotInProductionMode(t *testing.T) {
 				return "", trpcgo.NewError(trpcgo.CodeBadRequest, "bad input")
 			})
 
-			server := newTestServer(t, r.Handler("/trpc"))
+			server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 			resp := mustGet(t, server, "/trpc/fail")
 			raw, _ := io.ReadAll(resp.Body)
 			defer func() { _ = resp.Body.Close() }()
@@ -284,7 +285,7 @@ func TestHTTPMethodEnforcement(t *testing.T) {
 	trpcgo.VoidQuery(r, "q", func(ctx context.Context) (string, error) { return "ok", nil })
 	trpcgo.Mutation(r, "m", func(ctx context.Context, in string) (string, error) { return in, nil })
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	tests := []struct {
 		method string
@@ -325,7 +326,7 @@ func TestBodySizeLimitNegativeOneMeansUnlimited(t *testing.T) {
 		return fmt.Sprintf("got %d bytes", len(in)), nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	// Send a 2MB body (above the default 1MB limit).
 	bigBody := `"` + strings.Repeat("x", 2*1024*1024) + `"`
@@ -344,7 +345,7 @@ func TestBodySizeLimitZeroKeepsDefault(t *testing.T) {
 		return "ok", nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	// Send a 2MB body — should be rejected by the default 1MB limit.
 	bigBody := `"` + strings.Repeat("x", 2*1024*1024) + `"`
@@ -363,7 +364,7 @@ func TestBodySizeLimitCustomSmall(t *testing.T) {
 		return "ok", nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	// Body well over 64 bytes.
 	resp := mustPost(t, server, "/trpc/echo", `"`+strings.Repeat("a", 200)+`"`)
@@ -386,7 +387,7 @@ func TestMalformedJSONInputRejected(t *testing.T) {
 		return User{ID: "1", Name: in.Name}, nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	tests := []struct {
 		name   string
@@ -435,7 +436,7 @@ func TestPathTraversalAttempts(t *testing.T) {
 		return "ok", nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	// Traversal paths — must get 400 BAD_REQUEST (explicit rejection).
 	traversalPaths := []string{
@@ -478,7 +479,7 @@ func TestPathTraversalInBatch(t *testing.T) {
 		return "ok", nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	// One valid path, one traversal path in batch.
 	resp := mustGet(t, server, "/trpc/safe,../etc/passwd?batch=1")
@@ -498,7 +499,7 @@ func TestNotFoundDoesNotLeakProcedureNames(t *testing.T) {
 		return "admin", nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 	resp := mustGet(t, server, "/trpc/nonexistent")
 	defer func() { _ = resp.Body.Close() }()
 
@@ -521,7 +522,7 @@ func TestBatchEmptyPath(t *testing.T) {
 	trpcgo.VoidQuery(r, "hello", func(ctx context.Context) (string, error) {
 		return "hi", nil
 	})
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	// Empty path after base — no procedure specified.
 	resp := mustGet(t, server, "/trpc/?batch=1")
@@ -540,7 +541,7 @@ func TestBatchWithDuplicatePaths(t *testing.T) {
 		return callCount.Add(1), nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 	resp := mustGet(t, server, "/trpc/counter,counter,counter?batch=1")
 	defer func() { _ = resp.Body.Close() }()
 
@@ -566,7 +567,7 @@ func TestSubscriptionBatchBlockedEvenWhenMixed(t *testing.T) {
 		return ch, nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 	resp := mustGet(t, server, "/trpc/q,sub?batch=1")
 	defer func() { _ = resp.Body.Close() }()
 
@@ -591,7 +592,7 @@ func TestContextCancellationStopsHandler(t *testing.T) {
 		return "", ctx.Err()
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req, _ := http.NewRequestWithContext(ctx, "GET", server.URL+"/trpc/slow", nil)
@@ -631,7 +632,7 @@ func TestSSEMaxDurationEnforced(t *testing.T) {
 		return ch, nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 	start := time.Now()
 	resp, err := http.Get(server.URL + "/trpc/forever")
 	if err != nil {
@@ -663,7 +664,7 @@ func TestSSEMaxDurationDefault(t *testing.T) {
 	})
 
 	// Start SSE connection and verify connected event includes non-zero timeout.
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 	resp, err := http.Get(server.URL + "/trpc/test")
 	if err != nil {
 		t.Fatal(err)
@@ -700,7 +701,7 @@ func TestSSEMaxDurationOptionConventions(t *testing.T) {
 			go func() { <-ctx.Done(); close(ch) }()
 			return ch, nil
 		})
-		server := newTestServer(t, r.Handler("/trpc"))
+		server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 		resp, err := http.Get(server.URL + "/trpc/forever")
 		if err != nil {
 			t.Fatal(err)
@@ -720,7 +721,7 @@ func TestSSEMaxDurationOptionConventions(t *testing.T) {
 			go func() { <-ctx.Done(); close(ch) }()
 			return ch, nil
 		})
-		server := newTestServer(t, r.Handler("/trpc"))
+		server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 		resp, err := http.Get(server.URL + "/trpc/forever")
 		if err != nil {
 			t.Fatal(err)
@@ -743,7 +744,7 @@ func TestSSEMaxDurationOptionConventions(t *testing.T) {
 			go func() { <-ctx.Done(); close(ch) }()
 			return ch, nil
 		})
-		server := newTestServer(t, r.Handler("/trpc"))
+		server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 		start := time.Now()
 		resp, err := http.Get(server.URL + "/trpc/forever")
 		if err != nil {
@@ -778,7 +779,7 @@ func TestSSEMaxConnectionsEnforced(t *testing.T) {
 		return ch, nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	// Open maxConns connections.
 	var conns []*http.Response
@@ -842,7 +843,7 @@ func TestSSEMaxConnectionsConcurrentRace(t *testing.T) {
 		return ch, nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	var accepted atomic.Int64
 	var rejected atomic.Int64
@@ -887,7 +888,7 @@ func TestConcurrentBatchAndSingleRequests(t *testing.T) {
 	trpcgo.VoidQuery(r, "ping", func(ctx context.Context) (string, error) { return "pong", nil })
 	trpcgo.Mutation(r, "echo", func(ctx context.Context, in string) (string, error) { return in, nil })
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	done := make(chan struct{})
 	for i := range 50 {
@@ -944,7 +945,7 @@ func TestResponseMetadataConcurrentAccess(t *testing.T) {
 		})
 	}
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	// JSONL batch to force concurrent execution.
 	req, _ := http.NewRequest("GET", server.URL+"/trpc/proc0,proc1,proc2,proc3,proc4?batch=1", nil)
@@ -977,7 +978,7 @@ func TestErrorFormatterReceivesWrappedInternalError(t *testing.T) {
 		return "", fmt.Errorf("%s", secretMsg)
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 	resp := mustGet(t, server, "/trpc/boom")
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1015,7 +1016,7 @@ func TestURLEncodedProcedurePath(t *testing.T) {
 		return "found", nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	// URL-encoded dot: user%2EgetById
 	resp := mustGet(t, server, "/trpc/user%2EgetById")
@@ -1034,7 +1035,7 @@ func TestBatchingDisabledRejectsBatchQuery(t *testing.T) {
 		return "hi", nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 	resp := mustGet(t, server, "/trpc/hello?batch=1")
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1052,7 +1053,7 @@ func TestJSONLBatchRespectsSizeLimit(t *testing.T) {
 	trpcgo.VoidQuery(r, "b", func(ctx context.Context) (string, error) { return "b", nil })
 	trpcgo.VoidQuery(r, "c", func(ctx context.Context) (string, error) { return "c", nil })
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	req, _ := http.NewRequest("GET", server.URL+"/trpc/a,b,c?batch=1", nil)
 	req.Header.Set("trpc-accept", "application/jsonl")
@@ -1076,7 +1077,7 @@ func TestPOSTBatchBodySizeLimit(t *testing.T) {
 		return in, nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	// POST batch with oversized body.
 	bigInput := `{"0":"` + strings.Repeat("x", 200) + `"}`
@@ -1098,7 +1099,7 @@ func TestNoProcedurePath(t *testing.T) {
 		return "hi", nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	paths := []string{"/trpc/", "/trpc"}
 	for _, path := range paths {
@@ -1122,7 +1123,7 @@ func TestErrorResponseAlwaysHasContentType(t *testing.T) {
 		return "hi", nil
 	})
 
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
 	tests := []struct {
 		name   string

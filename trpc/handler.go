@@ -1,9 +1,6 @@
 // Package trpc provides an HTTP handler that serves trpcgo procedures using
 // the tRPC wire format. Use [NewHandler] to create an http.Handler from a
 // [trpcgo.Router].
-//
-// This is the sub-package equivalent of [trpcgo.Router.Handler]. It uses the
-// exported dispatch API so protocol handling is fully decoupled from the core.
 package trpc
 
 import (

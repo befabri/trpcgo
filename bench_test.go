@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/befabri/trpcgo"
+	"github.com/befabri/trpcgo/trpc"
 )
 
 // BenchmarkServeHTTP measures the full HTTP request path including the
@@ -26,7 +27,7 @@ func BenchmarkServeHTTP(b *testing.B) {
 				})
 			}
 
-			handler := router.Handler("/trpc")
+			handler := trpc.NewHandler(router, "/trpc")
 			target := fmt.Sprintf("/trpc/proc.%d", n/2)
 
 			b.ResetTimer()
@@ -52,7 +53,7 @@ func BenchmarkServeHTTPNotFound(b *testing.B) {
 	trpcgo.VoidQuery(router, "exists", func(ctx context.Context) (string, error) {
 		return "ok", nil
 	})
-	handler := router.Handler("/trpc")
+	handler := trpc.NewHandler(router, "/trpc")
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -75,7 +76,7 @@ func BenchmarkCall(b *testing.B) {
 	trpcgo.VoidQuery(router, "echo", func(ctx context.Context) (string, error) {
 		return "ok", nil
 	})
-	_ = router.Handler("/trpc") // pre-compute middleware chains
+	_ = trpc.NewHandler(router, "/trpc") // pre-compute middleware chains
 
 	ctx := context.Background()
 	b.ResetTimer()

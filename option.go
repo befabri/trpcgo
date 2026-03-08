@@ -200,9 +200,9 @@ func WithValidator(fn func(any) error) Option {
 }
 
 // WithTypeOutput enables automatic TypeScript type generation.
-// When set, calling Router.Handler() writes the TypeScript AppRouter
-// type file to the given path. Use with the top-level registration
-// functions (Query, Mutation, Subscribe, etc.) to capture type info.
+// The path specifies where the TypeScript AppRouter type file is written.
+// Use with the top-level registration functions (Query, Mutation,
+// Subscribe, etc.) to capture type info.
 func WithTypeOutput(path string) Option {
 	return func(o *routerOptions) {
 		o.typeOutput = path

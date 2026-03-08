@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/befabri/trpcgo"
+	"github.com/befabri/trpcgo/trpc"
 )
 
 // ---------- fixture types for codegen tests ----------
@@ -482,7 +483,7 @@ func TestOutputParserTransformTypegenDriftTS(t *testing.T) {
 	}))
 
 	// Runtime behavior: parser strips secretToken.
-	resp := mustGet(t, newTestServer(t, r.Handler("/trpc")), "/trpc/user.get")
+	resp := mustGet(t, newTestServer(t, trpc.NewHandler(r, "/trpc")), "/trpc/user.get")
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -521,7 +522,7 @@ func TestOutputParserTransformTypegenDriftSubscriptionTS(t *testing.T) {
 	}))
 
 	// Runtime behavior: parser strips secretToken from emitted subscription items.
-	server := newTestServer(t, r.Handler("/trpc"))
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 	resp, err := http.Get(server.URL + "/trpc/user.stream")
 	if err != nil {
 		t.Fatalf("subscription request: %v", err)
