@@ -356,6 +356,163 @@ func TestHandler_NestedPathMapping(t *testing.T) {
 	}
 }
 
+func TestHandler_BatchBuffered(t *testing.T) {
+	r := setupRouter(t)
+	h := orpc.NewHandler(r, "/rpc")
+
+	items, _ := json.Marshal([]map[string]any{
+		{"url": "http://localhost/rpc/echo", "body": json.RawMessage(`{"json":{"message":"a"},"meta":[]}`), "method": "POST"},
+		{"url": "http://localhost/rpc/ping"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/rpc/__batch__", strings.NewReader(string(items)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-orpc-batch", "buffered")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("expected 207, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var results []struct {
+		Index int             `json:"index"`
+		Body  json.RawMessage `json:"body"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
+		t.Fatalf("failed to unmarshal batch response: %v\nbody: %s", err, rec.Body.String())
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	// Both should have valid oRPC response bodies.
+	for _, res := range results {
+		var payload struct {
+			JSON json.RawMessage `json:"json"`
+		}
+		if err := json.Unmarshal(res.Body, &payload); err != nil {
+			t.Fatalf("result %d: not valid oRPC payload: %s", res.Index, string(res.Body))
+		}
+	}
+}
+
+func TestHandler_BatchStreaming(t *testing.T) {
+	r := setupRouter(t)
+	h := orpc.NewHandler(r, "/rpc")
+
+	items, _ := json.Marshal([]map[string]any{
+		{"url": "http://localhost/rpc/echo", "body": json.RawMessage(`{"json":{"message":"streamed"},"meta":[]}`), "method": "POST"},
+		{"url": "http://localhost/rpc/ping"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/rpc/__batch__", strings.NewReader(string(items)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-orpc-batch", "streaming")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("expected 207, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Streaming response should be a valid JSON array.
+	var results []struct {
+		Index int             `json:"index"`
+		Body  json.RawMessage `json:"body"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
+		t.Fatalf("failed to unmarshal streaming batch response: %v\nbody: %s", err, rec.Body.String())
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+}
+
+func TestHandler_BatchDisabled(t *testing.T) {
+	r := trpcgo.NewRouter(trpcgo.WithBatching(false))
+	if err := trpcgo.VoidQuery(r, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := orpc.NewHandler(r, "/rpc")
+	items, _ := json.Marshal([]map[string]any{
+		{"url": "http://localhost/rpc/ping"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/rpc/__batch__", strings.NewReader(string(items)))
+	req.Header.Set("x-orpc-batch", "buffered")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for disabled batching, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_BatchSizeLimit(t *testing.T) {
+	r := trpcgo.NewRouter(trpcgo.WithMaxBatchSize(1))
+	if err := trpcgo.VoidQuery(r, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := orpc.NewHandler(r, "/rpc")
+	items, _ := json.Marshal([]map[string]any{
+		{"url": "http://localhost/rpc/ping"},
+		{"url": "http://localhost/rpc/ping"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/rpc/__batch__", strings.NewReader(string(items)))
+	req.Header.Set("x-orpc-batch", "buffered")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 for batch size limit, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_BatchNotFoundItem(t *testing.T) {
+	r := setupRouter(t)
+	h := orpc.NewHandler(r, "/rpc")
+
+	items, _ := json.Marshal([]map[string]any{
+		{"url": "http://localhost/rpc/ping"},
+		{"url": "http://localhost/rpc/nonexistent"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/rpc/__batch__", strings.NewReader(string(items)))
+	req.Header.Set("x-orpc-batch", "buffered")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("expected 207, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var results []struct {
+		Index  int             `json:"index"`
+		Status int             `json:"status"`
+		Body   json.RawMessage `json:"body"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
+		t.Fatal(err)
+	}
+
+	// Find the not-found result (could be in any order due to concurrent execution).
+	found := false
+	for _, res := range results {
+		// Status will be non-zero if it differs from the batch status (207).
+		// A 404 will be included since it differs from 207.
+		body := string(res.Body)
+		if strings.Contains(body, "NOT_FOUND") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected one NOT_FOUND result in batch response: %s", rec.Body.String())
+	}
+}
+
 func TestHandler_BareJSONFallback(t *testing.T) {
 	r := setupRouter(t)
 	h := orpc.NewHandler(r, "/rpc")

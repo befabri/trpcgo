@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -41,6 +42,28 @@ func NewHandler(r *trpcgo.Router, basePath string) *Handler {
 	}
 }
 
+// batchRequestItem is a single request within an oRPC batch.
+type batchRequestItem struct {
+	URL     string            `json:"url"`
+	Method  string            `json:"method,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+	Body    json.RawMessage   `json:"body,omitempty"`
+}
+
+// batchResponseItem is a single response within an oRPC batch.
+type batchResponseItem struct {
+	Index  int `json:"index"`
+	Status int `json:"status,omitempty"`
+	Body   any `json:"body"`
+}
+
+// batchResult is an internal type for passing results between goroutines.
+type batchResult struct {
+	index  int
+	status int
+	body   any
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Only GET and POST.
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
@@ -48,6 +71,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = w.Write(body)
+		return
+	}
+
+	// Check for batch request (x-orpc-batch header).
+	if batchMode := r.Header.Get("x-orpc-batch"); batchMode != "" {
+		h.handleBatch(w, r, batchMode)
 		return
 	}
 
@@ -302,6 +331,250 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, resul
 			pingTicker.Reset(pingInterval)
 		}
 	}
+}
+
+// handleBatch processes an oRPC batch request.
+// Batch wire format:
+//   - GET:  /__batch__?batch=[{url, body, method, headers}, ...]
+//   - POST: /__batch__ with body [{url, body, method, headers}, ...]
+//   - Response: 207 with [{index, status, body}, ...] (buffered or streaming)
+func (h *Handler) handleBatch(w http.ResponseWriter, r *http.Request, mode string) {
+	if !h.router.AllowBatching() {
+		body, status := encodeError(CodeBadRequest, StatusFromCode(CodeBadRequest), "batching is not enabled", nil, false)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+		return
+	}
+
+	items, err := parseBatchItems(r, h.router.MaxBodySize())
+	if err != nil {
+		body, status := encodeError(CodeBadRequest, StatusFromCode(CodeBadRequest), "invalid batch request", nil, false)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+		return
+	}
+
+	if max := h.router.MaxBatchSize(); max > 0 && len(items) > max {
+		body, status := encodeError(CodePayloadTooLarge, StatusFromCode(CodePayloadTooLarge),
+			fmt.Sprintf("batch size %d exceeds limit of %d", len(items), max), nil, false)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+		return
+	}
+
+	// Build context.
+	ctx := r.Context()
+	if cc := h.router.ContextCreator(); cc != nil {
+		userCtx := cc(r.Context(), r)
+		if userCtx != ctx {
+			var cancel context.CancelFunc
+			ctx, cancel = mergeContexts(ctx, userCtx)
+			defer cancel()
+		}
+	}
+	ctx = trpcgo.WithResponseMetadata(ctx)
+
+	// Execute all items concurrently.
+	ch := make(chan batchResult, len(items))
+
+	for i, item := range items {
+		go func(idx int, it batchRequestItem) {
+			defer func() {
+				if rv := recover(); rv != nil {
+					errBody, _ := encodeError(CodeInternalServerError, StatusFromCode(CodeInternalServerError), "internal server error", nil, false)
+					ch <- batchResult{index: idx, status: http.StatusInternalServerError, body: json.RawMessage(errBody)}
+				}
+			}()
+
+			status, body := h.executeBatchItem(ctx, r, it)
+			ch <- batchResult{index: idx, status: status, body: body}
+		}(i, item)
+	}
+
+	batchStatus := http.StatusMultiStatus // 207
+
+	if mode == "streaming" {
+		h.writeBatchStreaming(ctx, w, ch, len(items), batchStatus)
+	} else {
+		h.writeBatchBuffered(ctx, w, ch, len(items), batchStatus)
+	}
+}
+
+// parseBatchItems extracts individual request items from an oRPC batch request.
+func parseBatchItems(r *http.Request, maxBodySize int64) ([]batchRequestItem, error) {
+	var raw []byte
+
+	if r.Method == http.MethodGet {
+		raw = []byte(r.URL.Query().Get("batch"))
+	} else {
+		var reader io.Reader = r.Body
+		if maxBodySize > 0 {
+			reader = io.LimitReader(r.Body, maxBodySize+1)
+		}
+		var err error
+		raw, err = io.ReadAll(reader)
+		if err != nil {
+			return nil, err
+		}
+		if maxBodySize > 0 && int64(len(raw)) > maxBodySize {
+			return nil, fmt.Errorf("request body too large")
+		}
+	}
+
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("empty batch request")
+	}
+
+	var items []batchRequestItem
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// executeBatchItem executes a single procedure from a batch request.
+func (h *Handler) executeBatchItem(ctx context.Context, _ *http.Request, item batchRequestItem) (int, any) {
+	// Extract procedure path from the item URL.
+	path := h.resolveItemPath(item.URL)
+	entry, ok := h.procedures.Lookup(path)
+	if !ok {
+		errBody, _ := encodeError(CodeNotFound, StatusFromCode(CodeNotFound), "procedure not found", nil, false)
+		return http.StatusNotFound, json.RawMessage(errBody)
+	}
+
+	// Subscriptions cannot be batched.
+	if entry.Type() == trpcgo.ProcedureSubscription {
+		errBody, _ := encodeError(CodeBadRequest, StatusFromCode(CodeBadRequest),
+			"subscriptions cannot be batched", nil, false)
+		return http.StatusBadRequest, json.RawMessage(errBody)
+	}
+
+	ctx = trpcgo.WithProcedureMeta(ctx, trpcgo.ProcedureMeta{
+		Path: path,
+		Type: entry.Type(),
+		Meta: entry.Meta(),
+	})
+
+	// Decode input from the item body.
+	var raw json.RawMessage
+	if len(item.Body) > 0 {
+		decoded, err := decodeInput(item.Body)
+		if err != nil {
+			errBody, _ := encodeError(CodeBadRequest, StatusFromCode(CodeBadRequest), "malformed request body", nil, false)
+			return http.StatusBadRequest, json.RawMessage(errBody)
+		}
+		raw = decoded
+	}
+
+	result, err := h.router.ExecuteEntry(ctx, entry, raw)
+	if err != nil {
+		safe := trpcgo.SanitizeError(err)
+		if cb := h.router.ErrorCallback(); cb != nil {
+			if trpcErr, ok := errors.AsType[*trpcgo.Error](err); ok {
+				cb(ctx, trpcErr, path)
+			} else {
+				cb(ctx, trpcgo.WrapError(trpcgo.CodeInternalServerError, "internal server error", err), path)
+			}
+		}
+		code := CodeFromTRPC(safe.Code)
+		errBody, _ := encodeError(code, StatusFromCode(code), safe.Message, nil, safe.Code != trpcgo.CodeInternalServerError)
+		return StatusFromCode(code), json.RawMessage(errBody)
+	}
+
+	// Streams should not reach here (filtered above), but guard anyway.
+	if trpcgo.IsStreamResult(result) {
+		errBody, _ := encodeError(CodeBadRequest, StatusFromCode(CodeBadRequest),
+			"subscriptions cannot be batched", nil, false)
+		return http.StatusBadRequest, json.RawMessage(errBody)
+	}
+
+	successStatus := http.StatusOK
+	if route := entry.Route(); route.SuccessStatus > 0 {
+		successStatus = route.SuccessStatus
+	}
+
+	body, encErr := encodeSuccess(result)
+	if encErr != nil {
+		errBody, _ := encodeError(CodeInternalServerError, StatusFromCode(CodeInternalServerError), "failed to serialize response", nil, false)
+		return http.StatusInternalServerError, json.RawMessage(errBody)
+	}
+	return successStatus, json.RawMessage(body)
+}
+
+// resolveItemPath extracts the procedure dot-path from a batch item URL.
+// The item URL is a full URL like "http://host/rpc/planet/list".
+func (h *Handler) resolveItemPath(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return h.resolvePath(rawURL)
+	}
+	return h.resolvePath(u.Path)
+}
+
+// writeBatchBuffered collects all results and writes a single JSON array.
+func (h *Handler) writeBatchBuffered(ctx context.Context, w http.ResponseWriter, ch <-chan batchResult, n int, batchStatus int) {
+	results := make([]batchResponseItem, 0, n)
+	for range n {
+		res := <-ch
+		item := batchResponseItem{Index: res.index, Body: res.body}
+		if res.status != batchStatus {
+			item.Status = res.status
+		}
+		results = append(results, item)
+	}
+
+	data, err := json.Marshal(results)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	trpcgo.ApplyResponseMetadata(ctx, w)
+	w.WriteHeader(batchStatus)
+	_, _ = w.Write(data)
+}
+
+// writeBatchStreaming writes results as NDJSON as they complete.
+func (h *Handler) writeBatchStreaming(ctx context.Context, w http.ResponseWriter, ch <-chan batchResult, n int, batchStatus int) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		// Fall back to buffered if flushing not supported.
+		h.writeBatchBuffered(ctx, w, ch, n, batchStatus)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	trpcgo.ApplyResponseMetadata(ctx, w)
+	w.WriteHeader(batchStatus)
+
+	_, _ = w.Write([]byte("["))
+	flusher.Flush()
+
+	first := true
+	for range n {
+		res := <-ch
+		item := batchResponseItem{Index: res.index, Body: res.body}
+		if res.status != batchStatus {
+			item.Status = res.status
+		}
+		itemData, err := json.Marshal(item)
+		if err != nil {
+			continue
+		}
+		if !first {
+			_, _ = w.Write([]byte(","))
+		}
+		first = false
+		_, _ = w.Write(itemData)
+		flusher.Flush()
+	}
+
+	_, _ = w.Write([]byte("]"))
+	flusher.Flush()
 }
 
 // mergeContexts returns a context that carries values from valuesCtx but
