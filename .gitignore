@@ -8,6 +8,8 @@
 /trpcgo
 examples/tanstack-query/go-server/example-query
 examples/tanstack-start/go-server/example
+examples/orpc-rest/orpc-rest
+/orpc-rest
 
 # Node
 node_modules/
