@@ -28,6 +28,7 @@ type Handler struct {
 // basePath is the URL prefix stripped before procedure lookup
 // (e.g., "/trpc" means /trpc/user.getById → procedure "user.getById").
 func NewHandler(r *trpcgo.Router, basePath string) *Handler {
+	r.StartDevWatcher()
 	return &Handler{
 		router:     r,
 		procedures: r.BuildProcedureMap(),

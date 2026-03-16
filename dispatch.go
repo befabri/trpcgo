@@ -250,6 +250,17 @@ type streamConsumable interface {
 // IsDev reports whether the router is in development mode.
 func (r *Router) IsDev() bool { return r.opts.isDev }
 
+// StartDevWatcher starts the file watcher if dev mode and type generation
+// are configured. Called by trpc.NewHandler and orpc.NewHandler during
+// construction. In a dual-protocol setup the first handler constructed
+// starts the watcher; subsequent calls are no-ops (guarded by sync.Once).
+func (r *Router) StartDevWatcher() {
+	if !r.opts.isDev {
+		return
+	}
+	r.watcherOnce.Do(r.startWatcher)
+}
+
 // MaxBodySize returns the configured maximum request body size in bytes.
 // Returns 0 for unlimited.
 func (r *Router) MaxBodySize() int64 { return r.opts.maxBodySize }

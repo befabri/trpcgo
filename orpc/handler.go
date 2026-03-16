@@ -55,6 +55,7 @@ type routeSegment struct {
 // basePath is the URL prefix to strip before procedure lookup
 // (e.g., "/rpc" means /rpc/planet/list → procedure "planet.list").
 func NewHandler(r *trpcgo.Router, basePath string) *Handler {
+	r.StartDevWatcher()
 	pm := r.BuildProcedureMap()
 	bp := strings.TrimRight(basePath, "/")
 	if bp != "" && !strings.HasPrefix(bp, "/") {
