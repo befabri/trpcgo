@@ -446,16 +446,32 @@ func TestHandler_BatchStreaming(t *testing.T) {
 		t.Fatalf("expected 207, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Streaming response should be a valid JSON array.
-	var results []struct {
-		Index int             `json:"index"`
-		Body  json.RawMessage `json:"body"`
+	// Streaming response is SSE: message events + done event.
+	body := rec.Body.String()
+	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("expected text/event-stream, got %q", ct)
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
-		t.Fatalf("failed to unmarshal streaming batch response: %v\nbody: %s", err, rec.Body.String())
+	messageCount := strings.Count(body, "event: message\n")
+	if messageCount != 2 {
+		t.Fatalf("expected 2 message events, got %d in: %s", messageCount, body)
 	}
-	if len(results) != 2 {
-		t.Fatalf("expected 2 results, got %d", len(results))
+	if !strings.Contains(body, "event: done\n") {
+		t.Fatalf("expected done event in: %s", body)
+	}
+
+	// Each message data should be a valid batch response item.
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: ") || line == "data: " {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		var item struct {
+			Index int             `json:"index"`
+			Body  json.RawMessage `json:"body"`
+		}
+		if err := json.Unmarshal([]byte(data), &item); err != nil {
+			t.Fatalf("SSE data not valid batch item: %s: %v", data, err)
+		}
 	}
 }
 

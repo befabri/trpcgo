@@ -158,6 +158,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	raw = mergePathParams(raw, pathParams, entry.InputType())
 
+	// For subscriptions, merge Last-Event-Id into input for SSE reconnection.
+	if entry.Type() == trpcgo.ProcedureSubscription {
+		raw = mergeLastEventId(r, raw)
+	}
+
 	// Execute the procedure.
 	result, err := h.router.ExecuteEntry(ctx, entry, raw)
 	if err != nil {
@@ -626,7 +631,9 @@ func (h *Handler) writeBatchBuffered(ctx context.Context, w http.ResponseWriter,
 	_, _ = w.Write(data)
 }
 
-// writeBatchStreaming writes results as NDJSON as they complete.
+// writeBatchStreaming writes results as SSE events as they complete.
+// Each batch item is sent as an "event: message" with JSON data,
+// followed by an "event: done" when all items have been sent.
 func (h *Handler) writeBatchStreaming(ctx context.Context, w http.ResponseWriter, ch <-chan batchResult, n int, batchStatus int) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -635,15 +642,13 @@ func (h *Handler) writeBatchStreaming(ctx context.Context, w http.ResponseWriter
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("Connection", "keep-alive")
 	trpcgo.ApplyResponseMetadata(ctx, w)
 	w.WriteHeader(batchStatus)
 
-	_, _ = w.Write([]byte("["))
-	flusher.Flush()
-
-	first := true
 	for range n {
 		res := <-ch
 		item := batchResponseItem{Index: res.index, Body: res.body}
@@ -654,15 +659,11 @@ func (h *Handler) writeBatchStreaming(ctx context.Context, w http.ResponseWriter
 		if err != nil {
 			continue
 		}
-		if !first {
-			_, _ = w.Write([]byte(","))
-		}
-		first = false
-		_, _ = w.Write(itemData)
+		_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", itemData)
 		flusher.Flush()
 	}
 
-	_, _ = w.Write([]byte("]"))
+	_, _ = fmt.Fprint(w, "event: done\ndata: \n\n")
 	flusher.Flush()
 }
 
@@ -968,6 +969,33 @@ func (h *Handler) hasRoute(urlPath string) bool {
 		}
 	}
 	return false
+}
+
+// mergeLastEventId reads the Last-Event-Id header (or lastEventId query param)
+// and merges it into the input JSON for SSE reconnection support.
+func mergeLastEventId(r *http.Request, input json.RawMessage) json.RawMessage {
+	id := r.Header.Get("Last-Event-Id")
+	if id == "" {
+		id = r.URL.Query().Get("lastEventId")
+	}
+	if id == "" {
+		id = r.URL.Query().Get("Last-Event-Id")
+	}
+	if id == "" {
+		return input
+	}
+	if len(input) == 0 || string(input) == "null" {
+		merged, _ := json.Marshal(map[string]string{"lastEventId": id})
+		return merged
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(input, &obj); err != nil {
+		return input
+	}
+	idVal, _ := json.Marshal(id)
+	obj["lastEventId"] = idVal
+	merged, _ := json.Marshal(obj)
+	return merged
 }
 
 // mergeContexts returns a context that carries values from valuesCtx but
