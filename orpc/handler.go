@@ -226,7 +226,8 @@ func (h *Handler) resolvePath(urlPath, method string) (string, *trpcgo.Procedure
 
 // decodeRequest extracts the raw JSON input from the request.
 // GET: input from ?data= query param (JSON or oRPC-wrapped).
-// POST: input from request body (oRPC-wrapped { json, meta }).
+// POST with multipart/form-data: file upload via oRPC FormData envelope.
+// POST with JSON: input from request body (oRPC-wrapped { json, meta }).
 func (h *Handler) decodeRequest(r *http.Request) (json.RawMessage, error) {
 	if r.Method == http.MethodGet {
 		data := r.URL.Query().Get("data")
@@ -234,6 +235,11 @@ func (h *Handler) decodeRequest(r *http.Request) (json.RawMessage, error) {
 			return nil, nil
 		}
 		return decodeInput([]byte(data))
+	}
+
+	// Multipart/form-data: oRPC file upload envelope.
+	if isMultipart(r) {
+		return decodeFormData(r, h.router.MaxBodySize())
 	}
 
 	// POST: read body with size limit.
