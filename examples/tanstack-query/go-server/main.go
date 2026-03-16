@@ -461,11 +461,20 @@ func main() {
 	router.Use(requestTimer)
 
 	// Queries
-	trpcgo.Query(router, "user.getUserById", svc.GetUserById)
-	trpcgo.Query(router, "user.listUsers", svc.ListUsers)
+	//
+	// WithRoute sets REST-like paths for the oRPC handler:
+	//   oRPC: GET /rpc/users/42     (path param, REST-style)
+	//   tRPC: GET /trpc/user.getUserById?input=...  (unchanged)
+	trpcgo.Query(router, "user.getUserById", svc.GetUserById,
+		trpcgo.WithRoute(http.MethodGet, "/users/{id}"),
+	)
+	trpcgo.Query(router, "user.listUsers", svc.ListUsers,
+		trpcgo.WithRoute(http.MethodGet, "/users"),
+	)
 
 	// VoidQuery — no input, with output validation
 	trpcgo.VoidQuery(router, "system.health", svc.ServerHealth,
+		trpcgo.WithRoute(http.MethodGet, "/health"),
 		trpcgo.OutputValidator(func(info HealthInfo) error {
 			if !info.OK {
 				return fmt.Errorf("health response must be ok")
@@ -478,13 +487,17 @@ func main() {
 	)
 
 	// Mutation with per-procedure middleware (Use) and metadata (WithMeta)
+	// Same /users path as listUsers, but POST method — oRPC dispatches by method.
 	trpcgo.Mutation(router, "user.createUser", svc.CreateUser,
+		trpcgo.WithRoute(http.MethodPost, "/users"),
+		trpcgo.WithSuccessStatus(http.StatusCreated),
 		trpcgo.Use(logMutation),
 		trpcgo.WithMeta(map[string]string{"action": "write"}),
 	)
 
 	// VoidMutation — no input, uses Call internally for server-side caller demo
 	trpcgo.VoidMutation(router, "system.resetDemo", svc.ResetDemo(router),
+		trpcgo.WithRoute(http.MethodPost, "/reset"),
 		trpcgo.Use(requireRequestID),
 	)
 
@@ -499,7 +512,7 @@ func main() {
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
 			if r.Method == "OPTIONS" {
 				w.WriteHeader(204)
@@ -510,8 +523,9 @@ func main() {
 	})
 
 	// Serve both tRPC and oRPC from the same router.
-	// tRPC: /trpc/user.getUserById  (dot-separated, @trpc/client)
-	// oRPC: /rpc/user/getUserById   (slash-separated, @orpc/client)
+	//   tRPC: GET  /trpc/user.getUserById?input=...  (dot-separated, @trpc/client)
+	//   oRPC: GET  /rpc/users/42                     (REST-style via WithRoute, @orpc/client)
+	//   oRPC: POST /rpc/users                        (creates user, returns 201)
 	r.Handle("/trpc/*", trpc.NewHandler(router, "/trpc"))
 	r.Handle("/rpc/*", orpc.NewHandler(router, "/rpc"))
 
