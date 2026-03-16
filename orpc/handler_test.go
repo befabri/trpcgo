@@ -617,7 +617,7 @@ func TestHandler_WithRoutePathAndMethod(t *testing.T) {
 
 	r := trpcgo.NewRouter()
 	if err := trpcgo.Query(r, "planet.get", func(ctx context.Context, input routeInput) (routeOutput, error) {
-		return routeOutput{ID: input.ID}, nil
+		return routeOutput(input), nil
 	}, trpcgo.WithRoute(http.MethodGet, "/planets/{id}")); err != nil {
 		t.Fatal(err)
 	}
@@ -670,7 +670,7 @@ func TestHandler_NumericPathParam(t *testing.T) {
 
 	r := trpcgo.NewRouter()
 	if err := trpcgo.Query(r, "planet.get", func(ctx context.Context, in input) (output, error) {
-		return output{ID: in.ID}, nil
+		return output(in), nil
 	}, trpcgo.WithRoute(http.MethodGet, "/planets/{id}")); err != nil {
 		t.Fatal(err)
 	}
@@ -701,7 +701,7 @@ func TestHandler_MultiplePathParams(t *testing.T) {
 
 	r := trpcgo.NewRouter()
 	if err := trpcgo.Query(r, "moon.get", func(ctx context.Context, in input) (output, error) {
-		return output{PlanetID: in.PlanetID, MoonID: in.MoonID}, nil
+		return output(in), nil
 	}, trpcgo.WithRoute(http.MethodGet, "/planets/{planet_id}/moons/{moon_id}")); err != nil {
 		t.Fatal(err)
 	}
