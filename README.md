@@ -2,13 +2,16 @@
 
 > **Warning:** This project is under active development. APIs may change and things may break.
 
-trpcgo is a Go implementation of the [tRPC](https://trpc.io) protocol. You get the same end-to-end type safety as a TypeScript backend, but your server is written in Go. Define your API with Go structs and handlers, and trpcgo generates the TypeScript `AppRouter` type that plugs directly into `@trpc/client` and `@trpc/react-query`. No manual type syncing, no OpenAPI specs, no protobuf.
+trpcgo is a Go implementation of the [tRPC](https://trpc.io) and [oRPC](https://orpc.unnoq.com) protocols. You get the same end-to-end type safety as a TypeScript backend, but your server is written in Go. Your TypeScript client code looks exactly the same as if the server were written in TypeScript. Define your API with Go structs and handlers, and trpcgo generates TypeScript types that plug directly into `@trpc/client` or `@orpc/client`. No manual type syncing, no OpenAPI specs, no protobuf.
+
+One router, two wire formats. Same handlers, same middleware, same types.
 
 ## Table of Contents
 
 - [Why](#why)
 - [Install](#install)
 - [Quick Start](#quick-start)
+- [Protocol Handlers](#protocol-handlers)
 - [Procedure Types](#procedure-types)
 - [Base Procedures](#base-procedures)
 - [Router Options](#router-options)
@@ -16,18 +19,19 @@ trpcgo is a Go implementation of the [tRPC](https://trpc.io) protocol. You get t
 - [Errors](#errors)
 - [Server-Side Caller](#server-side-caller)
 - [Struct Tags](#struct-tags)
+- [File Uploads](#file-uploads)
 - [CLI](#cli)
 - [Frontend Setup](#frontend-setup)
 - [Router Merging](#router-merging)
 - [How It Works](#how-it-works)
-- [Example](#example)
+- [Examples](#examples)
 - [Compatibility](#compatibility)
 
 ## Why
 
-[tRPC](https://trpc.io) gives you end-to-end typesafe APIs: change a type on the server and TypeScript catches every broken call site at compile time. But tRPC requires a TypeScript server.
+[tRPC](https://trpc.io) and [oRPC](https://orpc.unnoq.com) give you end-to-end typesafe APIs: change a type on the server and TypeScript catches every broken call site at compile time. But both require a TypeScript/Node server.
 
-trpcgo removes that constraint. Write your server in Go and still get the full tRPC developer experience on the frontend. Your TypeScript client code looks exactly the same as if the server were written in TypeScript.
+trpcgo removes that constraint. Write your server in Go and still get the full developer experience on the frontend. Your TypeScript client code looks exactly the same as if the server were written in TypeScript.
 
 ## Install
 
@@ -46,12 +50,17 @@ tool github.com/befabri/trpcgo/cmd/trpcgo
 
 ```go
 //go:generate go tool trpcgo generate -o ../web/gen/trpc.ts --zod ../web/gen/zod.ts
+//go:generate go tool trpcgo generate -format orpc -o ../web/gen/orpc.ts
 
 package main
 
 import (
     "context"
+    "net/http"
+
     "github.com/befabri/trpcgo"
+    "github.com/befabri/trpcgo/trpc"
+    "github.com/befabri/trpcgo/orpc"
 )
 
 type CreateUserInput struct {
@@ -65,11 +74,6 @@ type User struct {
     Email string `json:"email"`
 }
 
-func CreateUser(ctx context.Context, input CreateUserInput) (User, error) {
-    // your logic here
-    return User{ID: "1", Name: input.Name, Email: input.Email}, nil
-}
-
 func main() {
     router := trpcgo.NewRouter(
         trpcgo.WithDev(true),
@@ -77,58 +81,125 @@ func main() {
         trpcgo.WithZodOutput("../web/gen/zod.ts"),
     )
     defer router.Close()
-    trpcgo.MustMutation(router, "user.create", CreateUser)
 
-    http.ListenAndServe(":8080", router.Handler("/trpc"))
+    trpcgo.MustMutation(router, "user.create", func(ctx context.Context, input CreateUserInput) (User, error) {
+        return User{ID: "1", Name: input.Name, Email: input.Email}, nil
+    })
+
+    // Serve over tRPC, oRPC, or both:
+    mux := http.NewServeMux()
+    mux.Handle("/trpc/", trpc.NewHandler(router, "/trpc"))
+    mux.Handle("/rpc/", orpc.NewHandler(router, "/rpc"))
+    http.ListenAndServe(":8080", mux)
 }
 ```
 
 ### 2. Generated TypeScript (automatic)
 
-`trpc.ts` (full AppRouter type):
+**tRPC** (`trpcgo generate`):
 
 ```typescript
-export interface CreateUserInput {
-  name: string;
-  email: string;
-}
-
-export interface User {
-  readonly id: string;
-  name: string;
-  email: string;
-}
-
-export type AppRouter = { /* ... structural types matching @trpc/client */ };
+export interface CreateUserInput { name: string; email: string; }
+export interface User { readonly id: string; name: string; email: string; }
+export type AppRouter = { /* structural types for @trpc/client */ };
 ```
 
-`zod.ts` (validation schemas from Go `validate` tags):
+**oRPC** (`trpcgo generate -format orpc`):
+
+```typescript
+export interface CreateUserInput { name: string; email: string; }
+export interface User { readonly id: string; name: string; email: string; }
+export type RouterClient = { /* structural types for @orpc/client */ };
+```
+
+**Zod schemas** (from Go `validate` tags):
 
 ```typescript
 import { z } from "zod";
-
 export const CreateUserInputSchema = z.object({
   name: z.string().min(1).max(100),
   email: z.email(),
 });
 ```
 
-### 3. Use with @trpc/client
+### 3. Use with your client
+
+**tRPC:**
 
 ```typescript
 import { createTRPCReact } from "@trpc/react-query";
 import type { AppRouter } from "../gen/trpc.js";
 
 export const trpc = createTRPCReact<AppRouter>();
-
-// Fully typed: input and output inferred from Go types
 const mutation = trpc.user.create.useMutation();
 mutation.mutate({ name: "Alice", email: "alice@example.com" });
 ```
 
+**oRPC:**
+
+```typescript
+import { createORPCClient } from "@orpc/client";
+import type { RouterClient } from "../gen/orpc.js";
+
+const client = createORPCClient<RouterClient>({ baseURL: "/rpc" });
+const user = await client.user.create({ name: "Alice", email: "alice@example.com" });
+```
+
+## Protocol Handlers
+
+trpcgo separates routing from wire format. Register procedures once on a `Router`, then serve them over one or both protocols:
+
+```go
+import (
+    "github.com/befabri/trpcgo/trpc"
+    "github.com/befabri/trpcgo/orpc"
+)
+
+// tRPC wire format: dot-separated paths, JSON batching, JSONL streaming
+trpcHandler := trpc.NewHandler(router, "/trpc")
+
+// oRPC wire format: slash-separated paths, {json,meta} codec, SSE batching
+orpcHandler := orpc.NewHandler(router, "/rpc")
+```
+
+### REST-style routes (oRPC)
+
+Use `WithRoute` to map procedures to REST endpoints with path parameters:
+
+```go
+trpcgo.MustQuery(router, "planet.get", getPlanet,
+    trpcgo.WithRoute(http.MethodGet, "/planets/{id}"),
+)
+
+trpcgo.MustMutation(router, "planet.create", createPlanet,
+    trpcgo.WithRoute(http.MethodPost, "/planets"),
+    trpcgo.WithSuccessStatus(http.StatusCreated),
+)
+```
+
+Path parameters are automatically extracted and merged into the input struct:
+
+```go
+type GetPlanetInput struct {
+    ID int `json:"id"` // populated from {id} in the URL path
+}
+```
+
+### Dual-protocol
+
+Mount both handlers on your HTTP router. The same procedures, middleware, and types are served over both wire formats:
+
+```go
+r := chi.NewRouter()
+r.Handle("/trpc/*", trpc.NewHandler(router, "/trpc"))
+r.Handle("/rpc/*", orpc.NewHandler(router, "/rpc"))
+```
+
+tRPC clients hit `/trpc/user.create`, oRPC clients hit `/rpc/user/create`. Same handler, same validation, same response.
+
 ## Procedure Types
 
-trpcgo supports all tRPC procedure types: queries, mutations, and subscriptions.
+trpcgo supports all procedure types: queries, mutations, and subscriptions.
 
 Each registration function returns an `error` (duplicate path). The `Must*` variants panic instead and are the idiomatic choice for application bootstrap code:
 
@@ -237,7 +308,7 @@ router := trpcgo.NewRouter(
         return context.WithValue(r.Context(), authKey, r.Header.Get("Authorization"))
     }),
 
-    // Code generation (auto-regenerates on file save)
+    // Code generation (auto-regenerates on file save in dev mode)
     trpcgo.WithTypeOutput("../web/gen/trpc.ts"),
     trpcgo.WithZodOutput("../web/gen/zod.ts"),
     trpcgo.WithZodMini(false),                // true for zod/mini syntax
@@ -287,13 +358,13 @@ func authRequired(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
 ## Errors
 
 ```go
-// Create errors with tRPC error codes
+// Create errors with standard error codes
 trpcgo.NewError(trpcgo.CodeNotFound, "user not found")
 trpcgo.NewErrorf(trpcgo.CodeBadRequest, "invalid id: %s", id)
 trpcgo.WrapError(trpcgo.CodeInternalServerError, "db failed", err)
 ```
 
-All standard tRPC error codes are available (`CodeNotFound`, `CodeUnauthorized`, `CodeTooManyRequests`, etc.) and map to the correct HTTP status codes.
+All standard tRPC error codes are available (`CodeNotFound`, `CodeUnauthorized`, `CodeTooManyRequests`, etc.) and map to the correct HTTP status codes for both protocols.
 
 ## Server-Side Caller
 
@@ -399,6 +470,27 @@ type Input struct {
 }
 ```
 
+## File Uploads
+
+The `Blob` type supports file uploads via oRPC's multipart/form-data wire format. Use it as a field type in your input structs:
+
+```go
+type UploadInput struct {
+    Name string     `json:"name"`
+    File trpcgo.Blob `json:"file"`
+}
+
+trpcgo.MustMutation(router, "document.upload", func(ctx context.Context, input UploadInput) (string, error) {
+    data := input.File.Bytes()    // raw file content
+    name := input.File.Name       // original filename
+    mime := input.File.Type       // MIME type
+    size := input.File.Len()      // size in bytes
+    return fmt.Sprintf("uploaded %s (%d bytes)", name, size), nil
+})
+```
+
+Use `*Blob` for optional file fields — a `nil` pointer means no file was provided.
+
 ## CLI
 
 ```bash
@@ -409,6 +501,7 @@ trpcgo generate [flags] [packages]
 |------|-------------|
 | `-o, --output` | TypeScript output file (default: stdout) |
 | `-dir` | Working directory (default: `.`) |
+| `-format` | Output format: `trpc` (default) or `orpc` |
 | `-w, --watch` | Watch Go files, regenerate on change |
 | `--zod` | Zod schema output file |
 | `--zod-mini` | Use `zod/mini` functional syntax |
@@ -416,7 +509,11 @@ trpcgo generate [flags] [packages]
 ### With `go:generate`
 
 ```go
+// tRPC types
 //go:generate go tool trpcgo generate -o ../web/gen/trpc.ts --zod ../web/gen/zod.ts
+
+// oRPC types
+//go:generate go tool trpcgo generate -format orpc -o ../web/gen/orpc.ts --zod ../web/gen/zod.ts
 ```
 
 ```bash
@@ -431,13 +528,13 @@ go tool trpcgo generate -o ../web/gen/trpc.ts --zod ../web/gen/zod.ts -w
 
 ### Runtime watch (zero config)
 
-When you set `WithDev(true)` with `WithTypeOutput` (and optionally `WithZodOutput`) on the router, `Handler()` starts a file watcher automatically. Save a `.go` file anywhere in the project tree and types regenerate instantly, no separate process needed. Call `router.Close()` to stop the watcher on shutdown.
+When you set `WithDev(true)` with `WithTypeOutput` (and optionally `WithZodOutput`) on the router, the handler constructors (`trpc.NewHandler` / `orpc.NewHandler`) start a file watcher automatically. Save a `.go` file anywhere in the project tree and types regenerate instantly, no separate process needed. Call `router.Close()` to stop the watcher on shutdown.
 
 Use `WithWatchPackages` to restrict watching to specific packages (go/packages patterns) — useful in monorepos to avoid watching unrelated directories like frontend build output.
 
 ## Frontend Setup
 
-### React Query
+### tRPC — React Query
 
 ```typescript
 // trpc.ts
@@ -462,7 +559,7 @@ const trpcClient = trpc.createClient({
 });
 ```
 
-### Vanilla client
+### tRPC — Vanilla client
 
 ```typescript
 import { createTRPCClient, httpBatchLink } from "@trpc/client";
@@ -473,6 +570,19 @@ const client = createTRPCClient<AppRouter>({
 });
 
 const user = await client.user.getById.query({ id: "1" });
+```
+
+### oRPC — Client
+
+```typescript
+import { createORPCClient } from "@orpc/client";
+import { RPCLink } from "@orpc/client/fetch";
+import type { RouterClient } from "../gen/orpc.js";
+
+const link = new RPCLink({ url: "http://localhost:8080/rpc" });
+const client = createORPCClient<RouterClient>(link);
+
+const user = await client.user.getById({ id: "1" });
 ```
 
 ## Router Merging
@@ -495,9 +605,9 @@ if err := router.Merge(userRouter, adminRouter); err != nil {
 
 ## How It Works
 
-trpcgo implements the [tRPC HTTP protocol](https://trpc.io/docs/rpc) in Go and provides two code generation paths:
+trpcgo implements both the [tRPC HTTP protocol](https://trpc.io/docs/rpc) and the [oRPC wire format](https://orpc.unnoq.com) in Go, and provides two code generation paths:
 
-1. **Static analysis** (`trpcgo generate`): reads Go source via `go/packages`, extracts types with full fidelity (comments, validate tags, const unions). This is what generates Zod schemas.
+1. **Static analysis** (`trpcgo generate`): reads Go source via `go/packages`, extracts types with full fidelity (comments, validate tags, const unions). This is what generates Zod schemas. Use `-format trpc` (default) or `-format orpc` to target your client library.
 
 2. **Runtime reflection** (`Router.GenerateTS`): uses `reflect` to inspect registered procedure types at startup. Faster but less information (no comments, no validate tags).
 
@@ -505,15 +615,18 @@ When you use `WithDev(true)` with `WithTypeOutput`, both paths run: reflection g
 
 The file watcher is recursive. It watches all subdirectories and handles directory creation/removal automatically. Generated files are only written when content changes, avoiding spurious Vite HMR cycles.
 
-## Example
+## Examples
 
-See [`examples/tanstack-query/`](examples/tanstack-query/) for a full working example with a Go server and a React frontend using TanStack Router + React Query.
+- [`examples/tanstack-query/`](examples/tanstack-query/) — Full dual-protocol example with a Go server serving both tRPC and oRPC, and a React frontend using TanStack Router + React Query.
+- [`examples/orpc-rest/`](examples/orpc-rest/) — oRPC REST-style API with path parameters, custom methods, and status codes.
 
 ## Compatibility
 
 **Go:** Requires Go 1.26+ (uses `tool` directive, `errors.AsType`, generics).
 
 **tRPC client:** Works with `@trpc/client` v11 and `@trpc/react-query` v11. The generated `AppRouter` type imports from `@trpc/server` (which is a dependency of `@trpc/client`).
+
+**oRPC client:** Works with `@orpc/client`. The generated `RouterClient` type imports from `@orpc/client`.
 
 **HTTP:** Pure `net/http`, no framework dependency. Works with any Go router or middleware.
 
