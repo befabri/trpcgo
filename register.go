@@ -91,6 +91,36 @@ func MustVoidMutation[O any](r *Router, path string, fn func(ctx context.Context
 	}
 }
 
+// SubscribeWithFinal registers a subscription whose handler returns a final
+// value function. The function is called when the channel closes and its
+// return value is sent in the SSE done event.
+func SubscribeWithFinal[I any, O any](r *Router, path string, fn func(ctx context.Context, input I) (<-chan O, func() any, error), opts ...ProcedureOption) error {
+	cfg := collectProcedureConfig(opts)
+	return r.register(path, ProcedureSubscription, makeStreamHandlerWithFinal(fn), cfg.middleware, cfg.meta, reflect.TypeFor[I](), effectiveOutputType(reflect.TypeFor[O](), cfg), cfg.outputValidator, cfg.outputParser, cfg.route)
+}
+
+// VoidSubscribeWithFinal registers a subscription with no input whose handler
+// returns a final value function. The function is called when the channel
+// closes and its return value is sent in the SSE done event.
+func VoidSubscribeWithFinal[O any](r *Router, path string, fn func(ctx context.Context) (<-chan O, func() any, error), opts ...ProcedureOption) error {
+	cfg := collectProcedureConfig(opts)
+	return r.register(path, ProcedureSubscription, makeVoidStreamHandlerWithFinal(fn), cfg.middleware, cfg.meta, nil, effectiveOutputType(reflect.TypeFor[O](), cfg), cfg.outputValidator, cfg.outputParser, cfg.route)
+}
+
+// MustSubscribeWithFinal is like SubscribeWithFinal but panics if registration fails.
+func MustSubscribeWithFinal[I any, O any](r *Router, path string, fn func(ctx context.Context, input I) (<-chan O, func() any, error), opts ...ProcedureOption) {
+	if err := SubscribeWithFinal(r, path, fn, opts...); err != nil {
+		panic(fmt.Sprintf("trpcgo: MustSubscribeWithFinal %q: %v", path, err))
+	}
+}
+
+// MustVoidSubscribeWithFinal is like VoidSubscribeWithFinal but panics if registration fails.
+func MustVoidSubscribeWithFinal[O any](r *Router, path string, fn func(ctx context.Context) (<-chan O, func() any, error), opts ...ProcedureOption) {
+	if err := VoidSubscribeWithFinal(r, path, fn, opts...); err != nil {
+		panic(fmt.Sprintf("trpcgo: MustVoidSubscribeWithFinal %q: %v", path, err))
+	}
+}
+
 // MustSubscribe is like Subscribe but panics if registration fails.
 func MustSubscribe[I any, O any](r *Router, path string, fn func(ctx context.Context, input I) (<-chan O, error), opts ...ProcedureOption) {
 	if err := Subscribe(r, path, fn, opts...); err != nil {

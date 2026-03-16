@@ -331,15 +331,16 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, resul
 
 	// Recv blocks, so run it in a goroutine to multiplex with timers.
 	type recvResult struct {
-		data any
-		id   string
-		err  error
+		data  any
+		id    string
+		retry int
+		err   error
 	}
 	recvCh := make(chan recvResult, 1)
 	go func() {
 		for {
-			data, id, err := consumer.Recv(ctx)
-			recvCh <- recvResult{data, id, err}
+			data, id, retry, err := consumer.Recv(ctx)
+			recvCh <- recvResult{data, id, retry, err}
 			if err != nil {
 				return
 			}
@@ -359,7 +360,12 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, resul
 			flusher.Flush()
 		case item := <-recvCh:
 			if item.err == io.EOF {
-				_, _ = fmt.Fprint(w, "event: done\ndata: \n\n")
+				if item.data != nil {
+					doneBytes, _ := encodeSuccess(item.data)
+					_, _ = fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneBytes)
+				} else {
+					_, _ = fmt.Fprint(w, "event: done\ndata: \n\n")
+				}
 				flusher.Flush()
 				return
 			}
@@ -390,6 +396,9 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, resul
 			if item.id != "" {
 				id := strings.NewReplacer("\n", "", "\r", "").Replace(item.id)
 				_, _ = fmt.Fprintf(w, "id: %s\n", id)
+			}
+			if item.retry > 0 {
+				_, _ = fmt.Fprintf(w, "retry: %d\n", item.retry)
 			}
 			_, _ = fmt.Fprint(w, "\n")
 			flusher.Flush()
@@ -430,16 +439,9 @@ func (h *Handler) handleBatch(w http.ResponseWriter, r *http.Request, mode strin
 		return
 	}
 
-	// Build context.
+	// Context creation is deferred to per-item so that batch item headers
+	// are visible to the context creator (e.g. per-item auth tokens).
 	ctx := r.Context()
-	if cc := h.router.ContextCreator(); cc != nil {
-		userCtx := cc(r.Context(), r)
-		if userCtx != ctx {
-			var cancel context.CancelFunc
-			ctx, cancel = mergeContexts(ctx, userCtx)
-			defer cancel()
-		}
-	}
 	ctx = trpcgo.WithResponseMetadata(ctx)
 
 	// Execute all items concurrently.
@@ -454,7 +456,7 @@ func (h *Handler) handleBatch(w http.ResponseWriter, r *http.Request, mode strin
 				}
 			}()
 
-			status, body := h.executeBatchItem(ctx, r.Method, it)
+			status, body := h.executeBatchItem(ctx, r, it)
 			ch <- batchResult{index: idx, status: status, body: body}
 		}(i, item)
 	}
@@ -501,11 +503,11 @@ func parseBatchItems(r *http.Request, maxBodySize int64) ([]batchRequestItem, er
 }
 
 // executeBatchItem executes a single procedure from a batch request.
-func (h *Handler) executeBatchItem(ctx context.Context, reqMethod string, item batchRequestItem) (int, any) {
+func (h *Handler) executeBatchItem(ctx context.Context, baseReq *http.Request, item batchRequestItem) (int, any) {
 	// Extract procedure path from the item URL.
 	method := strings.ToUpper(item.Method)
 	if method == "" {
-		method = reqMethod
+		method = strings.ToUpper(baseReq.Method)
 	}
 	path, entry, pathParams, ok := h.resolveItemPath(item.URL, method)
 	if !ok {
@@ -518,6 +520,24 @@ func (h *Handler) executeBatchItem(ctx context.Context, reqMethod string, item b
 		errBody, _ := encodeError(CodeBadRequest, StatusFromCode(CodeBadRequest),
 			"subscriptions cannot be batched", nil, false)
 		return http.StatusBadRequest, json.RawMessage(errBody)
+	}
+
+	// Per-item context: merge item headers with the base request so
+	// the context creator sees per-item auth tokens, etc.
+	if cc := h.router.ContextCreator(); cc != nil {
+		req := baseReq
+		if len(item.Headers) > 0 {
+			req = baseReq.Clone(ctx)
+			for k, v := range item.Headers {
+				req.Header.Set(k, v)
+			}
+		}
+		userCtx := cc(ctx, req)
+		if userCtx != ctx {
+			var cancel context.CancelFunc
+			ctx, cancel = mergeContexts(ctx, userCtx)
+			defer cancel()
+		}
 	}
 
 	ctx = trpcgo.WithProcedureMeta(ctx, trpcgo.ProcedureMeta{

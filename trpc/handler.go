@@ -293,15 +293,16 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, resul
 
 	// Recv goroutine.
 	type recvResult struct {
-		data any
-		id   string
-		err  error
+		data  any
+		id    string
+		retry int
+		err   error
 	}
 	recvCh := make(chan recvResult, 1)
 	go func() {
 		for {
-			data, id, err := consumer.Recv(ctx)
-			recvCh <- recvResult{data, id, err}
+			data, id, retry, err := consumer.Recv(ctx)
+			recvCh <- recvResult{data, id, retry, err}
 			if err != nil {
 				return
 			}
@@ -321,7 +322,12 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, resul
 			flusher.Flush()
 		case item := <-recvCh:
 			if item.err == io.EOF {
-				writeSSENamedEvent(w, "return", nil)
+				if item.data != nil {
+					returnData, _ := json.Marshal(item.data)
+					writeSSENamedEvent(w, "return", returnData)
+				} else {
+					writeSSENamedEvent(w, "return", nil)
+				}
 				flusher.Flush()
 				return
 			}
@@ -351,7 +357,7 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, resul
 				flusher.Flush()
 				return
 			}
-			writeSSEData(w, data, item.id)
+			writeSSEData(w, data, item.id, item.retry)
 			flusher.Flush()
 			pingTicker.Reset(pingInterval)
 		}
@@ -450,11 +456,14 @@ func writeSSENamedEvent(w http.ResponseWriter, event string, data []byte) {
 }
 
 // writeSSEData writes a data-only SSE message (default "message" event type).
-func writeSSEData(w http.ResponseWriter, data []byte, id string) {
+func writeSSEData(w http.ResponseWriter, data []byte, id string, retry int) {
 	_, _ = fmt.Fprintf(w, "data: %s\n", data)
 	if id != "" {
 		id = strings.NewReplacer("\n", "", "\r", "").Replace(id)
 		_, _ = fmt.Fprintf(w, "id: %s\n", id)
+	}
+	if retry > 0 {
+		_, _ = fmt.Fprintf(w, "retry: %d\n", retry)
 	}
 	_, _ = fmt.Fprint(w, "\n")
 }

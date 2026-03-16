@@ -207,30 +207,36 @@ func ConsumeStream(result any) *StreamConsumer {
 // Recv returns the next item from the stream. It blocks until an item is
 // available, the stream is closed, or the context is cancelled.
 //
-// On success, data is the payload (with TrackedEvent unwrapped) and id is
-// the event ID (empty if not tracked). Returns io.EOF when the stream ends.
-// Returns a non-nil, non-EOF error if output validation/parsing fails.
-func (sc *StreamConsumer) Recv(ctx context.Context) (data any, id string, err error) {
+// On success, data is the payload (with TrackedEvent unwrapped), id is the
+// event ID (empty if not tracked), and retry is the reconnect interval in
+// milliseconds (0 if not set). Returns io.EOF when the stream ends — data
+// may be non-nil on EOF if the stream has a final return value.
+func (sc *StreamConsumer) Recv(ctx context.Context) (data any, id string, retry int, err error) {
 	item, ok := sc.recv(ctx)
-	if !ok {
-		return nil, "", io.EOF
-	}
 
-	// Apply output hooks.
-	if sc.outputValidator != nil || sc.outputParser != nil {
+	// Apply output hooks to both normal items and final values.
+	if item != nil && (sc.outputValidator != nil || sc.outputParser != nil) {
 		processed, hookErr := applyOutputHooks(item, sc.outputValidator, sc.outputParser)
 		if hookErr != nil {
-			return nil, "", hookErr
+			return nil, "", 0, hookErr
 		}
 		item = processed
 	}
 
-	// Extract TrackedEvent ID if present.
-	if te, isTracked := item.(tracked); isTracked {
-		return te.trackData(), te.trackID(), nil
+	if !ok {
+		if item != nil {
+			// Final return value from stream close.
+			return item, "", 0, io.EOF
+		}
+		return nil, "", 0, io.EOF
 	}
 
-	return item, "", nil
+	// Extract TrackedEvent metadata if present.
+	if te, isTracked := item.(tracked); isTracked {
+		return te.trackData(), te.trackID(), te.trackRetry(), nil
+	}
+
+	return item, "", 0, nil
 }
 
 // streamConsumable is implemented by streaming results to provide a
