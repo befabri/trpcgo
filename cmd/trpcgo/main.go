@@ -21,7 +21,6 @@ type generateOptions struct {
 	output   string
 	zod      string
 	zodMini  bool
-	format   string // "trpc" (default) or "orpc"
 }
 
 func main() {
@@ -38,17 +37,11 @@ func main() {
 	fs.BoolVar(watch, "w", false, "watch Go files and regenerate on change")
 	zodOutput := fs.String("zod", "", "output path for Zod 4 validation schemas")
 	zodMini := fs.Bool("zod-mini", false, "generate zod/mini functional syntax")
-	format := fs.String("format", "trpc", "output format: trpc or orpc")
 	_ = fs.Parse(os.Args[2:]) // ExitOnError handles parse errors
 
 	patterns := fs.Args()
 	if len(patterns) == 0 {
 		patterns = []string{"."}
-	}
-
-	if *format != "trpc" && *format != "orpc" {
-		fmt.Fprintf(os.Stderr, "Error: -format must be 'trpc' or 'orpc'\n")
-		os.Exit(1)
 	}
 
 	opts := generateOptions{
@@ -57,7 +50,6 @@ func main() {
 		output:   *output,
 		zod:      *zodOutput,
 		zodMini:  *zodMini,
-		format:   *format,
 	}
 
 	// Run once.
@@ -153,13 +145,7 @@ func generate(opts generateOptions) (err error) {
 		w = os.Stdout
 	}
 
-	var genResult *codegen.GenerateResult
-	switch opts.format {
-	case "orpc":
-		genResult, err = codegen.GenerateORPC(w, result, result.TypeMetas)
-	default:
-		genResult, err = codegen.Generate(w, result, result.TypeMetas)
-	}
+	genResult, err := codegen.Generate(w, result, result.TypeMetas)
 	if err != nil {
 		return err
 	}

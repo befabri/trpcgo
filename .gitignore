@@ -7,7 +7,6 @@
 # Go
 /trpcgo
 examples/start-trpc/server/example-start-trpc
-examples/start-orpc/server/example-start-orpc
 
 # Node
 node_modules/

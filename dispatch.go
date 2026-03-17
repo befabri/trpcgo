@@ -23,7 +23,6 @@ type ProcedureEntry struct {
 	handler         HandlerFunc
 	outputValidator func(any) error
 	outputParser    func(any) (any, error)
-	route           Route
 }
 
 // Type returns the procedure type (query, mutation, subscription).
@@ -38,14 +37,11 @@ func (e *ProcedureEntry) InputType() reflect.Type { return e.inputType }
 // OutputType returns the Go output type.
 func (e *ProcedureEntry) OutputType() reflect.Type { return e.outputType }
 
-// Route returns the HTTP routing metadata for this procedure.
-func (e *ProcedureEntry) Route() Route { return e.route }
-
 // ProcedureMap is a frozen snapshot of registered procedures with
 // pre-computed middleware chains. Safe for concurrent use without locking.
 //
 // Protocol handler packages use this to build HTTP handlers that serve
-// procedures over different wire formats (tRPC, oRPC, etc.).
+// procedures over the tRPC wire format.
 type ProcedureMap struct {
 	entries map[string]*ProcedureEntry
 }
@@ -93,7 +89,6 @@ func (r *Router) BuildProcedureMap() *ProcedureMap {
 			handler:         applyMiddleware(proc.handler, r.middleware, proc.middleware),
 			outputValidator: proc.outputValidator,
 			outputParser:    proc.outputParser,
-			route:           proc.route,
 		}
 	}
 	return &ProcedureMap{entries: entries}
@@ -251,9 +246,7 @@ type streamConsumable interface {
 func (r *Router) IsDev() bool { return r.opts.isDev }
 
 // StartDevWatcher starts the file watcher if dev mode and type generation
-// are configured. Called by trpc.NewHandler and orpc.NewHandler during
-// construction. In a dual-protocol setup the first handler constructed
-// starts the watcher; subsequent calls are no-ops (guarded by sync.Once).
+// are configured. Called by trpc.NewHandler during construction.
 func (r *Router) StartDevWatcher() {
 	if !r.opts.isDev {
 		return

@@ -393,14 +393,9 @@ func main() {
 	router.Use(requestTimer)
 
 	// Queries
-	trpcgo.Query(router, "user.get", svc.GetUser,
-		trpcgo.WithRoute(http.MethodGet, "/users/{id}"),
-	)
-	trpcgo.Query(router, "user.list", svc.ListUsers,
-		trpcgo.WithRoute(http.MethodGet, "/users"),
-	)
+	trpcgo.Query(router, "user.get", svc.GetUser)
+	trpcgo.Query(router, "user.list", svc.ListUsers)
 	trpcgo.VoidQuery(router, "system.health", svc.ServerHealth,
-		trpcgo.WithRoute(http.MethodGet, "/health"),
 		trpcgo.OutputValidator(func(info HealthInfo) error {
 			if !info.OK {
 				return fmt.Errorf("health response must be ok")
@@ -411,16 +406,11 @@ func main() {
 
 	// Mutations
 	trpcgo.Mutation(router, "user.create", svc.CreateUser,
-		trpcgo.WithRoute(http.MethodPost, "/users"),
-		trpcgo.WithSuccessStatus(http.StatusCreated),
 		trpcgo.Use(logMutation),
 		trpcgo.WithMeta(map[string]string{"action": "write"}),
 	)
-	trpcgo.Mutation(router, "user.delete", svc.DeleteUser,
-		trpcgo.WithRoute(http.MethodDelete, "/users/{id}"),
-	)
+	trpcgo.Mutation(router, "user.delete", svc.DeleteUser)
 	trpcgo.VoidMutation(router, "system.reset", svc.ResetDemo(router),
-		trpcgo.WithRoute(http.MethodPost, "/reset"),
 		trpcgo.Use(requireRequestID),
 	)
 
