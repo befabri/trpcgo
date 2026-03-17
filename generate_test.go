@@ -461,12 +461,12 @@ func countPattern(s, pattern string) int {
 // tsc can resolve @trpc/server imports in generated TypeScript.
 func symlinkNodeModules(t *testing.T, dir string) {
 	t.Helper()
-	src, err := filepath.Abs(filepath.Join("examples", "tanstack-query", "web", "node_modules"))
+	src, err := filepath.Abs(filepath.Join("examples", "start-trpc", "web", "node_modules"))
 	if err != nil {
 		t.Fatalf("abs path: %v", err)
 	}
 	if _, err := os.Stat(src); err != nil {
-		t.Skip("node_modules not installed in examples/tanstack-query/web")
+		t.Skip("node_modules not installed in examples/start-trpc/web")
 	}
 	if err := os.Symlink(src, filepath.Join(dir, "node_modules")); err != nil {
 		t.Fatalf("symlink node_modules: %v", err)
@@ -1377,7 +1377,7 @@ func TestGenerateTSKitchenSink(t *testing.T) {
 
 func TestGenerateTSTsc(t *testing.T) {
 	// Find tsc binary.
-	tscPath := filepath.Join("examples", "tanstack-query", "web", "node_modules", ".bin", "tsc")
+	tscPath := filepath.Join("examples", "start-trpc", "web", "node_modules", ".bin", "tsc")
 	if _, err := os.Stat(tscPath); err != nil {
 		// Fallback: check PATH.
 		var lookupErr error
@@ -1664,7 +1664,7 @@ func TestGenerateTSFieldsWithoutJSONTag(t *testing.T) {
 
 func TestGenerateTSTscExtended(t *testing.T) {
 	// Extended tsc validation covering all new patterns from typescriptify/tygo.
-	tscPath := filepath.Join("examples", "tanstack-query", "web", "node_modules", ".bin", "tsc")
+	tscPath := filepath.Join("examples", "start-trpc", "web", "node_modules", ".bin", "tsc")
 	if _, err := os.Stat(tscPath); err != nil {
 		var lookupErr error
 		tscPath, lookupErr = exec.LookPath("tsc")
@@ -2104,7 +2104,7 @@ func TestGenerateTSTsDoc(t *testing.T) {
 // ---------- structural tsc validation with satisfies ----------
 
 func TestGenerateTSNodeExecution(t *testing.T) {
-	tscPath := filepath.Join("examples", "tanstack-query", "web", "node_modules", ".bin", "tsc")
+	tscPath := filepath.Join("examples", "start-trpc", "web", "node_modules", ".bin", "tsc")
 	if _, err := os.Stat(tscPath); err != nil {
 		var lookupErr error
 		tscPath, lookupErr = exec.LookPath("tsc")

@@ -6,10 +6,8 @@
 
 # Go
 /trpcgo
-examples/tanstack-query/go-server/example-query
-examples/tanstack-start/go-server/example
-examples/orpc-rest/orpc-rest
-/orpc-rest
+examples/start-trpc/server/example-start-trpc
+examples/start-orpc/server/example-start-orpc
 
 # Node
 node_modules/

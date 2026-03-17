@@ -617,8 +617,8 @@ The file watcher is recursive. It watches all subdirectories and handles directo
 
 ## Examples
 
-- [`examples/tanstack-query/`](examples/tanstack-query/) — Full dual-protocol example with a Go server serving both tRPC and oRPC, and a React frontend using TanStack Router + React Query.
-- [`examples/orpc-rest/`](examples/orpc-rest/) — oRPC REST-style API with path parameters, custom methods, and status codes.
+- [`examples/start-trpc/`](examples/start-trpc/) — Go server + TanStack Start frontend using `@trpc/client` and `@trpc/tanstack-react-query`.
+- [`examples/start-orpc/`](examples/start-orpc/) — Go server + TanStack Start frontend using `@orpc/client`.
 
 ## Compatibility
 
