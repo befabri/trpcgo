@@ -27,10 +27,10 @@ jobs:
           cache: npm
           cache-dependency-path: |
             testdata/zodruntime/package-lock.json
-            examples/tanstack-query/web/package-lock.json
+            examples/start-trpc/web/package-lock.json
 
       - run: npm ci --prefix testdata/zodruntime
-      - run: npm ci --prefix examples/tanstack-query/web
+      - run: npm ci --prefix examples/start-trpc/web
 
       - run: go test -race -count=1 ./...
 
