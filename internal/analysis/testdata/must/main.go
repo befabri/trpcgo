@@ -23,6 +23,12 @@ func streamItems(ctx context.Context, input GetItemInput) (<-chan Item, error) {
 	return nil, nil
 }
 func broadcastItems(ctx context.Context) (<-chan Item, error) { return nil, nil }
+func streamItemsWithFinal(ctx context.Context, input GetItemInput) (<-chan Item, func() any, error) {
+	return nil, func() any { return "done" }, nil
+}
+func broadcastItemsWithFinal(ctx context.Context) (<-chan Item, func() any, error) {
+	return nil, func() any { return "done" }, nil
+}
 
 func Setup() *trpcgo.Router {
 	router := trpcgo.NewRouter()
@@ -32,5 +38,7 @@ func Setup() *trpcgo.Router {
 	trpcgo.MustVoidMutation(router, "item.reset", resetItems)
 	trpcgo.MustSubscribe(router, "item.stream", streamItems)
 	trpcgo.MustVoidSubscribe(router, "item.broadcast", broadcastItems)
+	trpcgo.MustSubscribeWithFinal(router, "item.streamFinal", streamItemsWithFinal)
+	trpcgo.MustVoidSubscribeWithFinal(router, "item.broadcastFinal", broadcastItemsWithFinal)
 	return router
 }

@@ -203,19 +203,23 @@ type funcInfo struct {
 
 // registrationFuncs maps function names to their procedure info.
 var registrationFuncs = map[string]funcInfo{
-	"Query":         {procType: "query", hasInput: true},
-	"VoidQuery":     {procType: "query", hasInput: false},
-	"Mutation":      {procType: "mutation", hasInput: true},
-	"VoidMutation":  {procType: "mutation", hasInput: false},
-	"Subscribe":     {procType: "subscription", hasInput: true, isStream: true},
-	"VoidSubscribe": {procType: "subscription", hasInput: false, isStream: true},
+	"Query":                  {procType: "query", hasInput: true},
+	"VoidQuery":              {procType: "query", hasInput: false},
+	"Mutation":               {procType: "mutation", hasInput: true},
+	"VoidMutation":           {procType: "mutation", hasInput: false},
+	"Subscribe":              {procType: "subscription", hasInput: true, isStream: true},
+	"VoidSubscribe":          {procType: "subscription", hasInput: false, isStream: true},
+	"SubscribeWithFinal":     {procType: "subscription", hasInput: true, isStream: true},
+	"VoidSubscribeWithFinal": {procType: "subscription", hasInput: false, isStream: true},
 	// Must* variants — identical signature and semantics; panic instead of returning error.
-	"MustQuery":         {procType: "query", hasInput: true},
-	"MustVoidQuery":     {procType: "query", hasInput: false},
-	"MustMutation":      {procType: "mutation", hasInput: true},
-	"MustVoidMutation":  {procType: "mutation", hasInput: false},
-	"MustSubscribe":     {procType: "subscription", hasInput: true, isStream: true},
-	"MustVoidSubscribe": {procType: "subscription", hasInput: false, isStream: true},
+	"MustQuery":                  {procType: "query", hasInput: true},
+	"MustVoidQuery":              {procType: "query", hasInput: false},
+	"MustMutation":               {procType: "mutation", hasInput: true},
+	"MustVoidMutation":           {procType: "mutation", hasInput: false},
+	"MustSubscribe":              {procType: "subscription", hasInput: true, isStream: true},
+	"MustVoidSubscribe":          {procType: "subscription", hasInput: false, isStream: true},
+	"MustSubscribeWithFinal":     {procType: "subscription", hasInput: true, isStream: true},
+	"MustVoidSubscribeWithFinal": {procType: "subscription", hasInput: false, isStream: true},
 }
 
 func extractProcedure(call *ast.CallExpr, info *types.Info, varDefs map[types.Object]ast.Expr) (Procedure, bool) {

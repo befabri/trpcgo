@@ -37,11 +37,21 @@ func onUserCreated(ctx context.Context) (<-chan User, error) {
 	return nil, nil
 }
 
+func userActivity(ctx context.Context, input GetUserByIdInput) (<-chan User, func() any, error) {
+	return nil, func() any { return "done" }, nil
+}
+
+func allUserActivity(ctx context.Context) (<-chan User, func() any, error) {
+	return nil, func() any { return "done" }, nil
+}
+
 func Setup() *trpcgo.Router {
 	router := trpcgo.NewRouter()
 	trpcgo.Query(router, "user.getById", getUserById)
 	trpcgo.VoidQuery(router, "user.listUsers", listUsers)
 	trpcgo.Mutation(router, "user.createUser", createUser)
 	trpcgo.VoidSubscribe(router, "user.onCreated", onUserCreated)
+	trpcgo.SubscribeWithFinal(router, "user.activity", userActivity)
+	trpcgo.VoidSubscribeWithFinal(router, "user.allActivity", allUserActivity)
 	return router
 }

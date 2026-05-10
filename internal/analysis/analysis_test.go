@@ -51,8 +51,8 @@ func TestAnalyzeBasic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(result.Procedures) != 4 {
-		t.Fatalf("got %d procedures, want 4", len(result.Procedures))
+	if len(result.Procedures) != 6 {
+		t.Fatalf("got %d procedures, want 6", len(result.Procedures))
 	}
 
 	byPath := make(map[string]analysis.Procedure)
@@ -90,6 +90,89 @@ func TestAnalyzeBasic(t *testing.T) {
 	}
 	if s.InputType != nil {
 		t.Error("user.onCreated should have nil input type (void)")
+	}
+
+	sf := byPath["user.activity"]
+	if sf.Type != "subscription" {
+		t.Errorf("user.activity type = %q, want subscription", sf.Type)
+	}
+	if sf.InputType == nil {
+		t.Error("user.activity should have an input type")
+	}
+
+	vf := byPath["user.allActivity"]
+	if vf.Type != "subscription" {
+		t.Errorf("user.allActivity type = %q, want subscription", vf.Type)
+	}
+	if vf.InputType != nil {
+		t.Error("user.allActivity should have nil input type (void)")
+	}
+}
+
+func TestAnalyzeSubscribeWithFinalVariants(t *testing.T) {
+	tests := []struct {
+		name             string
+		fixture          string
+		inputPath        string
+		voidPath         string
+		outputTypeSuffix string
+	}{
+		{
+			name:             "non-must variants",
+			fixture:          "basic",
+			inputPath:        "user.activity",
+			voidPath:         "user.allActivity",
+			outputTypeSuffix: ".User",
+		},
+		{
+			name:             "must variants",
+			fixture:          "must",
+			inputPath:        "item.streamFinal",
+			voidPath:         "item.broadcastFinal",
+			outputTypeSuffix: ".Item",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := analysis.Analyze([]string{"."}, testdataDir(tt.fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			byPath := make(map[string]analysis.Procedure)
+			for _, p := range result.Procedures {
+				byPath[p.Path] = p
+			}
+
+			inputProc, ok := byPath[tt.inputPath]
+			if !ok {
+				t.Fatalf("missing %q", tt.inputPath)
+			}
+			if inputProc.Type != "subscription" {
+				t.Errorf("%q type = %q, want subscription", tt.inputPath, inputProc.Type)
+			}
+			if inputProc.InputType == nil {
+				t.Errorf("%q should have input type", tt.inputPath)
+			}
+			if inputProc.OutputType == nil || !strings.HasSuffix(inputProc.OutputType.String(), tt.outputTypeSuffix) {
+				t.Errorf("%q OutputType = %v, want suffix %q", tt.inputPath, inputProc.OutputType, tt.outputTypeSuffix)
+			}
+
+			voidProc, ok := byPath[tt.voidPath]
+			if !ok {
+				t.Fatalf("missing %q", tt.voidPath)
+			}
+			if voidProc.Type != "subscription" {
+				t.Errorf("%q type = %q, want subscription", tt.voidPath, voidProc.Type)
+			}
+			if voidProc.InputType != nil {
+				t.Errorf("%q should have nil input type, got %v", tt.voidPath, voidProc.InputType)
+			}
+			if voidProc.OutputType == nil || !strings.HasSuffix(voidProc.OutputType.String(), tt.outputTypeSuffix) {
+				t.Errorf("%q OutputType = %v, want suffix %q", tt.voidPath, voidProc.OutputType, tt.outputTypeSuffix)
+			}
+		})
 	}
 }
 
@@ -434,12 +517,14 @@ func TestAnalyzeMustVariants(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"item.get":       "query",
-		"item.list":      "query",
-		"item.create":    "mutation",
-		"item.reset":     "mutation",
-		"item.stream":    "subscription",
-		"item.broadcast": "subscription",
+		"item.get":            "query",
+		"item.list":           "query",
+		"item.create":         "mutation",
+		"item.reset":          "mutation",
+		"item.stream":         "subscription",
+		"item.broadcast":      "subscription",
+		"item.streamFinal":    "subscription",
+		"item.broadcastFinal": "subscription",
 	}
 
 	if len(result.Procedures) != len(want) {
@@ -463,7 +548,7 @@ func TestAnalyzeMustVariants(t *testing.T) {
 	}
 
 	// Input-bearing variants must have a non-nil InputType.
-	for _, path := range []string{"item.get", "item.create", "item.stream"} {
+	for _, path := range []string{"item.get", "item.create", "item.stream", "item.streamFinal"} {
 		p, ok := byPath[path]
 		if !ok {
 			t.Errorf("missing procedure %q (cannot check InputType)", path)
@@ -474,7 +559,7 @@ func TestAnalyzeMustVariants(t *testing.T) {
 		}
 	}
 	// Void variants must have a nil InputType.
-	for _, path := range []string{"item.list", "item.reset", "item.broadcast"} {
+	for _, path := range []string{"item.list", "item.reset", "item.broadcast", "item.broadcastFinal"} {
 		p, ok := byPath[path]
 		if !ok {
 			t.Errorf("missing procedure %q (cannot check InputType)", path)
