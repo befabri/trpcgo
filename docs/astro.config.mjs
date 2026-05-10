@@ -13,6 +13,7 @@ export default defineConfig({
 			description: 'Write tRPC-compatible APIs in Go and generate TypeScript client contracts.',
 			customCss: ['./src/styles/copy-page-markdown.css'],
 			components: {
+				Head: './src/components/Head.astro',
 				PageTitle: './src/components/PageTitleWithCopy.astro',
 			},
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/befabri/trpcgo' }],
