@@ -1,0 +1,64 @@
+---
+title: trpcgo
+description: Write tRPC-compatible APIs in Go and generate the TypeScript router contract your frontend consumes.
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+trpcgo is for teams that want the tRPC developer experience without running the API server in TypeScript.
+Your Go handlers and structs are the source of truth. trpcgo serves them over the tRPC HTTP protocol and generates the TypeScript `AppRouter` type that `@trpc/client`, `@trpc/react-query`, and `@trpc/tanstack-react-query` understand.
+
+## Why Use It
+
+<CardGrid stagger>
+	<Card title="Go API server" icon="setting">
+		Register typed Go queries, mutations, and SSE subscriptions on a plain `net/http` handler.
+	</Card>
+	<Card title="Typed frontend" icon="document">
+		Generate a structural `AppRouter` contract so TypeScript catches broken procedure calls.
+	</Card>
+	<Card title="Validation schemas" icon="pencil">
+		Generate Zod input schemas from Go `validate` tags for client-side form validation.
+	</Card>
+	<Card title="Runtime controls" icon="add-document">
+		Configure batching, strict JSON decoding, body limits, SSE limits, context, middleware, and error formatting.
+	</Card>
+	<Card title="Source analysis" icon="open-book">
+		Use `trpcgo generate` to preserve comments, const unions, aliases, generics, and validation metadata.
+	</Card>
+	<Card title="Dev watch" icon="rocket">
+		In dev mode, regenerate frontend files on Go file changes without restarting the server.
+	</Card>
+</CardGrid>
+
+## The Basic Shape
+
+```go
+router := trpcgo.NewRouter(
+    trpcgo.WithValidator(validate.Struct),
+    trpcgo.WithTypeOutput("../web/gen/trpc.ts"),
+    trpcgo.WithZodOutput("../web/gen/zod.ts"),
+)
+defer router.Close()
+
+trpcgo.MustQuery(router, "user.get", getUser)
+trpcgo.MustMutation(router, "user.create", createUser)
+
+mux := http.NewServeMux()
+mux.Handle("/trpc/", trpc.NewHandler(router, "/trpc"))
+```
+
+```ts
+import { createTRPCClient, httpBatchLink } from '@trpc/client';
+import type { AppRouter } from './gen/trpc.js';
+
+const client = createTRPCClient<AppRouter>({
+  links: [httpBatchLink({ url: '/trpc' })],
+});
+
+const user = await client.user.get.query({ id: '1' });
+```
+
+## Where To Go Next
+
+Read [Core Concepts](/concepts/) to understand the runtime model, then follow [Quick Start](/quick-start/) to build the first endpoint.

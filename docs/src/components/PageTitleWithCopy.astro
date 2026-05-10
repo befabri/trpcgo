@@ -1,0 +1,38 @@
+---
+const title = Astro.locals.starlightRoute.entry.data.title;
+---
+
+<div class="copy-page-markdown-row" data-copy-page-markdown-row>
+	<h1 id="_top">{title}</h1>
+	<div class="copy-page-markdown-controls">
+		<div
+			class="copy-page-markdown-live"
+			aria-live="polite"
+			aria-atomic="true"
+			data-copy-page-markdown-live
+		>
+		</div>
+		<button
+			type="button"
+			class="copy-page-markdown-button"
+			aria-label="Copy page as Markdown"
+			title="Copy page as Markdown"
+			data-copy-page-markdown-button
+		>
+			<span class="copy-page-markdown-button__bg" aria-hidden="true"></span>
+			<span class="copy-page-markdown-button__icon" aria-hidden="true">
+				<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+					<path d="M3 19a2 2 0 0 1-1-2V2a2 2 0 0 1 1-1h13a2 2 0 0 1 2 1" />
+					<rect x="6" y="5" width="16" height="18" rx="1.5" ry="1.5"></rect>
+				</svg>
+			</span>
+			<span class="copy-page-markdown-button__label">Copy Markdown</span>
+		</button>
+	</div>
+</div>
+
+<script>
+	import { setupCopyPageMarkdown } from '../scripts/copy-page-markdown';
+
+	setupCopyPageMarkdown();
+</script>
