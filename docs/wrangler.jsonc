@@ -2,6 +2,12 @@
 	"$schema": "./node_modules/wrangler/config-schema.json",
 	"name": "trpcgo",
 	"compatibility_date": "2026-05-11",
+	"routes": [
+		{
+			"pattern": "trpcgo.dev",
+			"custom_domain": true
+		}
+	],
 	"assets": {
 		"directory": "./dist/",
 		"not_found_handling": "404-page",
