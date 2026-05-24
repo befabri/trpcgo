@@ -71,4 +71,4 @@ npm install zod
 
 ## What trpcgo Does Not Install
 
-trpcgo does not add CORS, authentication, persistence, or a web framework. The HTTP handler is plain `net/http`, so mount it behind Chi, Echo, Fiber adapters, standard middleware, or a raw `http.ServeMux`.
+trpcgo does not add authentication, persistence, or a web framework. The HTTP handler is plain `net/http`, includes optional CORS handling, and can be mounted behind Chi, Echo, Fiber adapters, standard middleware, or a raw `http.ServeMux`.

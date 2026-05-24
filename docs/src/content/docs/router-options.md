@@ -37,9 +37,38 @@ The base path is stripped before procedure lookup. With base path `/trpc`, `/trp
 | `WithMethodOverride(bool)` | `false` | Allows queries to be called with `POST`. |
 | `WithMaxBodySize(n)` | `1 MiB` | Limits POST bodies and GET `input` query values. `-1` disables the limit. |
 | `WithMaxBatchSize(n)` | `10` | Limits procedures in one batch. `-1` disables the limit. |
-| `WithStrictInput(bool)` | `false` | Rejects unknown JSON object fields with `BAD_REQUEST`. |
+| `WithStrictInput(bool)` | `true` | Rejects unknown JSON object fields and trailing JSON tokens. |
 
-Strict input uses Go's `json.Decoder.DisallowUnknownFields`. By default, unknown JSON fields are silently ignored like normal `json.Unmarshal`.
+Strict input uses Go's `json.Decoder.DisallowUnknownFields` and is enabled by default. Unknown object fields are returned as `BAD_REQUEST`; malformed JSON and trailing JSON tokens are returned as parse errors. Set `WithStrictInput(false)` only when you intentionally want Go's normal `json.Unmarshal` behavior, which ignores unknown object fields.
+
+## Handler Options
+
+`trpc.NewHandler` accepts options for HTTP-layer behavior:
+
+```go
+handler := trpc.NewHandler(router, "/trpc",
+    trpc.WithCORS(trpc.CORSConfig{
+        AllowedOrigins:   []string{"https://app.example.com"},
+        AllowCredentials: true,
+    }),
+    trpc.WithTrustedOrigins("https://app.example.com"),
+)
+```
+
+| Option | Default | Behavior |
+| --- | --- | --- |
+| `trpc.WithContentTypeEnforcement(bool)` | `true` | Requires `Content-Type: application/json` for `POST` requests with bodies. |
+| `trpc.WithCSRFProtection(bool)` | `true` | Rejects cross-origin `POST` requests unless the `Origin` or `Referer` is same-origin or trusted. |
+| `trpc.WithCSRFRequireOrigin(bool)` | `false` | Rejects all `POST` requests that lack both `Origin` and `Referer`. Cookie-bearing POSTs are rejected without those headers even when this is false. |
+| `trpc.WithPublicOrigin(origin)` / `trpc.WithPublicOrigins(origins...)` | none | Treats exact public API origins as same-origin for deployments behind TLS-terminating proxies. |
+| `trpc.WithTrustedOrigins(origins...)` | none | Adds exact scheme+host origins that may send cross-origin `POST` requests. |
+| `trpc.WithCORS(config)` | disabled | Handles CORS preflights and response headers for configured origins. CORS origins do not grant CSRF trust. |
+
+Handler options are separate from router options because they depend on HTTP deployment details. `WithCORS` accepts exact origins such as `https://app.example.com`; wildcard CORS (`*`) can emit `Access-Control-Allow-Origin: *` when credentials are disabled, but it is not trusted by the CSRF check. For cross-origin browser mutations, configure both CORS read access with `WithCORS` and POST trust with `WithTrustedOrigins`.
+
+`CORSConfig.AllowedHeaders` replaces the default allow-list. The default is `Authorization`, `Content-Type`, `Last-Event-Id`, and `trpc-accept`; include those headers when you add custom headers and still need auth, tRPC JSONL, or subscription resume support.
+
+Configured origins must be exact `http` or `https` scheme+host values with no path, query, fragment, or user info. Header values such as `Referer` may include a path; trpcgo extracts their origin before comparison.
 
 ## Validation Option
 

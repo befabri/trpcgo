@@ -29,7 +29,7 @@ You can mount `trpc.NewHandler(router, basePath)` behind any router or middlewar
 
 ## CORS
 
-trpcgo does not implement CORS. Add CORS in your web framework, HTTP middleware, reverse proxy, or edge layer.
+trpcgo includes optional CORS handling through `trpc.WithCORS`. You can also handle CORS in your web framework, HTTP middleware, reverse proxy, or edge layer.
 
 ## Serialization
 

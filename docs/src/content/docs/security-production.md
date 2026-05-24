@@ -21,7 +21,7 @@ Validation runs after JSON decoding and only for struct inputs.
 
 ## Reject Unknown Fields
 
-Go's default JSON decoder ignores unknown fields. Enable strict input when you want unknown fields rejected:
+Strict input is enabled by default. It rejects unknown JSON object fields and trailing JSON tokens for typed procedure inputs:
 
 ```go
 router := trpcgo.NewRouter(
@@ -29,7 +29,7 @@ router := trpcgo.NewRouter(
 )
 ```
 
-Strict input also applies to `RawCall`.
+Strict input also applies to `RawCall`. Set `trpcgo.WithStrictInput(false)` only when you intentionally want Go's normal `json.Unmarshal` behavior, which ignores unknown fields.
 
 ## Keep Request Limits
 
@@ -87,45 +87,40 @@ trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
 
 Use `WithOnError` for detailed server-side logs instead.
 
-## Add CORS Yourself
+## Configure CORS
 
-trpcgo does not handle CORS. Add it in your HTTP middleware if browsers call the API from another origin.
+Use `trpc.WithCORS` when browsers call the API from another origin:
 
 ```go
-handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Access-Control-Allow-Origin", "https://app.example.com")
-    w.Header().Set("Access-Control-Allow-Credentials", "true")
-    w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-    w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, trpc-accept")
-    w.Header().Add("Vary", "Origin")
-    if r.Method == http.MethodOptions {
-        w.WriteHeader(http.StatusNoContent)
-        return
-    }
-    trpcHandler.ServeHTTP(w, r)
-})
+trpcHandler := trpc.NewHandler(router, "/trpc",
+    trpc.WithCORS(trpc.CORSConfig{
+        AllowedOrigins:   []string{"https://app.example.com"},
+        AllowedHeaders:   []string{"Authorization", "Content-Type", "Last-Event-Id", "trpc-accept", "X-Request-ID"},
+        AllowCredentials: true,
+    }),
+    trpc.WithTrustedOrigins("https://app.example.com"),
+)
 ```
 
-Only set `Access-Control-Allow-Credentials: true` when you intentionally use cookies or other credentialed browser requests, and do not combine it with `Access-Control-Allow-Origin: *`.
+Only set `AllowCredentials: true` when you intentionally use cookies or other credentialed browser requests, and do not combine it with wildcard origins. `AllowedHeaders` replaces the default list, so keep `Last-Event-Id` if clients resume subscriptions and keep `trpc-accept` if clients request JSONL batch streaming.
 
 ## Protect Cookie-Authenticated Browsers
 
 CORS controls which browsers can read responses. It does not by itself protect cookie-authenticated mutation requests from cross-site form or fetch attempts.
 
-For browser dashboards that authenticate with cookies, mount the tRPC handler behind origin/CSRF protection and explicitly trust only your frontend origins:
+The tRPC handler enables Origin/Referer CSRF protection by default for `POST` requests. Same-origin requests are allowed, and exact origins configured with `WithTrustedOrigins` may send cross-origin POSTs. CORS origins are not trusted for CSRF unless you also pass them to `WithTrustedOrigins`.
 
 ```go
-trpcHandler := trpc.NewHandler(router, "/trpc")
-
-csrf := http.NewCrossOriginProtection()
-if err := csrf.AddTrustedOrigin("https://app.example.com"); err != nil {
-    log.Fatal(err)
-}
-
-mux.Handle("/trpc/", csrf.Handler(trpcHandler))
+trpcHandler := trpc.NewHandler(router, "/trpc",
+    trpc.WithTrustedOrigins("https://app.example.com"),
+)
 ```
 
-Pair this with credentialed frontend links when the dashboard and API use different origins in development.
+When both `Origin` and `Referer` are missing, non-cookie API clients are allowed by default. Cookie-bearing POSTs are rejected without one of those headers. Use `trpc.WithCSRFRequireOrigin(true)` when every POST to the handler should carry `Origin` or `Referer`.
+
+If the Go server runs behind TLS termination and receives internal `http` requests, add the public API origin with `WithPublicOrigin("https://api.example.com")`. Disable the built-in check with `trpc.WithCSRFProtection(false)` only when another layer enforces it.
+
+CSRF protection applies to `POST` requests only. Queries and subscriptions are served over `GET`, which browsers treat as safe and which therefore receives no Origin/Referer check — cross-origin reads are governed by CORS instead. A resolver runs when the request reaches the server, before the browser's CORS check decides whether the caller may read the response, so keep query and subscription resolvers free of state changes and put any state-changing operation in a mutation so the CSRF check applies. As defense in depth, set `SameSite=Lax` (or `Strict`) on session cookies; modern browsers then withhold them from cross-site subscription requests entirely.
 
 ## Treat Reconnect IDs As Untrusted
 

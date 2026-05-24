@@ -57,6 +57,6 @@ trpcgo uses Go handlers, structs, and struct tags as the source of truth. It reg
 - Go handlers and Go types are the source of truth. The frontend should consume generated TypeScript and Zod output instead of hand-written router contracts.
 - Server-side validation only runs when a validator is configured with \`WithValidator\`. Zod generation can still use Go \`validate\` tags for client-side schemas.
 - Prefer \`go generate ./...\` or \`go tool trpcgo generate\` in production. \`WithDev(true)\` and router output paths are for development workflows.
-- trpcgo provides the tRPC protocol handler, typing, generation, and validation hooks. CORS, auth, persistence, and framework integration remain application concerns.
+- trpcgo provides the tRPC protocol handler, optional CORS handling, typing, generation, and validation hooks. Auth, persistence, and framework integration remain application concerns.
 `;
 }

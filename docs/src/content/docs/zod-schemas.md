@@ -153,7 +153,7 @@ trpcgo supports common `go-playground/validator` tags including:
 | Enums | `oneof` |
 | Cross-field | `gtefield`, `ltefield`, `gtfield`, `ltfield`, `eqfield`, `nefield` |
 
-Unsupported tags are preserved as comments in generated schemas instead of silently disappearing.
+Unsupported tags are preserved as comments in generated schemas instead of silently disappearing. Recognized tags with unsafe or invalid numeric parameters are also commented as invalid and are not emitted as Zod code.
 
 ## `omitempty` Semantics
 

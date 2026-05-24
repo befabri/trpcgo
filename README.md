@@ -80,8 +80,15 @@ func main() {
         return User{ID: "1", Name: input.Name, Email: input.Email}, nil
     })
 
+    handler := trpc.NewHandler(router, "/trpc",
+        trpc.WithCORS(trpc.CORSConfig{
+            AllowedOrigins: []string{"http://localhost:3000"},
+        }),
+        trpc.WithTrustedOrigins("http://localhost:3000"),
+    )
+
     mux := http.NewServeMux()
-    mux.Handle("/trpc/", trpc.NewHandler(router, "/trpc"))
+    mux.Handle("/trpc/", handler)
     http.ListenAndServe(":8080", mux)
 }
 ```
@@ -478,6 +485,8 @@ const client = createTRPCClient<AppRouter>({
 const user = await client.user.getById.query({ id: "1" });
 ```
 
+When a browser app is served from a different origin, such as `http://localhost:3000`, configure the Go handler with both `trpc.WithCORS` and `trpc.WithTrustedOrigins` for that exact frontend origin.
+
 ## Router Merging
 
 Split procedures across files and merge:
@@ -520,7 +529,7 @@ See [`examples/start-trpc/`](examples/start-trpc/) for a full working example wi
 
 **HTTP:** Pure `net/http`, no framework dependency. Works with any Go router or middleware.
 
-**CORS:** trpcgo does not handle CORS. Use middleware from your HTTP router or a dedicated package (e.g. `rs/cors`).
+**CORS:** trpcgo includes optional CORS handling via `trpc.WithCORS`. You can also use middleware from your HTTP router or a dedicated package (e.g. `rs/cors`).
 
 ## License
 

@@ -23,6 +23,17 @@ const user = await client.user.get.query({ id: '1' });
 const created = await client.user.create.mutate({ name: 'Alice', email: 'alice@example.com' });
 ```
 
+For an absolute browser URL like `http://localhost:8080/trpc`, the Go handler must trust the frontend origin that serves the page:
+
+```go
+handler := trpc.NewHandler(router, "/trpc",
+    trpc.WithCORS(trpc.CORSConfig{
+        AllowedOrigins: []string{"http://localhost:3000"},
+    }),
+    trpc.WithTrustedOrigins("http://localhost:3000"),
+)
+```
+
 ## React Query
 
 ```ts

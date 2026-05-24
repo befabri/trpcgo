@@ -58,8 +58,15 @@ func main() {
 
     trpcgo.MustMutation(router, "user.create", createUser)
 
+    handler := trpc.NewHandler(router, "/trpc",
+        trpc.WithCORS(trpc.CORSConfig{
+            AllowedOrigins: []string{"http://localhost:3000"},
+        }),
+        trpc.WithTrustedOrigins("http://localhost:3000"),
+    )
+
     mux := http.NewServeMux()
-    mux.Handle("/trpc/", trpc.NewHandler(router, "/trpc"))
+    mux.Handle("/trpc/", handler)
 
     log.Fatal(http.ListenAndServe(":8080", mux))
 }
@@ -107,6 +114,8 @@ const input = CreateUserInputSchema.parse({
 
 const user = await client.user.create.mutate(input);
 ```
+
+The handler configuration above trusts a frontend served from `http://localhost:3000`. If your frontend is served from the same origin as the Go handler, you can omit `WithCORS` and `WithTrustedOrigins` and use a relative client URL such as `/trpc`.
 
 If you change `CreateUserInput` or `User` in Go and regenerate, TypeScript call sites update immediately.
 
