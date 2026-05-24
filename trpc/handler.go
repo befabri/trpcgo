@@ -22,17 +22,23 @@ type Handler struct {
 	router     *trpcgo.Router
 	procedures *trpcgo.ProcedureMap
 	basePath   string
+	opts       handlerOptions
 }
 
 // NewHandler creates a tRPC HTTP handler from a trpcgo Router.
 // basePath is the URL prefix stripped before procedure lookup
 // (e.g., "/trpc" means /trpc/user.getById → procedure "user.getById").
-func NewHandler(r *trpcgo.Router, basePath string) *Handler {
+func NewHandler(r *trpcgo.Router, basePath string, opts ...HandlerOption) *Handler {
 	r.StartDevWatcher()
+	handlerOpts := defaultHandlerOptions()
+	for _, opt := range opts {
+		opt(&handlerOpts)
+	}
 	return &Handler{
 		router:     r,
 		procedures: r.BuildProcedureMap(),
 		basePath:   basePath,
+		opts:       handlerOpts,
 	}
 }
 
@@ -42,7 +48,16 @@ type callResult struct {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.handleCORS(w, r) {
+		return
+	}
 	if h.rejectUnsupportedMethod(w, r) {
+		return
+	}
+	if h.rejectInvalidContentType(w, r) {
+		return
+	}
+	if h.rejectCSRF(w, r) {
 		return
 	}
 
@@ -168,7 +183,7 @@ func (h *Handler) writeSingleResult(ctx context.Context, w http.ResponseWriter, 
 
 func (h *Handler) writeBatchResults(ctx context.Context, w http.ResponseWriter, results []callResult) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Vary", "trpc-accept")
+	addVary(w.Header(), "trpc-accept")
 	responses := make([]any, len(results))
 	for i, res := range results {
 		responses[i] = res.response
@@ -339,10 +354,25 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, resul
 		err   error
 	}
 	recvCh := make(chan recvResult, 1)
+	sendRecv := func(item recvResult) bool {
+		select {
+		case recvCh <- item:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
 	go func() {
+		defer func() {
+			if rv := recover(); rv != nil {
+				_ = sendRecv(recvResult{err: fmt.Errorf("subscription stream panic: %v", rv)})
+			}
+		}()
 		for {
 			data, id, retry, err := consumer.Recv(ctx)
-			recvCh <- recvResult{data, id, retry, err}
+			if !sendRecv(recvResult{data, id, retry, err}) {
+				return
+			}
 			if err != nil {
 				return
 			}
@@ -457,7 +487,7 @@ func (h *Handler) writeJSONLStream(ctx context.Context, w http.ResponseWriter, r
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Transfer-Encoding", "chunked")
-	w.Header().Set("Vary", "trpc-accept")
+	addVary(w.Header(), "trpc-accept")
 	trpcgo.ApplyResponseMetadata(ctx, w)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(headData)

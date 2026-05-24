@@ -657,6 +657,43 @@ func TestOutputValidatorErrorFormatterSSESanitized(t *testing.T) {
 	}
 }
 
+func TestOutputValidatorPanicInSSEDoesNotCrashServer(t *testing.T) {
+	secret := "validator-sse-panic-secret"
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "health", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	})
+	trpcgo.MustVoidSubscribe(r, "stream", func(ctx context.Context) (<-chan User, error) {
+		ch := make(chan User, 1)
+		ch <- User{}
+		close(ch)
+		return ch, nil
+	}, trpcgo.OutputValidator(func(u User) error {
+		panic(secret)
+	}))
+
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
+	resp, err := http.Get(server.URL + "/trpc/stream")
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if !strings.Contains(string(body), "serialized-error") {
+		t.Fatalf("SSE panic should produce serialized-error, got: %s", body)
+	}
+	if strings.Contains(string(body), secret) {
+		t.Fatalf("SSE panic leaked panic payload: %s", body)
+	}
+
+	resp2 := mustGet(t, server, "/trpc/health")
+	defer func() { _ = resp2.Body.Close() }()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("server unhealthy after SSE panic: status %d", resp2.StatusCode)
+	}
+}
+
 func TestOutputValidatorOnErrorReceivesCause(t *testing.T) {
 	secret := "validator-cause"
 	var capturedErr *trpcgo.Error

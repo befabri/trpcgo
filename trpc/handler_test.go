@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/befabri/trpcgo"
 	"github.com/befabri/trpcgo/trpc"
@@ -153,6 +154,442 @@ func TestHandler_QueryPostWithMethodOverride(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 with method override, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_PostRequiresJSONContentType(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc")
+
+	req := httptest.NewRequest(http.MethodPost, "/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want 415: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for charset content type: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_PostWithoutBodyAllowsMissingContentType(t *testing.T) {
+	r := trpcgo.NewRouter()
+	if err := trpcgo.VoidMutation(r, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := trpc.NewHandler(r, "/trpc")
+
+	req := httptest.NewRequest(http.MethodPost, "/trpc/ping", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for empty body without content type: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_CSRFRejectsCrossOriginPost(t *testing.T) {
+	called := false
+	r := trpcgo.NewRouter()
+	if err := trpcgo.Mutation(r, "greet", func(ctx context.Context, input echoInput) (echoOutput, error) {
+		called = true
+		return echoOutput{Reply: "hello, " + input.Message}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := trpc.NewHandler(r, "/trpc")
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.example.test/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://evil.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Fatal("handler should not run for cross-origin POST")
+	}
+}
+
+func TestHandler_CSRFAllowsSameOriginPost(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc")
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.example.test/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://api.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for same-origin POST: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_CSRFAllowsSameOriginWithDefaultPort(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc")
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.example.test:443/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://api.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for same-origin POST with default port: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_CSRFRejectsInvalidRequestHost(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc")
+
+	req := httptest.NewRequest(http.MethodPost, "http://api.example.test/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Host = "api.example.test:bad"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://api.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for invalid request host: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_CSRFAllowsSameOriginRefererWithPath(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc")
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.example.test/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Referer", "https://api.example.test/dashboard?tab=users")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for same-origin referer with path: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_CSRFRejectsOriginHeaderWithPath(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc")
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.example.test/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://api.example.test/dashboard")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for Origin header with path: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_CSRFRejectsRefererWithUserinfo(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc")
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.example.test/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Referer", "https://user@api.example.test/dashboard")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for referer with userinfo: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_CSRFPublicOriginAllowsTLSProxySameOriginPost(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc", trpc.WithPublicOrigin("https://api.example.test"))
+
+	req := httptest.NewRequest(http.MethodPost, "http://api.example.test/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://api.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for configured public origin behind TLS proxy: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_CSRFPublicOriginRejectsPathConfiguration(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc", trpc.WithPublicOrigin("https://api.example.test/app"))
+
+	req := httptest.NewRequest(http.MethodPost, "http://api.example.test/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://api.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for public origin configured with path: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_TrustedOriginCanonicalizesDefaultPort(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc", trpc.WithTrustedOrigins("https://app.example.test:443"))
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.example.test/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://app.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for trusted origin with default port: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_CSRFRejectsCookiePostWithoutOriginOrReferer(t *testing.T) {
+	called := false
+	r := trpcgo.NewRouter()
+	if err := trpcgo.Mutation(r, "greet", func(ctx context.Context, input echoInput) (echoOutput, error) {
+		called = true
+		return echoOutput{Reply: "hello, " + input.Message}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := trpc.NewHandler(r, "/trpc")
+
+	req := httptest.NewRequest(http.MethodPost, "/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Cookie", "sid=123")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Fatal("handler should not run for cookie POST without Origin or Referer")
+	}
+}
+
+func TestHandler_CSRFRequireOriginRejectsPostWithoutOriginOrReferer(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc", trpc.WithCSRFRequireOrigin(true))
+
+	req := httptest.NewRequest(http.MethodPost, "/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_CORSPreflight(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc", trpc.WithCORS(trpc.CORSConfig{
+		AllowedOrigins:   []string{"https://app.example.test:443"},
+		AllowCredentials: true,
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/trpc/greet", nil)
+	req.Header.Set("Origin", "https://app.example.test:443")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "Content-Type, Authorization")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.test:443" {
+		t.Fatalf("Access-Control-Allow-Origin = %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("Access-Control-Allow-Credentials = %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "POST") {
+		t.Fatalf("Access-Control-Allow-Methods = %q", got)
+	}
+	if vary := rec.Header().Get("Vary"); !strings.Contains(vary, "Origin") || !strings.Contains(vary, "Access-Control-Request-Method") {
+		t.Fatalf("Vary = %q", vary)
+	}
+}
+
+func TestHandler_CORSMaxAge(t *testing.T) {
+	preflight := func(t *testing.T, h *trpc.Handler) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodOptions, "/trpc/greet", nil)
+		req.Header.Set("Origin", "https://app.example.test")
+		req.Header.Set("Access-Control-Request-Method", "POST")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204: %s", rec.Code, rec.Body.String())
+		}
+		return rec.Header().Get("Access-Control-Max-Age")
+	}
+
+	t.Run("whole seconds emitted verbatim", func(t *testing.T) {
+		r := setupRouter(t)
+		h := trpc.NewHandler(r, "/trpc", trpc.WithCORS(trpc.CORSConfig{
+			AllowedOrigins: []string{"https://app.example.test"},
+			MaxAge:         600 * time.Second,
+		}))
+		if got := preflight(t, h); got != "600" {
+			t.Fatalf("Access-Control-Max-Age = %q, want %q", got, "600")
+		}
+	})
+
+	t.Run("positive sub-second is not truncated to zero", func(t *testing.T) {
+		r := setupRouter(t)
+		h := trpc.NewHandler(r, "/trpc", trpc.WithCORS(trpc.CORSConfig{
+			AllowedOrigins: []string{"https://app.example.test"},
+			MaxAge:         500 * time.Millisecond,
+		}))
+		// The caller asked for caching; 0 would mean "do not cache" — round up to 1s.
+		if got := preflight(t, h); got != "1" {
+			t.Fatalf("Access-Control-Max-Age = %q, want %q (sub-second must not become 0)", got, "1")
+		}
+	})
+
+	t.Run("zero MaxAge omits the header", func(t *testing.T) {
+		r := setupRouter(t)
+		h := trpc.NewHandler(r, "/trpc", trpc.WithCORS(trpc.CORSConfig{
+			AllowedOrigins: []string{"https://app.example.test"},
+		}))
+		if got := preflight(t, h); got != "" {
+			t.Fatalf("Access-Control-Max-Age = %q, want empty when MaxAge unset", got)
+		}
+	})
+}
+
+func TestHandler_CORSRejectsDisallowedPreflightOrigin(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc", trpc.WithCORS(trpc.CORSConfig{
+		AllowedOrigins: []string{"https://app.example.test"},
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/trpc/greet", nil)
+	req.Header.Set("Origin", "https://evil.example.test")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("disallowed origin got Access-Control-Allow-Origin = %q", got)
+	}
+	if vary := rec.Header().Get("Vary"); !strings.Contains(vary, "Origin") {
+		t.Fatalf("Vary = %q, want Origin for disallowed preflight", vary)
+	}
+}
+
+func TestHandler_CORSAllowedOriginDoesNotBypassCSRF(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc", trpc.WithCORS(trpc.CORSConfig{
+		AllowedOrigins:   []string{"https://app.example.test"},
+		AllowCredentials: true,
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.example.test/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://app.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 because CORS does not grant CSRF trust: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.test" {
+		t.Fatalf("Access-Control-Allow-Origin = %q", got)
+	}
+}
+
+func TestHandler_CORSWithTrustedOriginAllowsCSRF(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc",
+		trpc.WithCORS(trpc.CORSConfig{
+			AllowedOrigins:   []string{"https://app.example.test"},
+			AllowCredentials: true,
+		}),
+		trpc.WithTrustedOrigins("https://app.example.test"),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.example.test/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://app.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for explicitly trusted CORS origin: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.test" {
+		t.Fatalf("Access-Control-Allow-Origin = %q", got)
+	}
+}
+
+func TestHandler_TrustedOriginRejectsNonOriginConfiguration(t *testing.T) {
+	tests := []string{
+		"https://app.example.test/",
+		"https://app.example.test/admin",
+		"https://app.example.test?debug=true",
+		"https://app.example.test#section",
+		"https://user@app.example.test",
+		"https://app.example.test:bad",
+	}
+
+	for _, configuredOrigin := range tests {
+		t.Run(configuredOrigin, func(t *testing.T) {
+			r := setupRouter(t)
+			h := trpc.NewHandler(r, "/trpc", trpc.WithTrustedOrigins(configuredOrigin))
+
+			req := httptest.NewRequest(http.MethodPost, "https://api.example.test/trpc/greet", strings.NewReader(`{"message":"alice"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Origin", "https://app.example.test")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403 for trusted origin configured as %q: %s", rec.Code, configuredOrigin, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandler_CORSRejectsPathConfiguredOrigin(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc", trpc.WithCORS(trpc.CORSConfig{
+		AllowedOrigins: []string{"https://app.example.test/admin"},
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/trpc/greet", nil)
+	req.Header.Set("Origin", "https://app.example.test")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for CORS origin configured with path", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want empty", got)
 	}
 }
 

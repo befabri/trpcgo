@@ -420,20 +420,13 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
-			if r.Method == "OPTIONS" {
-				w.WriteHeader(204)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	})
-
-	r.Handle("/trpc/*", trpc.NewHandler(router, "/trpc"))
+	r.Handle("/trpc/*", trpc.NewHandler(router, "/trpc",
+		trpc.WithCORS(trpc.CORSConfig{
+			AllowedOrigins: []string{"http://localhost:3000"},
+			AllowedHeaders: []string{"Content-Type", "Last-Event-Id", "trpc-accept", "X-Request-ID"},
+		}),
+		trpc.WithTrustedOrigins("http://localhost:3000"),
+	))
 
 	var ln net.Listener
 	var addr string
