@@ -319,6 +319,13 @@ func TestHTTPMethodEnforcement(t *testing.T) {
 
 // --- Body Size Limits ---
 
+func TestDefaultMaxBodySize(t *testing.T) {
+	r := trpcgo.NewRouter()
+	if got, want := r.MaxBodySize(), int64(1<<20); got != want {
+		t.Fatalf("MaxBodySize() = %d, want %d", got, want)
+	}
+}
+
 // TestBodySizeLimitNegativeOneMeansUnlimited verifies WithMaxBodySize(-1) disables the limit.
 func TestBodySizeLimitNegativeOneMeansUnlimited(t *testing.T) {
 	r := trpcgo.NewRouter(trpcgo.WithMaxBodySize(-1))
@@ -619,6 +626,13 @@ func TestContextCancellationStopsHandler(t *testing.T) {
 
 // --- SSE Max Duration ---
 
+func TestDefaultSSEMaxDuration(t *testing.T) {
+	r := trpcgo.NewRouter()
+	if got, want := r.SSEMaxDuration(), 30*time.Minute; got != want {
+		t.Fatalf("SSEMaxDuration() = %v, want %v", got, want)
+	}
+}
+
 // TestSSEMaxDurationEnforced verifies that SSE streams respect the max duration.
 func TestSSEMaxDurationEnforced(t *testing.T) {
 	r := trpcgo.NewRouter(trpcgo.WithSSEMaxDuration(200 * time.Millisecond))
@@ -825,6 +839,16 @@ func TestSSEMaxConnectionsEnforced(t *testing.T) {
 		_ = c.Body.Close()
 	}
 	_ = resp2.Body.Close()
+}
+
+func TestSSEMaxConnectionsNegativeDisablesLimit(t *testing.T) {
+	r := trpcgo.NewRouter(
+		trpcgo.WithSSEMaxConnections(3),
+		trpcgo.WithSSEMaxConnections(-1),
+	)
+	if got := r.MaxSSEConnections(); got != 0 {
+		t.Fatalf("MaxSSEConnections() = %d, want 0", got)
+	}
 }
 
 // TestSSEMaxConnectionsConcurrentRace tests the connection counter under

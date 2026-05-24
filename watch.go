@@ -24,6 +24,13 @@ type watchOpts struct {
 	zodStyle  typemap.ZodStyle
 }
 
+type watcherConfig struct {
+	watcher         *fsnotify.Watcher
+	opts            watchOpts
+	done            <-chan struct{}
+	handleDirCreate func(*fsnotify.Watcher, string) error
+}
+
 // startWatcher watches .go files in the current working directory (recursively)
 // and regenerates TypeScript types and Zod schemas when changes are detected.
 // It uses static analysis (go/packages) to read source files directly, so
@@ -32,31 +39,47 @@ type watchOpts struct {
 // If the Go code is broken (syntax errors, type errors), the previous
 // generated files are preserved.
 func (r *Router) startWatcher() {
-	output := r.opts.typeOutput
-	if output == "" {
+	cfg, err := r.newWatcherConfig()
+	if err != nil {
 		return
 	}
+	r.runWatcher(cfg)
+}
 
+func (r *Router) newWatcherConfig() (watcherConfig, error) {
+	if r.opts.typeOutput == "" {
+		return watcherConfig{}, os.ErrInvalid
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		log.Printf("trpcgo: watcher: failed to get working directory: %v", err)
-		return
+		return watcherConfig{}, err
 	}
-
-	patterns := []string{"."}
-	if len(r.opts.watchPackages) > 0 {
-		patterns = append([]string(nil), r.opts.watchPackages...)
-	}
-
-	output = absPath(output)
-	zodOutput := absPath(r.opts.zodOutput)
-
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Printf("trpcgo: watcher: failed to create: %v", err)
-		return
+		return watcherConfig{}, err
 	}
+	patterns, handleDirCreate, err := r.configureWatchScope(watcher, cwd)
+	if err != nil {
+		_ = watcher.Close()
+		return watcherConfig{}, err
+	}
+	return watcherConfig{
+		watcher:         watcher,
+		done:            r.done,
+		handleDirCreate: handleDirCreate,
+		opts: watchOpts{
+			dir:       cwd,
+			patterns:  patterns,
+			output:    absPath(r.opts.typeOutput),
+			zodOutput: absPath(r.opts.zodOutput),
+			zodStyle:  r.zodStyle(),
+		},
+	}, nil
+}
 
+func (r *Router) configureWatchScope(watcher *fsnotify.Watcher, cwd string) ([]string, func(*fsnotify.Watcher, string) error, error) {
 	usingPackageScope := false
 	var patternRoots []string
 	if len(r.opts.watchPackages) > 0 {
@@ -69,57 +92,50 @@ func (r *Router) startWatcher() {
 		}
 	}
 
+	patterns := []string{"."}
 	if !usingPackageScope {
-		// Reset patterns so regeneration uses "." rather than the package
-		// patterns that triggered the fallback.
-		patterns = []string{"."}
 		if err := fsutil.WatchRecursive(watcher, cwd); err != nil {
 			log.Printf("trpcgo: watcher: failed to watch %s: %v", cwd, err)
-			_ = watcher.Close()
-			return
+			return nil, nil, err
 		}
 		log.Printf("trpcgo: watching Go directories under %s", cwd)
+	} else {
+		patterns = append([]string(nil), r.opts.watchPackages...)
 	}
 
-	// In package-scope mode, restrict newly created dirs to the pattern roots
-	// so ancestor create events don't pull in unrelated trees (e.g. frontend).
 	handleDirCreate := fsutil.WatchRecursive
 	if usingPackageScope {
 		handleDirCreate = fsutil.WatchGoInScope(patternRoots)
 	}
+	return patterns, handleDirCreate, nil
+}
 
-	zodStyle := typemap.ZodStandard
+func (r *Router) zodStyle() typemap.ZodStyle {
 	if r.opts.zodMini {
-		zodStyle = typemap.ZodMini
+		return typemap.ZodMini
 	}
+	return typemap.ZodStandard
+}
 
-	opts := watchOpts{
-		dir:       cwd,
-		patterns:  patterns,
-		output:    output,
-		zodOutput: zodOutput,
-		zodStyle:  zodStyle,
-	}
-
-	done := r.done
+func (r *Router) runWatcher(cfg watcherConfig) {
 	go func() {
-		defer func() { _ = watcher.Close() }()
+		defer func() { _ = cfg.watcher.Close() }()
 
 		// Run static analysis immediately to enrich reflect-generated types.
-		regenerateFromSource(opts)
+		regenerateFromSource(cfg.opts)
 
 		var debounce <-chan time.Time
 		for {
 			select {
-			case <-done:
+			case <-cfg.done:
 				return
 
-			case event, ok := <-watcher.Events:
+			case event, ok := <-cfg.watcher.Events:
 				if !ok {
 					return
 				}
 				// Handle directory creation/removal for recursive watching.
-				fsutil.HandleDirEventWith(watcher, event, handleDirCreate)
+				fsutil.HandleDirEventWith(cfg.watcher, event, cfg.handleDirCreate)
 
 				if filepath.Ext(event.Name) != ".go" {
 					continue
@@ -131,9 +147,9 @@ func (r *Router) startWatcher() {
 
 			case <-debounce:
 				debounce = nil
-				regenerateFromSource(opts)
+				regenerateFromSource(cfg.opts)
 
-			case _, ok := <-watcher.Errors:
+			case _, ok := <-cfg.watcher.Errors:
 				if !ok {
 					return
 				}

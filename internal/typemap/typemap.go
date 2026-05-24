@@ -25,8 +25,8 @@ type TypeDef struct {
 	PkgName      string // "models"
 	Name         string
 	Kind         TypeDefKind
-	Comment      string   // Go doc comment → JSDoc
-	TypeParams   []string // Generic type parameter names: ["T", "U"]
+	Comment      string       // Go doc comment → JSDoc
+	TypeParams   []string     // Generic type parameter names: ["T", "U"]
 	Extends      []string     // base types for TypeScript extends clause
 	Refinements  []Refinement // cross-field validation constraints → .refine()
 	Fields       []Field      // Kind == TypeDefInterface
@@ -66,6 +66,34 @@ type Mapper struct {
 	names    map[string]string   // TypeID → short name (for display name resolution)
 	metas    map[string]TypeMeta // AST metadata keyed by TypeID
 	resolved map[string]string   // cached: TypeID → display name
+}
+
+var basicKindNames = map[types.BasicKind]string{
+	types.String:  "string",
+	types.Bool:    "bool",
+	types.Int:     "int",
+	types.Int8:    "int8",
+	types.Int16:   "int16",
+	types.Int32:   "int32",
+	types.Int64:   "int64",
+	types.Uint:    "uint",
+	types.Uint8:   "uint8",
+	types.Uint16:  "uint16",
+	types.Uint32:  "uint32",
+	types.Uint64:  "uint64",
+	types.Float32: "float32",
+	types.Float64: "float64",
+}
+
+var wellKnownGoKinds = map[string]string{
+	"time.Time":                "time.Time",
+	"encoding/json.RawMessage": "json.RawMessage",
+}
+
+var wellKnownTSTypes = map[string]string{
+	"time.Time":                "string",
+	"encoding/json.RawMessage": "unknown",
+	"encoding/json.Number":     "number",
 }
 
 // TypeID returns a fully-qualified identifier for a types.Object.
@@ -213,82 +241,10 @@ func (m *Mapper) Convert(t types.Type) string {
 func (m *Mapper) convert(t types.Type) string {
 	switch t := t.(type) {
 	case *types.Named:
-		obj := t.Obj()
-		name := obj.Name()
-		id := TypeID(obj)
-
-		// Check for well-known types.
-		if obj.Pkg() != nil {
-			fullPath := obj.Pkg().Path() + "." + name
-			switch fullPath {
-			case "time.Time":
-				return "string"
-			case "encoding/json.RawMessage":
-				return "unknown"
-			case "encoding/json.Number":
-				return "number"
-			}
-
-			// TrackedEvent[T] — unwrap to T for TypeScript output.
-			// The tracking ID is a transport concern, not a type concern.
-			if fullPath == "github.com/befabri/trpcgo.TrackedEvent" {
-				if t.TypeArgs() != nil && t.TypeArgs().Len() == 1 {
-					return m.convert(t.TypeArgs().At(0))
-				}
-			}
-		}
-
-		// For named struct types, generate an interface definition.
-		underlying := t.Underlying()
-		if _, ok := underlying.(*types.Struct); ok {
-			// Generic instantiation: Foo[string, int] → Foo<string, number>
-			if t.TypeArgs() != nil && t.TypeArgs().Len() > 0 {
-				var args []string
-				for t0 := range t.TypeArgs().Types() {
-					args = append(args, m.convert(t0))
-				}
-				originID := TypeID(t.Origin().Obj())
-				m.resolveStructDef(originID, name, t.Origin())
-				return fmt.Sprintf("%s<%s>", m.typeToken(originID, name), strings.Join(args, ", "))
-			}
-
-			// Generic definition: Foo[T any] — extract type params.
-			if t.TypeParams() != nil && t.TypeParams().Len() > 0 {
-				m.resolveStructDef(id, name, t)
-				return m.typeToken(id, name)
-			}
-
-			m.resolveStructDef(id, name, t)
-			return m.typeToken(id, name)
-		}
-
-		// Named type with non-struct underlying (e.g., `type Status string`).
-		// Check metadata for const groups (→ union) or alias.
-		if meta, ok := m.metas[id]; ok {
-			if len(meta.ConstValues) > 0 {
-				m.registerUnion(id, name, meta, obj)
-				return m.typeToken(id, name)
-			}
-			if meta.IsAlias {
-				m.registerAlias(id, name, underlying, meta, obj)
-				return m.typeToken(id, name)
-			}
-		}
-
-		// For other named types, resolve underlying.
-		return m.convert(underlying)
+		return m.convertNamed(t)
 
 	case *types.Alias:
-		// Go type alias (type X = Y) — resolve to the aliased type.
-		// Check metadata for alias registration (e.g., to emit `export type X = string`).
-		obj := t.Obj()
-		name := obj.Name()
-		id := TypeID(obj)
-		if meta, ok := m.metas[id]; ok && meta.IsAlias {
-			m.registerAlias(id, name, t.Rhs(), meta, obj)
-			return m.typeToken(id, name)
-		}
-		return m.convert(t.Rhs())
+		return m.convertAlias(t)
 
 	case *types.TypeParam:
 		return t.Obj().Name()
@@ -297,15 +253,7 @@ func (m *Mapper) convert(t types.Type) string {
 		return m.convert(t.Elem())
 
 	case *types.Slice:
-		// []byte marshals as base64 string in JSON.
-		if basic, ok := t.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
-			return "string"
-		}
-		elem := m.convert(t.Elem())
-		if strings.Contains(elem, "|") {
-			return fmt.Sprintf("(%s)[]", elem)
-		}
-		return elem + "[]"
+		return m.convertSlice(t)
 
 	case *types.Array:
 		elem := m.convert(t.Elem())
@@ -329,6 +277,93 @@ func (m *Mapper) convert(t types.Type) string {
 	default:
 		return "unknown"
 	}
+}
+
+func (m *Mapper) convertNamed(t *types.Named) string {
+	obj := t.Obj()
+	name := obj.Name()
+	id := TypeID(obj)
+	if ts := m.convertWellKnownNamed(t, name); ts != "" {
+		return ts
+	}
+	underlying := t.Underlying()
+	if _, ok := underlying.(*types.Struct); ok {
+		return m.convertNamedStruct(t, id, name)
+	}
+	if token := m.convertNamedMeta(t, id, name, underlying); token != "" {
+		return token
+	}
+	return m.convert(underlying)
+}
+
+func (m *Mapper) convertWellKnownNamed(t *types.Named, name string) string {
+	obj := t.Obj()
+	if obj.Pkg() == nil {
+		return ""
+	}
+	fullPath := obj.Pkg().Path() + "." + name
+	if ts := wellKnownTSTypes[fullPath]; ts != "" {
+		return ts
+	}
+	// TrackedEvent[T] — unwrap to T for TypeScript output.
+	// The tracking ID is a transport concern, not a type concern.
+	if fullPath == "github.com/befabri/trpcgo.TrackedEvent" && t.TypeArgs() != nil && t.TypeArgs().Len() == 1 {
+		return m.convert(t.TypeArgs().At(0))
+	}
+	return ""
+}
+
+func (m *Mapper) convertNamedStruct(t *types.Named, id, name string) string {
+	if t.TypeArgs() != nil && t.TypeArgs().Len() > 0 {
+		var args []string
+		for t0 := range t.TypeArgs().Types() {
+			args = append(args, m.convert(t0))
+		}
+		originID := TypeID(t.Origin().Obj())
+		m.resolveStructDef(originID, name, t.Origin())
+		return fmt.Sprintf("%s<%s>", m.typeToken(originID, name), strings.Join(args, ", "))
+	}
+	m.resolveStructDef(id, name, t)
+	return m.typeToken(id, name)
+}
+
+func (m *Mapper) convertNamedMeta(t *types.Named, id, name string, underlying types.Type) string {
+	meta, ok := m.metas[id]
+	if !ok {
+		return ""
+	}
+	if len(meta.ConstValues) > 0 {
+		m.registerUnion(id, name, meta, t.Obj())
+		return m.typeToken(id, name)
+	}
+	if meta.IsAlias {
+		m.registerAlias(id, name, underlying, meta, t.Obj())
+		return m.typeToken(id, name)
+	}
+	return ""
+}
+
+func (m *Mapper) convertAlias(t *types.Alias) string {
+	obj := t.Obj()
+	name := obj.Name()
+	id := TypeID(obj)
+	if meta, ok := m.metas[id]; ok && meta.IsAlias {
+		m.registerAlias(id, name, t.Rhs(), meta, obj)
+		return m.typeToken(id, name)
+	}
+	return m.convert(t.Rhs())
+}
+
+func (m *Mapper) convertSlice(t *types.Slice) string {
+	// []byte marshals as base64 string in JSON.
+	if basic, ok := t.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {
+		return "string"
+	}
+	elem := m.convert(t.Elem())
+	if strings.Contains(elem, "|") {
+		return fmt.Sprintf("(%s)[]", elem)
+	}
+	return elem + "[]"
 }
 
 func basicToTS(t *types.Basic) string {
@@ -428,50 +463,13 @@ func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, extends *[]str
 		field := st.Field(i)
 		tag := st.Tag(i)
 		jsonName, omitempty, skip := ParseJSONTag(tag)
-
-		if skip {
+		if skip || shouldSkipField(tag) {
 			continue
 		}
 
-		// Check tstype tag for skip.
 		tstag, hasTSTag := ParseTSTypeTag(tag)
-		if hasTSTag && tstag.Type == "-" {
+		if m.collectEmbeddedField(field, jsonName, tstag, hasTSTag, fields, extends) {
 			continue
-		}
-
-		// Handle embedded fields.
-		if field.Embedded() && jsonName == "" {
-			embType := field.Type()
-			isPtr := false
-			if ptr, ok := embType.(*types.Pointer); ok {
-				embType = ptr.Elem()
-				isPtr = true
-			}
-			embType = types.Unalias(embType)
-
-			// tstype:",extends" — emit extends clause instead of flattening.
-			if hasTSTag && tstag.Extends {
-				if named, ok := embType.(*types.Named); ok {
-					if _, ok := named.Underlying().(*types.Struct); ok {
-						tsName := m.convert(embType)
-						if isPtr && !tstag.Required {
-							tsName = "Partial<" + tsName + ">"
-						}
-						if extends != nil {
-							*extends = append(*extends, tsName)
-						}
-						continue
-					}
-				}
-			}
-
-			// Default: flatten promoted fields.
-			if named, ok := embType.(*types.Named); ok {
-				if embSt, ok := named.Underlying().(*types.Struct); ok {
-					m.collectFields(embSt, fields, extends, nil)
-					continue
-				}
-			}
 		}
 
 		if !field.Exported() {
@@ -481,69 +479,109 @@ func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, extends *[]str
 		if jsonName == "" {
 			jsonName = field.Name()
 		}
-
-		tsType := m.convert(field.Type())
-		optional := omitempty || isPointer(field.Type())
-
-		f := Field{
-			Name:     jsonName,
-			Type:     tsType,
-			GoKind:   goKind(field.Type()),
-			Optional: optional,
-		}
-
-		// Parse validate tag and split at dive boundary.
-		allRules := ParseValidateTag(tag)
-		sliceRules, elemRules := SplitAtDive(allRules)
-		f.Validate = sliceRules
-		f.ElementValidate = elemRules
-		f.UnsupportedZod = UnsupportedZodRules(sliceRules)
-		if eu := UnsupportedZodRules(elemRules); len(eu) > 0 {
-			f.UnsupportedZod = append(f.UnsupportedZod, eu...)
-		}
-
-		// Extract element Go kind for slice/array fields.
-		if f.GoKind == "slice" || f.GoKind == "array" {
-			f.ElementGoKind = sliceElementGoKind(field.Type())
-		}
-
-		for _, rule := range f.Validate {
-			if rule.Tag == "required" {
-				f.Optional = false
-			}
-			if rule.Tag == "omitempty" {
-				f.ValidateOmitempty = true
-			}
-		}
-
-		// Apply tstype tag overrides.
-		if hasTSTag {
-			if tstag.Type != "" {
-				f.Type = tstag.Type
-			}
-			f.Readonly = tstag.Readonly
-			if tstag.Required {
-				f.Required = true
-				f.Optional = false
-			}
-		}
-
-		// Apply field comment: Go source comments take precedence, ts_doc is fallback.
-		if fieldComments != nil {
-			if comment, ok := fieldComments[i]; ok {
-				f.Comment = comment
-			}
-		}
-		if f.Comment == "" {
-			if doc, ok := ParseTSDocTag(tag); ok {
-				f.Comment = doc
-			}
-		}
-
-		f.ZodOmit = ParseZodOmitTag(tag)
-
-		*fields = append(*fields, f)
+		*fields = append(*fields, m.collectField(field, tag, jsonName, omitempty, tstag, hasTSTag, fieldComments, i))
 	}
+}
+
+func shouldSkipField(tag string) bool {
+	tstag, hasTSTag := ParseTSTypeTag(tag)
+	return hasTSTag && tstag.Type == "-"
+}
+
+func (m *Mapper) collectEmbeddedField(field *types.Var, jsonName string, tstag TSTypeTag, hasTSTag bool, fields *[]Field, extends *[]string) bool {
+	if !field.Embedded() || jsonName != "" {
+		return false
+	}
+	embType, isPtr := embeddedType(field.Type())
+	named, ok := embType.(*types.Named)
+	if !ok {
+		return false
+	}
+	embSt, ok := named.Underlying().(*types.Struct)
+	if !ok {
+		return false
+	}
+	if hasTSTag && tstag.Extends {
+		if extends != nil {
+			*extends = append(*extends, embeddedExtendsName(m.convert(embType), isPtr, tstag.Required))
+		}
+		return true
+	}
+	m.collectFields(embSt, fields, extends, nil)
+	return true
+}
+
+func embeddedType(t types.Type) (types.Type, bool) {
+	if ptr, ok := t.(*types.Pointer); ok {
+		return types.Unalias(ptr.Elem()), true
+	}
+	return types.Unalias(t), false
+}
+
+func embeddedExtendsName(tsName string, isPtr, required bool) string {
+	if isPtr && !required {
+		return "Partial<" + tsName + ">"
+	}
+	return tsName
+}
+
+func (m *Mapper) collectField(field *types.Var, tag, jsonName string, omitempty bool, tstag TSTypeTag, hasTSTag bool, fieldComments map[int]string, index int) Field {
+	f := Field{
+		Name:     jsonName,
+		Type:     m.convert(field.Type()),
+		GoKind:   goKind(field.Type()),
+		Optional: omitempty || isPointer(field.Type()),
+	}
+	applyValidateRules(&f, tag, field.Type())
+	applyTSTypeTag(&f, tstag, hasTSTag)
+	f.Comment = fieldComment(tag, fieldComments, index)
+	f.ZodOmit = ParseZodOmitTag(tag)
+	return f
+}
+
+func applyValidateRules(f *Field, tag string, typ types.Type) {
+	sliceRules, elemRules := SplitAtDive(ParseValidateTag(tag))
+	f.Validate = sliceRules
+	f.ElementValidate = elemRules
+	f.UnsupportedZod = UnsupportedZodRules(sliceRules)
+	f.UnsupportedZod = append(f.UnsupportedZod, UnsupportedZodRules(elemRules)...)
+	if f.GoKind == "slice" || f.GoKind == "array" {
+		f.ElementGoKind = sliceElementGoKind(typ)
+	}
+	for _, rule := range f.Validate {
+		if rule.Tag == "required" {
+			f.Optional = false
+		}
+		if rule.Tag == "omitempty" {
+			f.ValidateOmitempty = true
+		}
+	}
+}
+
+func applyTSTypeTag(f *Field, tstag TSTypeTag, ok bool) {
+	if !ok {
+		return
+	}
+	if tstag.Type != "" {
+		f.Type = tstag.Type
+	}
+	f.Readonly = tstag.Readonly
+	if tstag.Required {
+		f.Required = true
+		f.Optional = false
+	}
+}
+
+func fieldComment(tag string, comments map[int]string, index int) string {
+	if comments != nil {
+		if comment, ok := comments[index]; ok {
+			if comment != "" {
+				return comment
+			}
+		}
+	}
+	comment, _ := ParseTSDocTag(tag)
+	return comment
 }
 
 // extractStructRefinements scans collected fields for cross-field validate tags
@@ -689,11 +727,8 @@ func goKind(t types.Type) string {
 	if named, ok := t.(*types.Named); ok {
 		if obj := named.Obj(); obj.Pkg() != nil {
 			fullPath := obj.Pkg().Path() + "." + obj.Name()
-			switch fullPath {
-			case "time.Time":
-				return "time.Time"
-			case "encoding/json.RawMessage":
-				return "json.RawMessage"
+			if kind := wellKnownGoKinds[fullPath]; kind != "" {
+				return kind
 			}
 		}
 	}
@@ -701,38 +736,10 @@ func goKind(t types.Type) string {
 	// Resolve to underlying type.
 	switch u := t.Underlying().(type) {
 	case *types.Basic:
-		switch u.Kind() {
-		case types.String:
-			return "string"
-		case types.Bool:
-			return "bool"
-		case types.Int:
-			return "int"
-		case types.Int8:
-			return "int8"
-		case types.Int16:
-			return "int16"
-		case types.Int32:
-			return "int32"
-		case types.Int64:
-			return "int64"
-		case types.Uint:
-			return "uint"
-		case types.Uint8:
-			return "uint8"
-		case types.Uint16:
-			return "uint16"
-		case types.Uint32:
-			return "uint32"
-		case types.Uint64:
-			return "uint64"
-		case types.Float32:
-			return "float32"
-		case types.Float64:
-			return "float64"
-		default:
-			return "unknown"
+		if kind := basicKindNames[u.Kind()]; kind != "" {
+			return kind
 		}
+		return "unknown"
 	case *types.Slice:
 		// []byte is special.
 		if basic, ok := u.Elem().(*types.Basic); ok && basic.Kind() == types.Byte {

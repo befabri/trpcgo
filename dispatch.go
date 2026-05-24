@@ -108,44 +108,12 @@ func (r *Router) ExecuteEntry(ctx context.Context, entry *ProcedureEntry, raw js
 // executeProcedure (used by RawCall) and the exported ExecuteEntry
 // (used by protocol handler packages).
 func (r *Router) executeCommon(ctx context.Context, handler HandlerFunc, inputType reflect.Type, raw json.RawMessage, outputValidator func(any) error, outputParser func(any) (any, error)) (any, error) {
-	// Decode the raw input into the registered type.
-	var input any
-	if inputType != nil {
-		ptr := reflect.New(inputType)
-		if len(raw) > 0 {
-			if r.opts.strictInput {
-				dec := json.NewDecoder(bytes.NewReader(raw))
-				dec.DisallowUnknownFields()
-				if err := dec.Decode(ptr.Interface()); err != nil {
-					var syntaxErr *json.SyntaxError
-					var typeErr *json.UnmarshalTypeError
-					switch {
-					case errors.As(err, &syntaxErr):
-						return nil, NewError(CodeParseError, "failed to parse input")
-					case errors.As(err, &typeErr):
-						return nil, NewError(CodeBadRequest, "invalid input type")
-					default:
-						return nil, NewError(CodeBadRequest, "unknown field in input")
-					}
-				}
-			} else if err := json.Unmarshal(raw, ptr.Interface()); err != nil {
-				return nil, NewError(CodeParseError, "failed to parse input")
-			}
-		}
-		input = ptr.Elem().Interface()
+	input, err := r.decodeInput(inputType, raw)
+	if err != nil {
+		return nil, err
 	}
-
-	// Validate the decoded struct.
-	if r.opts.validator != nil && inputType != nil && input != nil {
-		t := inputType
-		for t.Kind() == reflect.Pointer {
-			t = t.Elem()
-		}
-		if t.Kind() == reflect.Struct {
-			if err := r.opts.validator(input); err != nil {
-				return nil, WrapError(CodeBadRequest, "input validation failed", err)
-			}
-		}
+	if err := r.validateInput(inputType, input); err != nil {
+		return nil, err
 	}
 
 	output, err := handler(ctx, input)
@@ -153,22 +121,98 @@ func (r *Router) executeCommon(ctx context.Context, handler HandlerFunc, inputTy
 		return nil, err
 	}
 
-	// Run output hooks. For subscriptions the validator/parser are
-	// injected into the sseStream and run per-item inside
-	// StreamConsumer.Recv. For queries and mutations they run here.
-	if outputValidator != nil || outputParser != nil {
-		if p, ok := output.(parsable); ok {
-			p.setOutputValidator(outputValidator)
-			p.setOutputParser(outputParser)
-		} else {
-			output, err = applyOutputHooks(output, outputValidator, outputParser)
-			if err != nil {
-				return nil, err
-			}
-		}
+	output, err = prepareOutput(output, outputValidator, outputParser)
+	if err != nil {
+		return nil, err
 	}
 
 	return output, nil
+}
+
+func prepareOutput(output any, outputValidator func(any) error, outputParser func(any) (any, error)) (any, error) {
+	if outputValidator == nil && outputParser == nil {
+		return output, nil
+	}
+	// For subscriptions the validator/parser are injected into the sseStream and
+	// run per-item inside StreamConsumer.Recv. For queries and mutations they run here.
+	if p, ok := output.(parsable); ok {
+		p.setOutputValidator(outputValidator)
+		p.setOutputParser(outputParser)
+		return output, nil
+	}
+	return applyOutputHooks(output, outputValidator, outputParser)
+}
+
+func (r *Router) decodeInput(inputType reflect.Type, raw json.RawMessage) (any, error) {
+	if inputType == nil {
+		return nil, nil
+	}
+	ptr := reflect.New(inputType)
+	if len(raw) > 0 {
+		if err := r.decodeRawInput(ptr, raw); err != nil {
+			return nil, err
+		}
+	}
+	return ptr.Elem().Interface(), nil
+}
+
+func (r *Router) decodeRawInput(ptr reflect.Value, raw json.RawMessage) error {
+	if r.opts.strictInput {
+		return decodeStrictInput(ptr, raw)
+	}
+	if err := json.Unmarshal(raw, ptr.Interface()); err != nil {
+		return NewError(CodeParseError, "failed to parse input")
+	}
+	return nil
+}
+
+func decodeStrictInput(ptr reflect.Value, raw json.RawMessage) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(ptr.Interface()); err != nil {
+		return strictInputError(err)
+	}
+	return nil
+}
+
+func strictInputError(err error) error {
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	switch {
+	case errors.As(err, &syntaxErr):
+		return NewError(CodeParseError, "failed to parse input")
+	case errors.As(err, &typeErr):
+		return NewError(CodeBadRequest, "invalid input type")
+	default:
+		return NewError(CodeBadRequest, "unknown field in input")
+	}
+}
+
+func (r *Router) validateInput(inputType reflect.Type, input any) error {
+	if !r.shouldValidateInput(inputType, input) {
+		return nil
+	}
+	if err := r.opts.validator(input); err != nil {
+		return WrapError(CodeBadRequest, "input validation failed", err)
+	}
+	return nil
+}
+
+func (r *Router) shouldValidateInput(inputType reflect.Type, input any) bool {
+	if r.opts.validator == nil {
+		return false
+	}
+	if inputType == nil {
+		return false
+	}
+	return derefType(inputType).Kind() == reflect.Struct
+}
+
+func derefType(t reflect.Type) reflect.Type {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t
 }
 
 // IsStreamResult reports whether a procedure result is a subscription stream.
@@ -209,21 +253,14 @@ func ConsumeStream(result any) *StreamConsumer {
 func (sc *StreamConsumer) Recv(ctx context.Context) (data any, id string, retry int, err error) {
 	item, ok := sc.recv(ctx)
 
-	// Apply output hooks to both normal items and final values.
-	if item != nil && (sc.outputValidator != nil || sc.outputParser != nil) {
-		processed, hookErr := applyOutputHooks(item, sc.outputValidator, sc.outputParser)
-		if hookErr != nil {
-			return nil, "", 0, hookErr
-		}
-		item = processed
+	processed, err := sc.applyOutputHooks(item)
+	if err != nil {
+		return nil, "", 0, err
 	}
+	item = processed
 
 	if !ok {
-		if item != nil {
-			// Final return value from stream close.
-			return item, "", 0, io.EOF
-		}
-		return nil, "", 0, io.EOF
+		return item, "", 0, io.EOF
 	}
 
 	// Extract TrackedEvent metadata if present.
@@ -232,6 +269,14 @@ func (sc *StreamConsumer) Recv(ctx context.Context) (data any, id string, retry 
 	}
 
 	return item, "", 0, nil
+}
+
+func (sc *StreamConsumer) applyOutputHooks(item any) (any, error) {
+	// Apply output hooks to both normal items and final values.
+	if item == nil || (sc.outputValidator == nil && sc.outputParser == nil) {
+		return item, nil
+	}
+	return applyOutputHooks(item, sc.outputValidator, sc.outputParser)
 }
 
 // streamConsumable is implemented by streaming results to provide a

@@ -29,9 +29,9 @@ func NewRouter(opts ...Option) *Router {
 		done:       make(chan struct{}),
 		opts: routerOptions{
 			allowBatching:  true,
-			maxBodySize:    defaultMaxBodySize,
+			maxBodySize:    defaultMaxBodySize(),
 			maxBatchSize:   defaultMaxBatchSize,
-			sseMaxDuration: defaultSSEMaxDuration,
+			sseMaxDuration: defaultSSEMaxDuration(),
 		},
 	}
 	for _, opt := range opts {

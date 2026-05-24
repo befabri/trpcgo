@@ -170,6 +170,57 @@ type reflectDef struct {
 	fields      []typemap.Field
 }
 
+var reflectKindTS = map[reflect.Kind]string{
+	reflect.String:  "string",
+	reflect.Bool:    "boolean",
+	reflect.Int:     "number",
+	reflect.Int8:    "number",
+	reflect.Int16:   "number",
+	reflect.Int32:   "number",
+	reflect.Int64:   "number",
+	reflect.Uint:    "number",
+	reflect.Uint8:   "number",
+	reflect.Uint16:  "number",
+	reflect.Uint32:  "number",
+	reflect.Uint64:  "number",
+	reflect.Float32: "number",
+	reflect.Float64: "number",
+}
+
+var reflectKindNames = map[reflect.Kind]string{
+	reflect.String:  "string",
+	reflect.Bool:    "bool",
+	reflect.Int:     "int",
+	reflect.Int8:    "int8",
+	reflect.Int16:   "int16",
+	reflect.Int32:   "int32",
+	reflect.Int64:   "int64",
+	reflect.Uint:    "uint",
+	reflect.Uint8:   "uint8",
+	reflect.Uint16:  "uint16",
+	reflect.Uint32:  "uint32",
+	reflect.Uint64:  "uint64",
+	reflect.Float32: "float32",
+	reflect.Float64: "float64",
+}
+
+var basicArgTS = map[string]string{
+	"string":  "string",
+	"bool":    "boolean",
+	"int":     "number",
+	"int8":    "number",
+	"int16":   "number",
+	"int32":   "number",
+	"int64":   "number",
+	"uint":    "number",
+	"uint8":   "number",
+	"uint16":  "number",
+	"uint32":  "number",
+	"uint64":  "number",
+	"float32": "number",
+	"float64": "number",
+}
+
 // goTypeToTS converts a reflect.Type to its TypeScript representation.
 // subs maps concrete reflect.Types to generic type parameter names (e.g., "T")
 // for building generic interface definitions. Pass nil for non-generic contexts.
@@ -185,45 +236,16 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Ty
 		}
 	}
 
-	// Well-known types that need special handling regardless of Kind.
-	if t.PkgPath() == "encoding/json" {
-		switch t.Name() {
-		case "RawMessage":
-			return "unknown"
-		case "Number":
-			return "number"
-		}
+	if ts := reflectWellKnownTS(t, defs, subs); ts != "" {
+		return ts
 	}
 
-	// TrackedEvent[T] — unwrap to T for TypeScript output.
-	// The tracking ID is a transport concern, not a type concern.
-	// In reflect, generic instantiation names include type args, e.g.
-	// "TrackedEvent[pkg.Foo·1]", so we check with HasPrefix.
-	if t.PkgPath() == "github.com/befabri/trpcgo" && strings.HasPrefix(t.Name(), "TrackedEvent[") {
-		if dataField, ok := t.FieldByName("Data"); ok {
-			return goTypeToTS(dataField.Type, defs, subs)
-		}
+	if ts := reflectKindTS[t.Kind()]; ts != "" {
+		return ts
 	}
-
 	switch t.Kind() {
-	case reflect.String:
-		return "string"
-	case reflect.Bool:
-		return "boolean"
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-		reflect.Float32, reflect.Float64:
-		return "number"
-
 	case reflect.Slice:
-		if t.Elem().Kind() == reflect.Uint8 {
-			return "string"
-		}
-		elem := goTypeToTS(t.Elem(), defs, subs)
-		if strings.Contains(elem, "|") {
-			return "(" + elem + ")[]"
-		}
-		return elem + "[]"
+		return reflectSliceToTS(t, defs, subs)
 
 	case reflect.Array:
 		return goTypeToTS(t.Elem(), defs, subs) + "[]"
@@ -234,23 +256,7 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Ty
 		return fmt.Sprintf("Record<%s, %s>", key, val)
 
 	case reflect.Struct:
-		name := t.Name()
-		if t.PkgPath() == "time" && name == "Time" {
-			return "string"
-		}
-		if name == "" {
-			return inlineStructTS(t, defs, subs)
-		}
-		// Generic instantiation: PageResult[github.com/pkg.Foo]
-		if bracketIdx := strings.IndexByte(name, '['); bracketIdx >= 0 {
-			return handleGenericTS(t, name, bracketIdx, defs, subs)
-		}
-
-		key := t.PkgPath() + "." + name
-		if _, ok := defs[key]; !ok {
-			resolveStructDefTS(t, name, key, nil, nil, defs)
-		}
-		return typemap.TokenDelim + key + typemap.TokenDelim
+		return reflectStructToTS(t, defs, subs)
 
 	case reflect.Interface:
 		return "unknown"
@@ -258,6 +264,50 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Ty
 	default:
 		return "unknown"
 	}
+}
+
+func reflectWellKnownTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Type]string) string {
+	if t.PkgPath() == "encoding/json" && t.Name() == "RawMessage" {
+		return "unknown"
+	}
+	if t.PkgPath() == "encoding/json" && t.Name() == "Number" {
+		return "number"
+	}
+	if t.PkgPath() == "github.com/befabri/trpcgo" && strings.HasPrefix(t.Name(), "TrackedEvent[") {
+		if dataField, ok := t.FieldByName("Data"); ok {
+			return goTypeToTS(dataField.Type, defs, subs)
+		}
+	}
+	return ""
+}
+
+func reflectSliceToTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Type]string) string {
+	if t.Elem().Kind() == reflect.Uint8 {
+		return "string"
+	}
+	elem := goTypeToTS(t.Elem(), defs, subs)
+	if strings.Contains(elem, "|") {
+		return "(" + elem + ")[]"
+	}
+	return elem + "[]"
+}
+
+func reflectStructToTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Type]string) string {
+	name := t.Name()
+	if t.PkgPath() == "time" && name == "Time" {
+		return "string"
+	}
+	if name == "" {
+		return inlineStructTS(t, defs, subs)
+	}
+	if bracketIdx := strings.IndexByte(name, '['); bracketIdx >= 0 {
+		return handleGenericTS(t, name, bracketIdx, defs, subs)
+	}
+	key := t.PkgPath() + "." + name
+	if _, ok := defs[key]; !ok {
+		resolveStructDefTS(t, name, key, nil, nil, defs)
+	}
+	return typemap.TokenDelim + key + typemap.TokenDelim
 }
 
 // handleGenericTS handles a generic type instantiation (e.g., PageResult[pkg.Foo]).
@@ -557,35 +607,10 @@ func reflectGoKind(t reflect.Type) string {
 		return "json.RawMessage"
 	}
 
+	if kind := reflectKindNames[t.Kind()]; kind != "" {
+		return kind
+	}
 	switch t.Kind() {
-	case reflect.String:
-		return "string"
-	case reflect.Bool:
-		return "bool"
-	case reflect.Int:
-		return "int"
-	case reflect.Int8:
-		return "int8"
-	case reflect.Int16:
-		return "int16"
-	case reflect.Int32:
-		return "int32"
-	case reflect.Int64:
-		return "int64"
-	case reflect.Uint:
-		return "uint"
-	case reflect.Uint8:
-		return "uint8"
-	case reflect.Uint16:
-		return "uint16"
-	case reflect.Uint32:
-		return "uint32"
-	case reflect.Uint64:
-		return "uint64"
-	case reflect.Float32:
-		return "float32"
-	case reflect.Float64:
-		return "float64"
 	case reflect.Slice:
 		if t.Elem().Kind() == reflect.Uint8 {
 			return "[]byte"
@@ -711,21 +736,13 @@ func findArgType(fieldTypes map[string]reflect.Type, argStr string) reflect.Type
 // basicArgToTS converts a Go type argument string to TypeScript as a fallback
 // when the reflect.Type cannot be found.
 func basicArgToTS(argStr string) string {
-	switch argStr {
-	case "string":
-		return "string"
-	case "bool":
-		return "boolean"
-	case "int", "int8", "int16", "int32", "int64",
-		"uint", "uint8", "uint16", "uint32", "uint64",
-		"float32", "float64":
-		return "number"
-	default:
-		if idx := strings.LastIndexByte(argStr, '.'); idx >= 0 {
-			return argStr[idx+1:]
-		}
-		return argStr
+	if ts := basicArgTS[argStr]; ts != "" {
+		return ts
 	}
+	if idx := strings.LastIndexByte(argStr, '.'); idx >= 0 {
+		return argStr[idx+1:]
+	}
+	return argStr
 }
 
 // makeParamNames generates TypeScript type parameter names.

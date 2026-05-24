@@ -290,95 +290,12 @@ func fieldToZod(f typemap.Field, cyclicFields map[string]bool, style typemap.Zod
 
 	// Array: "Foo[]" → z.array(FooSchema)
 	if before, ok := strings.CutSuffix(tsType, "[]"); ok {
-		elemType := before
-		elemType = strings.TrimPrefix(elemType, "(")
-		elemType = strings.TrimSuffix(elemType, ")")
-
-		// Build element schema, applying dive rules if present.
-		var elemZod string
-		if len(f.ElementValidate) > 0 && f.ElementGoKind != "" && f.ElementGoKind != "struct" {
-			// Create a virtual field for the element with dive rules.
-			elemField := typemap.Field{
-				Type:     elemType,
-				GoKind:   f.ElementGoKind,
-				Validate: f.ElementValidate,
-			}
-			elemZod = typemap.ZodType(elemField, style)
-		}
-		if elemZod == "" {
-			elemZod = tsTypeToZodRef(elemType, f.ElementGoKind)
-		}
-
-		result := fmt.Sprintf("z.array(%s)", elemZod)
-
-		// Apply container-level constraints (before dive: min/max = array length).
-		if style == typemap.ZodMini {
-			var checks []string
-			for _, rule := range f.Validate {
-				switch rule.Tag {
-				case "min":
-					if rule.Param != "" {
-						checks = append(checks, fmt.Sprintf("z.minLength(%s)", rule.Param))
-					}
-				case "max":
-					if rule.Param != "" {
-						checks = append(checks, fmt.Sprintf("z.maxLength(%s)", rule.Param))
-					}
-				case "len":
-					if rule.Param != "" {
-						checks = append(checks, fmt.Sprintf("z.length(%s)", rule.Param))
-					}
-				}
-			}
-			if len(checks) > 0 {
-				result += fmt.Sprintf(".check(%s)", strings.Join(checks, ", "))
-			}
-		} else {
-			for _, rule := range f.Validate {
-				switch rule.Tag {
-				case "min":
-					if rule.Param != "" {
-						result += fmt.Sprintf(".min(%s)", rule.Param)
-					}
-				case "max":
-					if rule.Param != "" {
-						result += fmt.Sprintf(".max(%s)", rule.Param)
-					}
-				case "len":
-					if rule.Param != "" {
-						result += fmt.Sprintf(".length(%s)", rule.Param)
-					}
-				}
-			}
-		}
-
-		if f.Optional {
-			if style == typemap.ZodMini {
-				result = fmt.Sprintf("z.optional(%s)", result)
-			} else {
-				result += ".optional()"
-			}
-		}
-		return result
+		return arrayFieldToZod(before, f, style)
 	}
 
 	// Record: "Record<K, V>" → z.record(K, V)
 	if strings.HasPrefix(tsType, "Record<") {
-		inner := tsType[len("Record<") : len(tsType)-1]
-		parts := splitTopLevel(inner, ',')
-		if len(parts) == 2 {
-			keyZod := tsTypeToZodRef(strings.TrimSpace(parts[0]), "")
-			valZod := tsTypeToZodRef(strings.TrimSpace(parts[1]), "")
-			result := fmt.Sprintf("z.record(%s, %s)", keyZod, valZod)
-			if f.Optional {
-				if style == typemap.ZodMini {
-					result = fmt.Sprintf("z.optional(%s)", result)
-				} else {
-					result += ".optional()"
-				}
-			}
-			return result
-		}
+		return recordFieldToZod(tsType, f.Optional, style)
 	}
 
 	// Named type reference: "Foo" → FooSchema
@@ -396,6 +313,88 @@ func fieldToZod(f typemap.Field, cyclicFields map[string]bool, style typemap.Zod
 		return ref + ".optional()"
 	}
 	return ref
+}
+
+func arrayFieldToZod(elemType string, f typemap.Field, style typemap.ZodStyle) string {
+	elemType = strings.TrimPrefix(elemType, "(")
+	elemType = strings.TrimSuffix(elemType, ")")
+	result := fmt.Sprintf("z.array(%s)", elementZod(elemType, f, style))
+	result += arrayConstraints(f.Validate, style)
+	return optionalZod(result, f.Optional, style)
+}
+
+func elementZod(elemType string, f typemap.Field, style typemap.ZodStyle) string {
+	if len(f.ElementValidate) > 0 && f.ElementGoKind != "" && f.ElementGoKind != "struct" {
+		return typemap.ZodType(typemap.Field{
+			Type:     elemType,
+			GoKind:   f.ElementGoKind,
+			Validate: f.ElementValidate,
+		}, style)
+	}
+	return tsTypeToZodRef(elemType, f.ElementGoKind)
+}
+
+func arrayConstraints(rules []typemap.ValidateRule, style typemap.ZodStyle) string {
+	if style == typemap.ZodMini {
+		return arrayConstraintsMini(rules)
+	}
+	var result string
+	for _, rule := range rules {
+		if rule.Param == "" {
+			continue
+		}
+		switch rule.Tag {
+		case "min", "max", "len":
+			method := rule.Tag
+			if method == "len" {
+				method = "length"
+			}
+			result += fmt.Sprintf(".%s(%s)", method, rule.Param)
+		}
+	}
+	return result
+}
+
+func arrayConstraintsMini(rules []typemap.ValidateRule) string {
+	var checks []string
+	for _, rule := range rules {
+		if rule.Param == "" {
+			continue
+		}
+		switch rule.Tag {
+		case "min":
+			checks = append(checks, fmt.Sprintf("z.minLength(%s)", rule.Param))
+		case "max":
+			checks = append(checks, fmt.Sprintf("z.maxLength(%s)", rule.Param))
+		case "len":
+			checks = append(checks, fmt.Sprintf("z.length(%s)", rule.Param))
+		}
+	}
+	if len(checks) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(".check(%s)", strings.Join(checks, ", "))
+}
+
+func recordFieldToZod(tsType string, optional bool, style typemap.ZodStyle) string {
+	inner := tsType[len("Record<") : len(tsType)-1]
+	parts := splitTopLevel(inner, ',')
+	if len(parts) != 2 {
+		return optionalZod(stripGenericArgs(tsType)+"Schema", optional, style)
+	}
+	keyZod := tsTypeToZodRef(strings.TrimSpace(parts[0]), "")
+	valZod := tsTypeToZodRef(strings.TrimSpace(parts[1]), "")
+	return optionalZod(fmt.Sprintf("z.record(%s, %s)", keyZod, valZod), optional, style)
+}
+
+func optionalZod(result string, optional bool, style typemap.ZodStyle) string {
+	if !optional {
+		return result
+	}
+	if style == typemap.ZodMini {
+		return fmt.Sprintf("z.optional(%s)", result)
+	}
+	return result + ".optional()"
 }
 
 // tsTypeToZodRef converts a TS type string to a Zod reference (for array/record elements).

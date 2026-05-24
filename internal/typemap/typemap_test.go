@@ -67,6 +67,193 @@ func TestPointerType(t *testing.T) {
 	}
 }
 
+func TestApplyTSTypeTag(t *testing.T) {
+	base := Field{Type: "string", Optional: true}
+	applyTSTypeTag(&base, TSTypeTag{Type: "Record<string, unknown>", Readonly: true, Required: true}, true)
+	if base.Type != "Record<string, unknown>" || !base.Readonly || !base.Required || base.Optional {
+		t.Fatalf("applyTSTypeTag override = %#v", base)
+	}
+
+	unchanged := Field{Type: "number", Optional: true}
+	applyTSTypeTag(&unchanged, TSTypeTag{Type: "boolean", Readonly: true, Required: true}, false)
+	if unchanged.Type != "number" || unchanged.Readonly || unchanged.Required || !unchanged.Optional {
+		t.Fatalf("applyTSTypeTag without tag changed field: %#v", unchanged)
+	}
+
+	readonlyOnly := Field{Type: "string", Optional: true}
+	applyTSTypeTag(&readonlyOnly, TSTypeTag{Readonly: true}, true)
+	if readonlyOnly.Type != "string" || !readonlyOnly.Readonly || readonlyOnly.Required || !readonlyOnly.Optional {
+		t.Fatalf("applyTSTypeTag readonly-only = %#v", readonlyOnly)
+	}
+}
+
+func TestFieldCommentFallsBackToTSDocForEmptyDocComment(t *testing.T) {
+	comments := map[int]string{0: ""}
+	if got := fieldComment(`ts_doc:"fallback doc"`, comments, 0); got != "fallback doc" {
+		t.Fatalf("fieldComment empty doc fallback = %q, want fallback doc", got)
+	}
+	if got := fieldComment(`ts_doc:"fallback doc"`, map[int]string{0: "real doc"}, 0); got != "real doc" {
+		t.Fatalf("fieldComment non-empty doc = %q, want real doc", got)
+	}
+}
+
+func TestQuotePropName(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"", `""`},
+		{"name", "name"},
+		{"_name", "_name"},
+		{"$name", "$name"},
+		{"na9me", "na9me"},
+		{"9name", `"9name"`},
+		{"with-hyphen", `"with-hyphen"`},
+		{"with space", `"with space"`},
+	}
+
+	for _, tt := range tests {
+		if got := QuotePropName(tt.name); got != tt.want {
+			t.Errorf("QuotePropName(%q) = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestInlineStructCoversTagsAndSkippedFields(t *testing.T) {
+	m := NewMapper(nil)
+	pkg := types.NewPackage("example.com/app", "app")
+	fields := []*types.Var{
+		types.NewField(0, pkg, "ID", types.Typ[types.String], false),
+		types.NewField(0, pkg, "Count", types.NewPointer(types.Typ[types.Int]), false),
+		types.NewField(0, pkg, "Custom", types.Typ[types.String], false),
+		types.NewField(0, pkg, "SkipJSON", types.Typ[types.String], false),
+		types.NewField(0, pkg, "SkipTS", types.Typ[types.String], false),
+		types.NewField(0, pkg, "hidden", types.Typ[types.String], false),
+		types.NewField(0, pkg, "Required", types.NewPointer(types.Typ[types.String]), false),
+	}
+	tags := []string{
+		`json:"id"`,
+		`json:"count,omitempty"`,
+		`json:"custom-name" tstype:"ReadonlyThing,readonly"`,
+		`json:"-"`,
+		`tstype:"-"`,
+		`json:"hidden"`,
+		`tstype:",required"`,
+	}
+	st := types.NewStruct(fields, tags)
+
+	got := m.inlineStruct(st)
+	checks := []string{
+		"id: string",
+		"count?: number",
+		`readonly "custom-name": ReadonlyThing`,
+		"Required: string",
+	}
+	for _, check := range checks {
+		if !strings.Contains(got, check) {
+			t.Errorf("inlineStruct missing %q in %q", check, got)
+		}
+	}
+	for _, excluded := range []string{"SkipJSON", "SkipTS", "hidden"} {
+		if strings.Contains(got, excluded) {
+			t.Errorf("inlineStruct should exclude %q in %q", excluded, got)
+		}
+	}
+}
+
+func TestInlineStructEmptyWhenNoExportedFields(t *testing.T) {
+	m := NewMapper(nil)
+	pkg := types.NewPackage("example.com/app", "app")
+	st := types.NewStruct([]*types.Var{
+		types.NewField(0, pkg, "hidden", types.Typ[types.String], false),
+		types.NewField(0, pkg, "Skipped", types.Typ[types.String], false),
+	}, []string{"", `json:"-"`})
+
+	if got := m.inlineStruct(st); got != "Record<string, never>" {
+		t.Errorf("inlineStruct(empty) = %q, want Record<string, never>", got)
+	}
+}
+
+func TestGoKindCoversKnownAndCompositeKinds(t *testing.T) {
+	pkg := types.NewPackage("example.com/app", "app")
+	timePkg := types.NewPackage("time", "time")
+	jsonPkg := types.NewPackage("encoding/json", "json")
+	namedInt := types.NewNamed(types.NewTypeName(0, pkg, "Age", nil), types.Typ[types.Int], nil)
+	timeType := types.NewNamed(types.NewTypeName(0, timePkg, "Time", nil), types.NewStruct(nil, nil), nil)
+	rawMessage := types.NewNamed(types.NewTypeName(0, jsonPkg, "RawMessage", nil), types.NewSlice(types.Typ[types.Byte]), nil)
+	iface := types.NewInterfaceType(nil, nil)
+	iface.Complete()
+
+	tests := []struct {
+		name string
+		typ  types.Type
+		want string
+	}{
+		{"pointer named int", types.NewPointer(namedInt), "int"},
+		{"time", timeType, "time.Time"},
+		{"raw message", rawMessage, "json.RawMessage"},
+		{"byte slice", types.NewSlice(types.Typ[types.Byte]), "[]byte"},
+		{"string slice", types.NewSlice(types.Typ[types.String]), "slice"},
+		{"array", types.NewArray(types.Typ[types.Int32], 2), "array"},
+		{"map", types.NewMap(types.Typ[types.String], types.Typ[types.Bool]), "map"},
+		{"struct", types.NewStruct(nil, nil), "struct"},
+		{"interface", iface, "interface"},
+		{"complex", types.Typ[types.Complex64], "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := goKind(tt.typ); got != tt.want {
+				t.Errorf("goKind(%v) = %q, want %q", tt.typ, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCollectFieldsEmbeddedExtendsAndFlattening(t *testing.T) {
+	m := NewMapper(nil)
+	pkg := types.NewPackage("example.com/app", "app")
+
+	baseFields := []*types.Var{
+		types.NewField(0, pkg, "BaseID", types.Typ[types.String], false),
+	}
+	base := types.NewNamed(types.NewTypeName(0, pkg, "Base", nil), types.NewStruct(baseFields, []string{`json:"baseId"`}), nil)
+	ext := types.NewNamed(types.NewTypeName(0, pkg, "Ext", nil), types.NewStruct([]*types.Var{
+		types.NewField(0, pkg, "ExtID", types.Typ[types.String], false),
+	}, []string{`json:"extId"`}), nil)
+
+	st := types.NewStruct([]*types.Var{
+		types.NewField(0, pkg, "Base", base, true),
+		types.NewField(0, pkg, "Ext", types.NewPointer(ext), true),
+		types.NewField(0, pkg, "Name", types.Typ[types.String], false),
+	}, []string{
+		``,
+		`tstype:",extends"`,
+		`json:"name" validate:"required,omitempty,unknown_rule=abc" ts_doc:"Display name" zod_omit:"true"`,
+	})
+
+	var fields []Field
+	var extends []string
+	m.collectFields(st, &fields, &extends, nil)
+
+	if len(fields) != 2 {
+		t.Fatalf("collectFields produced %d fields, want 2: %#v", len(fields), fields)
+	}
+	if fields[0].Name != "baseId" || fields[0].Type != "string" {
+		t.Errorf("flattened embedded field = %#v, want baseId string", fields[0])
+	}
+	name := fields[1]
+	if name.Name != "name" || name.Optional || !name.ValidateOmitempty || name.Comment != "Display name" || !name.ZodOmit {
+		t.Errorf("name field metadata = %#v", name)
+	}
+	if len(name.UnsupportedZod) != 1 || name.UnsupportedZod[0].Tag != "unknown_rule" {
+		t.Errorf("unsupported rules = %#v", name.UnsupportedZod)
+	}
+	if len(extends) != 1 || m.Resolve(extends[0]) != "Partial<Ext>" {
+		t.Errorf("extends = %#v, want Partial<Ext>", extends)
+	}
+}
+
 func TestEmptyInterface(t *testing.T) {
 	m := NewMapper(nil)
 
@@ -242,6 +429,96 @@ func TestJSONTagParsing(t *testing.T) {
 			t.Errorf("ParseJSONTag(%q) = (%q, %v, %v), want (%q, %v, %v)",
 				tt.tag, name, omit, skip, tt.wantName, tt.wantOmit, tt.wantSkip)
 		}
+	}
+}
+
+func TestZodBaseFromKindAndTypeCoversFormatsOneOfAndFallbacks(t *testing.T) {
+	tests := []struct {
+		name   string
+		tsType string
+		goKind string
+		rules  []ValidateRule
+		want   string
+	}{
+		{"email format", "string", "string", []ValidateRule{{Tag: "email"}}, "z.email()"},
+		{"url format", "string", "string", []ValidateRule{{Tag: "url"}}, "z.url()"},
+		{"uuid format", "string", "string", []ValidateRule{{Tag: "uuid"}}, "z.uuidv4()"},
+		{"e164 format", "string", "string", []ValidateRule{{Tag: "e164"}}, "z.e164()"},
+		{"jwt format", "string", "string", []ValidateRule{{Tag: "jwt"}}, "z.jwt()"},
+		{"base64 format", "string", "string", []ValidateRule{{Tag: "base64"}}, "z.base64()"},
+		{"lowercase format", "string", "string", []ValidateRule{{Tag: "lowercase"}}, "z.lowercase()"},
+		{"ipv4 format", "string", "string", []ValidateRule{{Tag: "ipv4"}}, "z.ipv4()"},
+		{"ipv6 format", "string", "string", []ValidateRule{{Tag: "ipv6"}}, "z.ipv6()"},
+		{"hostname format", "string", "string", []ValidateRule{{Tag: "hostname_rfc1123"}}, "z.hostname()"},
+		{"base64url format", "string", "string", []ValidateRule{{Tag: "base64url"}}, "z.base64url()"},
+		{"hex format", "string", "string", []ValidateRule{{Tag: "hexadecimal"}}, "z.hex()"},
+		{"ulid format", "string", "string", []ValidateRule{{Tag: "ulid"}}, "z.ulid()"},
+		{"mac format", "string", "string", []ValidateRule{{Tag: "mac"}}, "z.mac()"},
+		{"cidrv4 format", "string", "string", []ValidateRule{{Tag: "cidrv4"}}, "z.cidrv4()"},
+		{"cidrv6 format", "string", "string", []ValidateRule{{Tag: "cidrv6"}}, "z.cidrv6()"},
+		{"uppercase format", "string", "string", []ValidateRule{{Tag: "uppercase"}}, "z.uppercase()"},
+		{"numeric oneof", "number", "int", []ValidateRule{{Tag: "oneof", Param: "1 2 3"}}, "z.union([z.literal(1), z.literal(2), z.literal(3)])"},
+		{"string oneof", "string", "string", []ValidateRule{{Tag: "oneof", Param: "a b"}}, `z.enum(["a", "b"])`},
+		{"time", "string", "time.Time", nil, "z.iso.datetime()"},
+		{"bytes", "string", "[]byte", nil, "z.base64()"},
+		{"int", "number", "int", nil, "z.int()"},
+		{"int32", "number", "int32", nil, "z.int32()"},
+		{"int64", "number", "int64", nil, "z.number()"},
+		{"uint32", "number", "uint32", nil, "z.uint32()"},
+		{"uint64", "number", "uint64", nil, "z.number()"},
+		{"float32", "number", "float32", nil, "z.float32()"},
+		{"float64", "number", "float64", nil, "z.float64()"},
+		{"small int", "number", "int8", nil, "z.number()"},
+		{"string kind", "string", "string", nil, "z.string()"},
+		{"bool kind", "boolean", "bool", nil, "z.boolean()"},
+		{"ts string", "string", "", nil, "z.string()"},
+		{"ts number", "number", "", nil, "z.number()"},
+		{"ts boolean", "boolean", "", nil, "z.boolean()"},
+		{"ts unknown", "unknown", "", nil, "z.unknown()"},
+		{"named type", "User", "struct", nil, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := zodBaseFromKindAndType(tt.tsType, tt.goKind, tt.rules); got != tt.want {
+				t.Errorf("zodBaseFromKindAndType() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestZodConstraintsAndMiniCoverConstraintSyntax(t *testing.T) {
+	f := Field{Type: "string", GoKind: "string", Validate: []ValidateRule{
+		{Tag: "min", Param: "2"},
+		{Tag: "max", Param: "8"},
+		{Tag: "len", Param: "4"},
+		{Tag: "alphanum"},
+		{Tag: "alpha"},
+		{Tag: "numeric"},
+		{Tag: "startswith", Param: "A"},
+		{Tag: "endswith", Param: "Z"},
+		{Tag: "contains", Param: "mid"},
+	}}
+	constraints := zodConstraints(f, "z.string()")
+	for _, want := range []string{".min(2)", ".max(8)", ".length(4)", `.regex(/^[a-zA-Z0-9]*$/)`, `.regex(/^[a-zA-Z]*$/)`, `.regex(/^[0-9]*$/)`, `.startsWith("A")`, `.endsWith("Z")`, `.includes("mid")`} {
+		if !strings.Contains(constraints, want) {
+			t.Errorf("zodConstraints missing %q in %q", want, constraints)
+		}
+	}
+
+	mini := zodMini("z.string()", constraints, true, `z.literal("")`)
+	for _, want := range []string{"z.optional(", "z.string().check(", "z.minLength(2)", "z.maxLength(8)", "z.length(4)", "z.regex(/^[a-zA-Z0-9]*$/)", "z.startsWith(\"A\")", `.or(z.literal(""))`} {
+		if !strings.Contains(mini, want) {
+			t.Errorf("zodMini missing %q in %q", want, mini)
+		}
+	}
+
+	numberConstraints := zodConstraints(Field{Validate: []ValidateRule{{Tag: "min", Param: "1"}, {Tag: "max", Param: "9"}, {Tag: "gt", Param: "0"}, {Tag: "gte", Param: "1"}, {Tag: "lt", Param: "10"}, {Tag: "lte", Param: "9"}}}, "z.int()")
+	if numberConstraints != ".gte(1).lte(9).gt(0).gte(1).lt(10).lte(9)" {
+		t.Errorf("number constraints = %q", numberConstraints)
+	}
+	if got := zodMini("z.int()", numberConstraints, false, ""); !strings.Contains(got, "z.gte(1)") || !strings.Contains(got, "z.lt(10)") {
+		t.Errorf("number zodMini = %q", got)
 	}
 }
 

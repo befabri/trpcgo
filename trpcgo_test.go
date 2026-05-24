@@ -249,6 +249,45 @@ func TestQueryWithInput(t *testing.T) {
 	}
 }
 
+func TestRawCallInputProcedureAllowsEmptyRawInput(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	type optionalInput struct {
+		Name string `json:"name"`
+	}
+
+	trpcgo.MustQuery(router, "optional", func(ctx context.Context, input optionalInput) (string, error) {
+		if input.Name == "" {
+			return "zero", nil
+		}
+		return input.Name, nil
+	})
+
+	got, err := router.RawCall(context.Background(), "optional", nil)
+	if err != nil {
+		t.Fatalf("RawCall: %v", err)
+	}
+	if got != "zero" {
+		t.Fatalf("RawCall result = %v, want zero", got)
+	}
+}
+
+func TestRawCallDecodesOneByteInput(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	trpcgo.MustQuery(router, "number", func(ctx context.Context, input int) (int, error) {
+		return input, nil
+	})
+
+	got, err := router.RawCall(context.Background(), "number", json.RawMessage("1"))
+	if err != nil {
+		t.Fatalf("RawCall: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("RawCall result = %v, want 1", got)
+	}
+}
+
 func TestBasePathBoundaryEnforced(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1457,6 +1496,164 @@ func TestSubscriptionTrackedEvents(t *testing.T) {
 	if events[3].event != "return" {
 		t.Errorf("events[3].event = %q, want return", events[3].event)
 	}
+}
+
+func TestStreamConsumerRecvReturnsFinalValueOnEOF(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	trpcgo.MustVoidSubscribeWithFinal(router, "done", func(ctx context.Context) (<-chan string, func() any, error) {
+		ch := make(chan string)
+		close(ch)
+		return ch, func() any { return "finished" }, nil
+	})
+
+	consumer := streamConsumerFor(t, router, "done")
+	data, id, retry, err := consumer.Recv(context.Background())
+	if err != io.EOF {
+		t.Fatalf("Recv error = %v, want io.EOF", err)
+	}
+	if data != "finished" {
+		t.Fatalf("Recv data = %v, want finished", data)
+	}
+	if id != "" {
+		t.Fatalf("Recv id = %q, want empty", id)
+	}
+	if retry != 0 {
+		t.Fatalf("Recv retry = %d, want 0", retry)
+	}
+}
+
+func TestStreamConsumerRecvReturnsItemWithZeroRetry(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	trpcgo.MustVoidSubscribe(router, "ticks", func(ctx context.Context) (<-chan string, error) {
+		ch := make(chan string, 1)
+		ch <- "tick"
+		close(ch)
+		return ch, nil
+	})
+
+	consumer := streamConsumerFor(t, router, "ticks")
+	data, id, retry, err := consumer.Recv(context.Background())
+	if err != nil {
+		t.Fatalf("Recv error = %v, want nil", err)
+	}
+	if data != "tick" {
+		t.Fatalf("Recv data = %v, want tick", data)
+	}
+	if id != "" {
+		t.Fatalf("Recv id = %q, want empty", id)
+	}
+	if retry != 0 {
+		t.Fatalf("Recv retry = %d, want 0", retry)
+	}
+}
+
+func TestStreamConsumerRecvReturnsEOFWithZeroRetry(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	trpcgo.MustVoidSubscribe(router, "empty", func(ctx context.Context) (<-chan string, error) {
+		ch := make(chan string)
+		close(ch)
+		return ch, nil
+	})
+
+	consumer := streamConsumerFor(t, router, "empty")
+	data, id, retry, err := consumer.Recv(context.Background())
+	if err != io.EOF {
+		t.Fatalf("Recv error = %v, want io.EOF", err)
+	}
+	if data != nil {
+		t.Fatalf("Recv data = %v, want nil", data)
+	}
+	if id != "" {
+		t.Fatalf("Recv id = %q, want empty", id)
+	}
+	if retry != 0 {
+		t.Fatalf("Recv retry = %d, want 0", retry)
+	}
+}
+
+func TestStreamConsumerRecvNilItemSkipsOutputHooks(t *testing.T) {
+	router := trpcgo.NewRouter()
+	called := false
+
+	trpcgo.MustVoidSubscribe(router, "nil-item", func(ctx context.Context) (<-chan any, error) {
+		ch := make(chan any, 1)
+		ch <- nil
+		close(ch)
+		return ch, nil
+	}, trpcgo.WithOutputParser(func(v any) (any, error) {
+		called = true
+		return "parsed", nil
+	}))
+
+	consumer := streamConsumerFor(t, router, "nil-item")
+	data, id, retry, err := consumer.Recv(context.Background())
+	if err != nil {
+		t.Fatalf("Recv error = %v, want nil", err)
+	}
+	if called {
+		t.Fatal("output parser was called for nil stream item")
+	}
+	if data != nil {
+		t.Fatalf("Recv data = %v, want nil", data)
+	}
+	if id != "" {
+		t.Fatalf("Recv id = %q, want empty", id)
+	}
+	if retry != 0 {
+		t.Fatalf("Recv retry = %d, want 0", retry)
+	}
+}
+
+func TestStreamConsumerRecvOutputHookErrorHasZeroRetry(t *testing.T) {
+	router := trpcgo.NewRouter()
+	hookErr := fmt.Errorf("hook failed")
+
+	trpcgo.MustVoidSubscribe(router, "bad-item", func(ctx context.Context) (<-chan string, error) {
+		ch := make(chan string, 1)
+		ch <- "bad"
+		close(ch)
+		return ch, nil
+	}, trpcgo.WithOutputParser(func(v any) (any, error) {
+		return nil, hookErr
+	}))
+
+	consumer := streamConsumerFor(t, router, "bad-item")
+	data, id, retry, err := consumer.Recv(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "hook failed") {
+		t.Fatalf("Recv error = %v, want hook failure", err)
+	}
+	if data != nil {
+		t.Fatalf("Recv data = %v, want nil", data)
+	}
+	if id != "" {
+		t.Fatalf("Recv id = %q, want empty", id)
+	}
+	if retry != 0 {
+		t.Fatalf("Recv retry = %d, want 0", retry)
+	}
+}
+
+func streamConsumerFor(t *testing.T, router *trpcgo.Router, path string) *trpcgo.StreamConsumer {
+	t.Helper()
+
+	procedures := router.BuildProcedureMap()
+	entry, ok := procedures.Lookup(path)
+	if !ok {
+		t.Fatal("expected registered procedure")
+	}
+
+	result, err := router.ExecuteEntry(context.Background(), entry, nil)
+	if err != nil {
+		t.Fatalf("ExecuteEntry: %v", err)
+	}
+	consumer := trpcgo.ConsumeStream(result)
+	if consumer == nil {
+		t.Fatal("expected stream consumer")
+	}
+	return consumer
 }
 
 func TestSubscriptionUntrackedEventsHaveNoID(t *testing.T) {
@@ -3080,6 +3277,50 @@ func TestRawCall(t *testing.T) {
 	}
 }
 
+func TestProcedureMapAllLenAndTypes(t *testing.T) {
+	router := trpcgo.NewRouter()
+	trpcgo.MustQuery(router, "user.get", func(ctx context.Context, input GetUserInput) (User, error) {
+		return User{ID: input.ID, Name: "Alice"}, nil
+	})
+	trpcgo.MustVoidMutation(router, "user.reset", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	})
+
+	procedures := router.BuildProcedureMap()
+	if procedures.Len() != 2 {
+		t.Fatalf("Len = %d, want 2", procedures.Len())
+	}
+
+	seen := map[string]trpcgo.ProcedureType{}
+	for path, entry := range procedures.All() {
+		seen[path] = entry.Type()
+		if path == "user.get" {
+			if entry.InputType() != reflect.TypeFor[GetUserInput]() {
+				t.Fatalf("InputType = %v, want GetUserInput", entry.InputType())
+			}
+			if entry.OutputType() != reflect.TypeFor[User]() {
+				t.Fatalf("OutputType = %v, want User", entry.OutputType())
+			}
+		}
+	}
+
+	if seen["user.get"] != trpcgo.ProcedureQuery {
+		t.Fatalf("user.get type = %v, want query", seen["user.get"])
+	}
+	if seen["user.reset"] != trpcgo.ProcedureMutation {
+		t.Fatalf("user.reset type = %v, want mutation", seen["user.reset"])
+	}
+
+	count := 0
+	for range procedures.All() {
+		count++
+		break
+	}
+	if count != 1 {
+		t.Fatalf("early-stopped count = %d, want 1", count)
+	}
+}
+
 func TestTypedCall(t *testing.T) {
 	router := trpcgo.NewRouter()
 	trpcgo.Query(router, "user.get", func(ctx context.Context, input GetUserInput) (User, error) {
@@ -3092,6 +3333,94 @@ func TestTypedCall(t *testing.T) {
 	}
 	if user.ID != "99" || user.Name != "Bob" {
 		t.Errorf("result = %+v, want {ID:99 Name:Bob}", user)
+	}
+}
+
+func TestTypedCallInputMarshalError(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	type badInput struct {
+		Fn func()
+	}
+
+	_, err := trpcgo.Call[badInput, string](router, context.Background(), "unused", badInput{Fn: func() {}})
+	if err == nil {
+		t.Fatal("expected marshal error")
+	}
+	trpcErr, ok := err.(*trpcgo.Error)
+	if !ok {
+		t.Fatalf("error type = %T, want *trpcgo.Error", err)
+	}
+	if trpcErr.Code != trpcgo.CodeParseError {
+		t.Fatalf("error code = %v, want PARSE_ERROR", trpcErr.Code)
+	}
+	if trpcErr.Message != "failed to marshal input" {
+		t.Fatalf("error message = %q, want failed to marshal input", trpcErr.Message)
+	}
+}
+
+func TestTypedCallJSONFallbackSuccess(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	type publicUser struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+
+	trpcgo.VoidQuery(router, "user.map", func(ctx context.Context) (map[string]any, error) {
+		return map[string]any{"id": "7", "name": "Ada"}, nil
+	})
+
+	user, err := trpcgo.Call[struct{}, publicUser](router, context.Background(), "user.map", struct{}{})
+	if err != nil {
+		t.Fatalf("Call error: %v", err)
+	}
+	if user.ID != "7" || user.Name != "Ada" {
+		t.Fatalf("user = %+v, want {ID:7 Name:Ada}", user)
+	}
+}
+
+func TestTypedCallSerializeResultError(t *testing.T) {
+	router := trpcgo.NewRouter()
+	trpcgo.VoidQuery(router, "bad.result", func(ctx context.Context) (any, error) {
+		return func() {}, nil
+	})
+
+	_, err := trpcgo.Call[struct{}, string](router, context.Background(), "bad.result", struct{}{})
+	if err == nil {
+		t.Fatal("expected serialization error")
+	}
+	trpcErr, ok := err.(*trpcgo.Error)
+	if !ok {
+		t.Fatalf("error type = %T, want *trpcgo.Error", err)
+	}
+	if trpcErr.Code != trpcgo.CodeInternalServerError {
+		t.Fatalf("error code = %v, want INTERNAL_SERVER_ERROR", trpcErr.Code)
+	}
+	if trpcErr.Message != "failed to serialize result" {
+		t.Fatalf("error message = %q, want failed to serialize result", trpcErr.Message)
+	}
+}
+
+func TestTypedCallDeserializeResultError(t *testing.T) {
+	router := trpcgo.NewRouter()
+	trpcgo.VoidQuery(router, "wrong.type", func(ctx context.Context) (string, error) {
+		return "not-a-number", nil
+	})
+
+	_, err := trpcgo.Call[struct{}, int](router, context.Background(), "wrong.type", struct{}{})
+	if err == nil {
+		t.Fatal("expected deserialization error")
+	}
+	trpcErr, ok := err.(*trpcgo.Error)
+	if !ok {
+		t.Fatalf("error type = %T, want *trpcgo.Error", err)
+	}
+	if trpcErr.Code != trpcgo.CodeInternalServerError {
+		t.Fatalf("error code = %v, want INTERNAL_SERVER_ERROR", trpcErr.Code)
+	}
+	if trpcErr.Message != "failed to deserialize result" {
+		t.Fatalf("error message = %q, want failed to deserialize result", trpcErr.Message)
 	}
 }
 
@@ -4132,6 +4461,24 @@ func TestValidatorSkipsNonStruct(t *testing.T) {
 	got := resultScalar(t, body)
 	if got != "echo:hello" {
 		t.Errorf("result = %v, want echo:hello", got)
+	}
+}
+
+func TestValidatorSkipsVoidProcedure(t *testing.T) {
+	router := trpcgo.NewRouter(trpcgo.WithValidator(func(any) error {
+		return fmt.Errorf("validator should not run")
+	}))
+
+	trpcgo.MustVoidQuery(router, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	})
+
+	got, err := router.RawCall(context.Background(), "ping", nil)
+	if err != nil {
+		t.Fatalf("RawCall: %v", err)
+	}
+	if got != "pong" {
+		t.Fatalf("RawCall result = %v, want pong", got)
 	}
 }
 

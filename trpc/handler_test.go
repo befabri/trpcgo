@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -177,6 +178,81 @@ func TestHandler_BatchGET(t *testing.T) {
 	}
 	if len(results) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+}
+
+func TestHandler_JSONLBatchGET(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc")
+
+	input, _ := json.Marshal(map[string]json.RawMessage{
+		"1": json.RawMessage(`{"message":"jsonl"}`),
+	})
+	req := httptest.NewRequest(http.MethodGet, "/trpc/ping,echo?batch=1&input="+url.QueryEscape(string(input)), nil)
+	req.Header.Set("trpc-accept", "application/jsonl")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", ct)
+	}
+	if vary := rec.Header().Get("Vary"); vary != "trpc-accept" {
+		t.Fatalf("Vary = %q, want trpc-accept", vary)
+	}
+
+	lines := strings.Split(strings.TrimSpace(rec.Body.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d JSONL lines, want 3:\n%s", len(lines), rec.Body.String())
+	}
+	if !strings.Contains(lines[0], `"0"`) || !strings.Contains(lines[0], `"1"`) {
+		t.Fatalf("head line missing batch indexes: %s", lines[0])
+	}
+	if !strings.Contains(rec.Body.String(), `"pong"`) {
+		t.Fatalf("JSONL body missing ping result: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"echo: jsonl"`) {
+		t.Fatalf("JSONL body missing echo result: %s", rec.Body.String())
+	}
+}
+
+type noFlushResponseWriter struct {
+	header http.Header
+	status int
+	body   strings.Builder
+}
+
+func (w *noFlushResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *noFlushResponseWriter) Write(b []byte) (int, error) {
+	return w.body.Write(b)
+}
+
+func (w *noFlushResponseWriter) WriteHeader(status int) {
+	w.status = status
+}
+
+func TestHandler_JSONLBatchRequiresFlusher(t *testing.T) {
+	r := setupRouter(t)
+	h := trpc.NewHandler(r, "/trpc")
+	req := httptest.NewRequest(http.MethodGet, "/trpc/ping,ping?batch=1", nil)
+	req.Header.Set("trpc-accept", "application/jsonl")
+	rec := &noFlushResponseWriter{}
+
+	h.ServeHTTP(rec, req)
+
+	if rec.status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body: %s", rec.status, rec.body.String())
+	}
+	if !strings.Contains(rec.body.String(), "streaming not supported") {
+		t.Fatalf("body missing streaming error: %s", rec.body.String())
 	}
 }
 

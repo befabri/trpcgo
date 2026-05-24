@@ -42,90 +42,131 @@ type callResult struct {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeMethodNotSupported, "only GET and POST are supported"), "", nil, "")
+	if h.rejectUnsupportedMethod(w, r) {
 		return
 	}
 
 	isBatch := isBatchRequest(r)
-
-	if isBatch && !h.router.AllowBatching() {
-		h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeBadRequest, "batching is not enabled"), "", nil, "")
+	if h.rejectInvalidBatch(w, r, isBatch) {
 		return
 	}
 
-	if isBatch {
-		paths := parsePaths(r, h.basePath)
-		if max := h.router.MaxBatchSize(); max > 0 && len(paths) > max {
-			h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeBadRequest, fmt.Sprintf("batch size %d exceeds limit of %d", len(paths), max)), "", nil, "")
-			return
-		}
-		for _, path := range paths {
-			if proc, ok := h.procedures.Lookup(path); ok && proc.Type() == trpcgo.ProcedureSubscription {
-				h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeBadRequest, "subscriptions cannot be batched"), "", nil, "")
-				return
-			}
-		}
-	}
-
-	calls, err := parseRequest(r, h.basePath, isBatch, h.router.MaxBodySize())
+	calls, err := h.parseCalls(r, isBatch)
 	if err != nil {
-		if trpcErr, ok := errors.AsType[*trpcgo.Error](err); ok {
-			h.writeErrorResponse(w, trpcErr, "", nil, "")
-		} else {
-			h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeInternalServerError, "internal server error"), "", nil, "")
-		}
+		h.writeParseError(w, err)
 		return
 	}
 
-	// Create context.
-	ctx := r.Context()
-	if cc := h.router.ContextCreator(); cc != nil {
-		userCtx := cc(r.Context(), r)
-		if userCtx != ctx {
-			var cancel context.CancelFunc
-			ctx, cancel = mergeContexts(ctx, userCtx)
-			defer cancel()
-		}
-	}
+	ctx, cancel := h.requestContext(r)
+	defer cancel()
 	ctx = trpcgo.WithResponseMetadata(ctx)
 
-	// JSONL streaming batch.
 	if isBatch && r.Header.Get("trpc-accept") == "application/jsonl" {
 		h.writeJSONLStream(ctx, w, r, calls)
 		return
 	}
 
-	// Execute all calls sequentially.
+	results := h.executeCalls(ctx, r, calls)
+
+	if !isBatch && trpcgo.IsStreamResult(results[0].response) {
+		h.handleStream(ctx, w, results[0].response, calls[0])
+		return
+	}
+	h.writeCallResults(ctx, w, isBatch, results)
+}
+
+func (h *Handler) rejectUnsupportedMethod(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodGet || r.Method == http.MethodPost {
+		return false
+	}
+	h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeMethodNotSupported, "only GET and POST are supported"), "", nil, "")
+	return true
+}
+
+func (h *Handler) rejectInvalidBatch(w http.ResponseWriter, r *http.Request, isBatch bool) bool {
+	if !isBatch {
+		return false
+	}
+	if !h.router.AllowBatching() {
+		h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeBadRequest, "batching is not enabled"), "", nil, "")
+		return true
+	}
+	paths := parsePaths(r, h.basePath)
+	if max := h.router.MaxBatchSize(); max > 0 && len(paths) > max {
+		h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeBadRequest, fmt.Sprintf("batch size %d exceeds limit of %d", len(paths), max)), "", nil, "")
+		return true
+	}
+	if h.hasBatchSubscription(paths) {
+		h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeBadRequest, "subscriptions cannot be batched"), "", nil, "")
+		return true
+	}
+	return false
+}
+
+func (h *Handler) hasBatchSubscription(paths []string) bool {
+	for _, path := range paths {
+		if proc, ok := h.procedures.Lookup(path); ok && proc.Type() == trpcgo.ProcedureSubscription {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) parseCalls(r *http.Request, isBatch bool) ([]parsedRequest, error) {
+	return parseRequest(r, h.basePath, isBatch, h.router.MaxBodySize())
+}
+
+func (h *Handler) writeParseError(w http.ResponseWriter, err error) {
+	if trpcErr, ok := errors.AsType[*trpcgo.Error](err); ok {
+		h.writeErrorResponse(w, trpcErr, "", nil, "")
+		return
+	}
+	h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeInternalServerError, "internal server error"), "", nil, "")
+}
+
+func (h *Handler) requestContext(r *http.Request) (context.Context, context.CancelFunc) {
+	ctx := r.Context()
+	cc := h.router.ContextCreator()
+	if cc == nil {
+		return ctx, func() {}
+	}
+	userCtx := cc(ctx, r)
+	if userCtx == ctx {
+		return ctx, func() {}
+	}
+	return mergeContexts(ctx, userCtx)
+}
+
+func (h *Handler) executeCalls(ctx context.Context, r *http.Request, calls []parsedRequest) []callResult {
 	results := make([]callResult, len(calls))
 	for i, call := range calls {
 		resp, status := h.executeCall(ctx, r, call)
 		results[i] = callResult{response: resp, status: status}
 	}
+	return results
+}
 
-	// Check for SSE subscription.
+func (h *Handler) writeCallResults(ctx context.Context, w http.ResponseWriter, isBatch bool, results []callResult) {
 	if !isBatch {
-		if trpcgo.IsStreamResult(results[0].response) {
-			h.handleStream(ctx, w, results[0].response, calls[0])
-			return
-		}
-	}
-
-	// Write response.
-	if !isBatch {
-		w.Header().Set("Content-Type", "application/json")
-		data, err := json.Marshal(results[0].response)
-		if err != nil {
-			h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeInternalServerError, "failed to serialize response"), "", ctx, "")
-			return
-		}
-		trpcgo.ApplyResponseMetadata(ctx, w)
-		w.WriteHeader(results[0].status)
-		_, _ = w.Write(data)
+		h.writeSingleResult(ctx, w, results[0])
 		return
 	}
+	h.writeBatchResults(ctx, w, results)
+}
 
-	// Standard JSON array batch response.
+func (h *Handler) writeSingleResult(ctx context.Context, w http.ResponseWriter, result callResult) {
+	w.Header().Set("Content-Type", "application/json")
+	data, err := json.Marshal(result.response)
+	if err != nil {
+		h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeInternalServerError, "failed to serialize response"), "", ctx, "")
+		return
+	}
+	trpcgo.ApplyResponseMetadata(ctx, w)
+	w.WriteHeader(result.status)
+	_, _ = w.Write(data)
+}
+
+func (h *Handler) writeBatchResults(ctx context.Context, w http.ResponseWriter, results []callResult) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Vary", "trpc-accept")
 	responses := make([]any, len(results))
@@ -245,13 +286,11 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, resul
 		return
 	}
 
-	if max := h.router.MaxSSEConnections(); max > 0 {
-		n := h.router.TrackSSEConnection(1)
-		if n > int64(max) {
-			h.router.TrackSSEConnection(-1)
-			h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeTooManyRequests, "too many concurrent subscriptions"), call.path, ctx, trpcgo.ProcedureSubscription)
-			return
-		}
+	tracked, ok := h.trackSSEConnection(w, ctx, call.path)
+	if !ok {
+		return
+	}
+	if tracked {
 		defer h.router.TrackSSEConnection(-1)
 	}
 
@@ -322,47 +361,78 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, resul
 			writeSSENamedEvent(w, "ping", nil)
 			flusher.Flush()
 		case item := <-recvCh:
-			if item.err == io.EOF {
-				if item.data != nil {
-					returnData, _ := json.Marshal(item.data)
-					writeSSENamedEvent(w, "return", returnData)
-				} else {
-					writeSSENamedEvent(w, "return", nil)
-				}
+			if h.writeStreamItem(ctx, w, item, call) {
 				flusher.Flush()
 				return
 			}
-			if item.err != nil {
-				sseErr := trpcgo.WrapError(trpcgo.CodeInternalServerError, "internal server error", item.err)
-				if cb := h.router.ErrorCallback(); cb != nil {
-					cb(ctx, sseErr, call.path)
-				}
-				formatted := h.fmtError(trpcgo.SanitizeError(item.err), call.path, call.input, ctx, trpcgo.ProcedureSubscription)
-				errData, _ := json.Marshal(formatted)
-				writeSSENamedEvent(w, "serialized-error", errData)
-				flusher.Flush()
-				return
-			}
-
-			var data []byte
-			var marshalErr error
-			data, marshalErr = json.Marshal(item.data)
-			if marshalErr != nil {
-				sseErr := trpcgo.NewError(trpcgo.CodeInternalServerError, "failed to serialize subscription data")
-				if cb := h.router.ErrorCallback(); cb != nil {
-					cb(ctx, sseErr, call.path)
-				}
-				formatted := h.fmtError(sseErr, call.path, call.input, ctx, trpcgo.ProcedureSubscription)
-				errData, _ := json.Marshal(formatted)
-				writeSSENamedEvent(w, "serialized-error", errData)
-				flusher.Flush()
-				return
-			}
-			writeSSEData(w, data, item.id, item.retry)
 			flusher.Flush()
 			pingTicker.Reset(pingInterval)
 		}
 	}
+}
+
+func (h *Handler) trackSSEConnection(w http.ResponseWriter, ctx context.Context, path string) (tracked bool, ok bool) {
+	max := h.router.MaxSSEConnections()
+	if max <= 0 {
+		return false, true
+	}
+	n := h.router.TrackSSEConnection(1)
+	if n <= int64(max) {
+		return true, true
+	}
+	h.router.TrackSSEConnection(-1)
+	h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeTooManyRequests, "too many concurrent subscriptions"), path, ctx, trpcgo.ProcedureSubscription)
+	return false, false
+}
+
+func (h *Handler) writeStreamItem(ctx context.Context, w http.ResponseWriter, item struct {
+	data  any
+	id    string
+	retry int
+	err   error
+}, call parsedRequest) bool {
+	if item.err == io.EOF {
+		writeStreamReturn(w, item.data)
+		return true
+	}
+	if item.err != nil {
+		h.writeStreamReceiveError(ctx, w, item.err, call)
+		return true
+	}
+	data, err := json.Marshal(item.data)
+	if err != nil {
+		h.writeStreamError(ctx, w, trpcgo.NewError(trpcgo.CodeInternalServerError, "failed to serialize subscription data"), call)
+		return true
+	}
+	writeSSEData(w, data, item.id, item.retry)
+	return false
+}
+
+func (h *Handler) writeStreamReceiveError(ctx context.Context, w http.ResponseWriter, err error, call parsedRequest) {
+	if cb := h.router.ErrorCallback(); cb != nil {
+		cb(ctx, trpcgo.WrapError(trpcgo.CodeInternalServerError, "internal server error", err), call.path)
+	}
+	formatted := h.fmtError(trpcgo.SanitizeError(err), call.path, call.input, ctx, trpcgo.ProcedureSubscription)
+	errData, _ := json.Marshal(formatted)
+	writeSSENamedEvent(w, "serialized-error", errData)
+}
+
+func writeStreamReturn(w http.ResponseWriter, data any) {
+	if data == nil {
+		writeSSENamedEvent(w, "return", nil)
+		return
+	}
+	returnData, _ := json.Marshal(data)
+	writeSSENamedEvent(w, "return", returnData)
+}
+
+func (h *Handler) writeStreamError(ctx context.Context, w http.ResponseWriter, err *trpcgo.Error, call parsedRequest) {
+	if cb := h.router.ErrorCallback(); cb != nil {
+		cb(ctx, err, call.path)
+	}
+	formatted := h.fmtError(err, call.path, call.input, ctx, trpcgo.ProcedureSubscription)
+	errData, _ := json.Marshal(formatted)
+	writeSSENamedEvent(w, "serialized-error", errData)
 }
 
 // writeJSONLStream handles JSONL batch responses with concurrent execution.

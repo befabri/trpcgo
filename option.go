@@ -7,9 +7,11 @@ import (
 	"time"
 )
 
-const defaultMaxBodySize int64 = 1 << 20       // 1 MB
-const defaultMaxBatchSize int = 10             //
-const defaultSSEMaxDuration = 30 * time.Minute // 30 minutes
+const defaultMaxBatchSize int = 10 //
+
+func defaultMaxBodySize() int64 { return 1 << 20 } // 1 MB
+
+func defaultSSEMaxDuration() time.Duration { return 30 * time.Minute } // 30 minutes
 
 type routerOptions struct {
 	allowBatching                 bool

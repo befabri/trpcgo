@@ -25,7 +25,9 @@ routeTree.gen.ts
 
 # Reference repos (cloned for research)
 .reference/
+*.mutate4go.bak
 
 # OS
 .DS_Store
 Thumbs.db
+target/

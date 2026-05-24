@@ -5,6 +5,99 @@ import (
 	"strings"
 )
 
+var zodFormatBases = map[string]string{
+	"email":            "z.email()",
+	"url":              "z.url()",
+	"uuid":             "z.uuidv4()",
+	"e164":             "z.e164()",
+	"jwt":              "z.jwt()",
+	"base64":           "z.base64()",
+	"lowercase":        "z.lowercase()",
+	"ip":               "z.ipv4()",
+	"ipv4":             "z.ipv4()",
+	"ipv6":             "z.ipv6()",
+	"hostname":         "z.hostname()",
+	"hostname_rfc1123": "z.hostname()",
+	"base64url":        "z.base64url()",
+	"hexadecimal":      "z.hex()",
+	"ulid":             "z.ulid()",
+	"mac":              "z.mac()",
+	"cidrv4":           "z.cidrv4()",
+	"cidrv6":           "z.cidrv6()",
+	"uppercase":        "z.uppercase()",
+}
+
+var zodGoKindBases = map[string]string{
+	"time.Time": "z.iso.datetime()",
+	"[]byte":    "z.base64()",
+	"int":       "z.int()",
+	"int32":     "z.int32()",
+	"int64":     "z.number()",
+	"uint32":    "z.uint32()",
+	"uint64":    "z.number()",
+	"float32":   "z.float32()",
+	"float64":   "z.float64()",
+	"int8":      "z.number()",
+	"int16":     "z.number()",
+	"uint":      "z.number()",
+	"uint8":     "z.number()",
+	"uint16":    "z.number()",
+	"string":    "z.string()",
+	"bool":      "z.boolean()",
+}
+
+var zodTSBases = map[string]string{
+	"string":  "z.string()",
+	"number":  "z.number()",
+	"boolean": "z.boolean()",
+	"unknown": "z.unknown()",
+}
+
+var zodStringBases = map[string]bool{
+	"z.string()":    true,
+	"z.email()":     true,
+	"z.url()":       true,
+	"z.uuidv4()":    true,
+	"z.e164()":      true,
+	"z.jwt()":       true,
+	"z.base64()":    true,
+	"z.base64url()": true,
+	"z.lowercase()": true,
+	"z.uppercase()": true,
+	"z.ipv4()":      true,
+	"z.ipv6()":      true,
+	"z.hostname()":  true,
+	"z.hex()":       true,
+	"z.ulid()":      true,
+	"z.mac()":       true,
+	"z.cidrv4()":    true,
+	"z.cidrv6()":    true,
+}
+
+var zodZeroLiterals = map[string]string{
+	"z.int()":     "z.literal(0)",
+	"z.int32()":   "z.literal(0)",
+	"z.uint32()":  "z.literal(0)",
+	"z.float32()": "z.literal(0)",
+	"z.float64()": "z.literal(0)",
+	"z.number()":  "z.literal(0)",
+	"z.boolean()": "z.literal(false)",
+}
+
+var zodMiniChecks = map[string]string{
+	"min":        "minLength",
+	"max":        "maxLength",
+	"length":     "length",
+	"gte":        "gte",
+	"lte":        "lte",
+	"gt":         "gt",
+	"lt":         "lt",
+	"regex":      "regex",
+	"startsWith": "startsWith",
+	"endsWith":   "endsWith",
+	"includes":   "includes",
+}
+
 // ZodStyle controls the output format for Zod schema generation.
 type ZodStyle int
 
@@ -68,14 +161,7 @@ func zodZeroLiteral(base string) string {
 	if isStringBase(base) || strings.HasPrefix(base, "z.enum(") {
 		return `z.literal("")`
 	}
-	switch base {
-	case "z.int()", "z.int32()", "z.uint32()",
-		"z.float32()", "z.float64()", "z.number()":
-		return "z.literal(0)"
-	case "z.boolean()":
-		return "z.literal(false)"
-	}
-	return ""
+	return zodZeroLiterals[base]
 }
 
 // ZodBaseForTSType converts a TypeScript type string to its Zod 4 base type.
@@ -93,41 +179,8 @@ func zodBaseType(f Field) string {
 func zodBaseFromKindAndType(tsType, goKind string, rules []ValidateRule) string {
 	// Check format tags FIRST — in Zod 4 they are top-level constructors.
 	for _, rule := range rules {
-		switch rule.Tag {
-		case "email":
-			return "z.email()"
-		case "url":
-			return "z.url()"
-		case "uuid":
-			return "z.uuidv4()"
-		case "e164":
-			return "z.e164()"
-		case "jwt":
-			return "z.jwt()"
-		case "base64":
-			return "z.base64()"
-		case "lowercase":
-			return "z.lowercase()"
-		case "ip", "ipv4":
-			return "z.ipv4()"
-		case "ipv6":
-			return "z.ipv6()"
-		case "hostname", "hostname_rfc1123":
-			return "z.hostname()"
-		case "base64url":
-			return "z.base64url()"
-		case "hexadecimal":
-			return "z.hex()"
-		case "ulid":
-			return "z.ulid()"
-		case "mac":
-			return "z.mac()"
-		case "cidrv4":
-			return "z.cidrv4()"
-		case "cidrv6":
-			return "z.cidrv6()"
-		case "uppercase":
-			return "z.uppercase()"
+		if base := zodFormatBases[rule.Tag]; base != "" {
+			return base
 		}
 	}
 
@@ -152,43 +205,13 @@ func zodBaseFromKindAndType(tsType, goKind string, rules []ValidateRule) string 
 	}
 
 	// Fall back to Go kind / TS type based mapping.
-	switch goKind {
-	case "time.Time":
-		return "z.iso.datetime()"
-	case "[]byte":
-		return "z.base64()"
-	case "int":
-		return "z.int()"
-	case "int32":
-		return "z.int32()"
-	case "int64":
-		return "z.number()"
-	case "uint32":
-		return "z.uint32()"
-	case "uint64":
-		return "z.number()"
-	case "float32":
-		return "z.float32()"
-	case "float64":
-		return "z.float64()"
-	case "int8", "int16", "uint", "uint8", "uint16":
-		return "z.number()"
-	case "string":
-		return "z.string()"
-	case "bool":
-		return "z.boolean()"
+	if base := zodGoKindBases[goKind]; base != "" {
+		return base
 	}
 
 	// TS type fallback for complex types.
-	switch tsType {
-	case "string":
-		return "z.string()"
-	case "number":
-		return "z.number()"
-	case "boolean":
-		return "z.boolean()"
-	case "unknown":
-		return "z.unknown()"
+	if base := zodTSBases[tsType]; base != "" {
+		return base
 	}
 
 	// Array types: "Foo[]" → handled by caller as z.array(FooSchema)
@@ -210,67 +233,57 @@ func zodConstraints(f Field, base string) string {
 	var parts []string
 
 	for _, rule := range f.Validate {
-		switch rule.Tag {
-		case "min":
-			if rule.Param != "" {
-				if isStr {
-					parts = append(parts, fmt.Sprintf(".min(%s)", rule.Param))
-				} else {
-					parts = append(parts, fmt.Sprintf(".gte(%s)", rule.Param))
-				}
-			}
-		case "max":
-			if rule.Param != "" {
-				if isStr {
-					parts = append(parts, fmt.Sprintf(".max(%s)", rule.Param))
-				} else {
-					parts = append(parts, fmt.Sprintf(".lte(%s)", rule.Param))
-				}
-			}
-		case "len":
-			if rule.Param != "" {
-				parts = append(parts, fmt.Sprintf(".length(%s)", rule.Param))
-			}
-		case "gt":
-			if rule.Param != "" {
-				parts = append(parts, fmt.Sprintf(".gt(%s)", rule.Param))
-			}
-		case "gte":
-			if rule.Param != "" {
-				parts = append(parts, fmt.Sprintf(".gte(%s)", rule.Param))
-			}
-		case "lt":
-			if rule.Param != "" {
-				parts = append(parts, fmt.Sprintf(".lt(%s)", rule.Param))
-			}
-		case "lte":
-			if rule.Param != "" {
-				parts = append(parts, fmt.Sprintf(".lte(%s)", rule.Param))
-			}
-		case "alphanum":
-			parts = append(parts, `.regex(/^[a-zA-Z0-9]*$/)`)
-		case "alpha":
-			parts = append(parts, `.regex(/^[a-zA-Z]*$/)`)
-		case "numeric":
-			parts = append(parts, `.regex(/^[0-9]*$/)`)
-		case "startswith":
-			if rule.Param != "" {
-				parts = append(parts, fmt.Sprintf(".startsWith(%q)", rule.Param))
-			}
-		case "endswith":
-			if rule.Param != "" {
-				parts = append(parts, fmt.Sprintf(".endsWith(%q)", rule.Param))
-			}
-		case "contains":
-			if rule.Param != "" {
-				parts = append(parts, fmt.Sprintf(".includes(%q)", rule.Param))
-			}
-			// Format tags (email, url, uuid, etc.) are handled in zodBaseType.
-			// required, omitempty are handled at the field level.
+		if part := zodConstraint(rule, isStr); part != "" {
+			parts = append(parts, part)
 		}
 	}
 
 	return strings.Join(parts, "")
+}
+
+func zodConstraint(rule ValidateRule, isStr bool) string {
+	if rule.Tag == "alphanum" {
+		return `.regex(/^[a-zA-Z0-9]*$/)`
+	}
+	if rule.Tag == "alpha" {
+		return `.regex(/^[a-zA-Z]*$/)`
+	}
+	if rule.Tag == "numeric" {
+		return `.regex(/^[0-9]*$/)`
+	}
+	if rule.Param == "" {
+		return ""
+	}
+	method := zodConstraintMethod(rule.Tag, isStr)
+	if method == "" {
+		return ""
+	}
+	if method == "startsWith" || method == "endsWith" || method == "includes" {
+		return fmt.Sprintf(".%s(%q)", method, rule.Param)
+	}
+	return fmt.Sprintf(".%s(%s)", method, rule.Param)
+}
+
+func zodConstraintMethod(tag string, isStr bool) string {
+	if tag == "min" && !isStr {
+		return "gte"
+	}
+	if tag == "max" && !isStr {
+		return "lte"
+	}
+	methods := map[string]string{
+		"min":        "min",
+		"max":        "max",
+		"len":        "length",
+		"gt":         "gt",
+		"gte":        "gte",
+		"lt":         "lt",
+		"lte":        "lte",
+		"startswith": "startsWith",
+		"endswith":   "endsWith",
+		"contains":   "includes",
+	}
+	return methods[tag]
 }
 
 // zodMini generates Zod Mini functional syntax.
@@ -306,30 +319,8 @@ func zodMini(base string, constraints string, optional bool, omitemptyLit string
 			args := remaining[parenIdx+1 : parenIdx+closeIdx]
 			remaining = remaining[parenIdx+closeIdx+1:]
 
-			// Map method to Zod Mini check function.
-			switch method {
-			case "min":
-				checks = append(checks, fmt.Sprintf("z.minLength(%s)", args))
-			case "max":
-				checks = append(checks, fmt.Sprintf("z.maxLength(%s)", args))
-			case "length":
-				checks = append(checks, fmt.Sprintf("z.length(%s)", args))
-			case "gte":
-				checks = append(checks, fmt.Sprintf("z.gte(%s)", args))
-			case "lte":
-				checks = append(checks, fmt.Sprintf("z.lte(%s)", args))
-			case "gt":
-				checks = append(checks, fmt.Sprintf("z.gt(%s)", args))
-			case "lt":
-				checks = append(checks, fmt.Sprintf("z.lt(%s)", args))
-			case "regex":
-				checks = append(checks, fmt.Sprintf("z.regex(%s)", args))
-			case "startsWith":
-				checks = append(checks, fmt.Sprintf("z.startsWith(%s)", args))
-			case "endsWith":
-				checks = append(checks, fmt.Sprintf("z.endsWith(%s)", args))
-			case "includes":
-				checks = append(checks, fmt.Sprintf("z.includes(%s)", args))
+			if fn := zodMiniChecks[method]; fn != "" {
+				checks = append(checks, fmt.Sprintf("z.%s(%s)", fn, args))
 			}
 		}
 	}
@@ -357,25 +348,25 @@ var supportedZodTags = map[string]bool{
 	"omitempty": true,
 	"dive":      true,
 	// Format tags (become Zod base types).
-	"email":           true,
-	"url":             true,
-	"uuid":            true,
-	"e164":            true,
-	"jwt":             true,
-	"base64":          true,
-	"base64url":       true,
-	"lowercase":       true,
-	"uppercase":       true,
-	"ip":              true,
-	"ipv4":            true,
-	"ipv6":            true,
-	"hostname":        true,
+	"email":            true,
+	"url":              true,
+	"uuid":             true,
+	"e164":             true,
+	"jwt":              true,
+	"base64":           true,
+	"base64url":        true,
+	"lowercase":        true,
+	"uppercase":        true,
+	"ip":               true,
+	"ipv4":             true,
+	"ipv6":             true,
+	"hostname":         true,
 	"hostname_rfc1123": true,
-	"hexadecimal":     true,
-	"ulid":            true,
-	"mac":             true,
-	"cidrv4":          true,
-	"cidrv6":          true,
+	"hexadecimal":      true,
+	"ulid":             true,
+	"mac":              true,
+	"cidrv4":           true,
+	"cidrv6":           true,
 	// Enum.
 	"oneof": true,
 	// Constraints.
@@ -434,24 +425,7 @@ func UnsupportedZodRules(rules []ValidateRule) []ValidateRule {
 // isStringBase returns true if the Zod base type is string-like
 // (determines whether min/max mean length vs numeric bound).
 func isStringBase(base string) bool {
-	return strings.HasPrefix(base, "z.string()") ||
-		base == "z.email()" ||
-		base == "z.url()" ||
-		base == "z.uuidv4()" ||
-		base == "z.e164()" ||
-		base == "z.jwt()" ||
-		base == "z.base64()" ||
-		base == "z.base64url()" ||
-		base == "z.lowercase()" ||
-		base == "z.uppercase()" ||
-		base == "z.ipv4()" ||
-		base == "z.ipv6()" ||
-		base == "z.hostname()" ||
-		base == "z.hex()" ||
-		base == "z.ulid()" ||
-		base == "z.mac()" ||
-		base == "z.cidrv4()" ||
-		base == "z.cidrv6()"
+	return strings.HasPrefix(base, "z.string()") || zodStringBases[base]
 }
 
 // isNumericKind reports whether a Go kind string represents a numeric type.
