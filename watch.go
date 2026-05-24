@@ -119,43 +119,50 @@ func (r *Router) zodStyle() typemap.ZodStyle {
 
 func (r *Router) runWatcher(cfg watcherConfig) {
 	go func() {
-		defer func() { _ = cfg.watcher.Close() }()
+		r.runWatcherLoop(cfg, time.After, regenerateFromSource)
+	}()
+}
 
-		// Run static analysis immediately to enrich reflect-generated types.
-		regenerateFromSource(cfg.opts)
+func (r *Router) runWatcherLoop(cfg watcherConfig, after func(time.Duration) <-chan time.Time, regenerate func(watchOpts)) {
+	defer func() { _ = cfg.watcher.Close() }()
+	if after == nil {
+		after = time.After
+	}
+	if regenerate == nil {
+		regenerate = regenerateFromSource
+	}
 
-		var debounce <-chan time.Time
-		for {
-			select {
-			case <-cfg.done:
+	// Run static analysis immediately to enrich reflect-generated types.
+	regenerate(cfg.opts)
+
+	var debounce <-chan time.Time
+	for {
+		select {
+		case <-cfg.done:
+			return
+
+		case event, ok := <-cfg.watcher.Events:
+			if !ok {
 				return
+			}
+			// Handle directory creation/removal for recursive watching.
+			fsutil.HandleDirEventWith(cfg.watcher, event, cfg.handleDirCreate)
 
-			case event, ok := <-cfg.watcher.Events:
-				if !ok {
-					return
-				}
-				// Handle directory creation/removal for recursive watching.
-				fsutil.HandleDirEventWith(cfg.watcher, event, cfg.handleDirCreate)
+			if !fsutil.IsGoWriteOrCreate(event) {
+				continue
+			}
+			debounce = after(fsutil.DebounceInterval)
 
-				if filepath.Ext(event.Name) != ".go" {
-					continue
-				}
-				if event.Op&(fsnotify.Write|fsnotify.Create) == 0 {
-					continue
-				}
-				debounce = time.After(fsutil.DebounceInterval)
+		case <-debounce:
+			debounce = nil
+			regenerate(cfg.opts)
 
-			case <-debounce:
-				debounce = nil
-				regenerateFromSource(cfg.opts)
-
-			case _, ok := <-cfg.watcher.Errors:
-				if !ok {
-					return
-				}
+		case _, ok := <-cfg.watcher.Errors:
+			if !ok {
+				return
 			}
 		}
-	}()
+	}
 }
 
 // absPath resolves a path to absolute. Returns "" for empty input.

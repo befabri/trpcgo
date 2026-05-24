@@ -15,6 +15,12 @@ import (
 // triggering regeneration. Shared by both the runtime watcher and CLI.
 const DebounceInterval = 300 * time.Millisecond
 
+// IsGoWriteOrCreate reports whether an fsnotify event should trigger
+// regeneration of generated TypeScript or Zod files.
+func IsGoWriteOrCreate(event fsnotify.Event) bool {
+	return filepath.Ext(event.Name) == ".go" && event.Op&(fsnotify.Write|fsnotify.Create) != 0
+}
+
 // skipDirs are directory names that should never be watched.
 var skipDirs = map[string]bool{
 	".git":         true,
@@ -53,7 +59,7 @@ func WatchRecursive(watcher *fsnotify.Watcher, root string) error {
 func WatchGoRecursive(watcher *fsnotify.Watcher, root string) error {
 	root = filepath.Clean(root)
 
-	dirsWithGo := map[string]bool{}
+	dirsWithGo := map[string]struct{}{}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // best-effort: skip unreadable paths
@@ -67,7 +73,7 @@ func WatchGoRecursive(watcher *fsnotify.Watcher, root string) error {
 		}
 
 		if filepath.Ext(d.Name()) == ".go" {
-			dirsWithGo[filepath.Dir(path)] = true
+			dirsWithGo[filepath.Dir(path)] = struct{}{}
 		}
 		return nil
 	})
@@ -75,7 +81,7 @@ func WatchGoRecursive(watcher *fsnotify.Watcher, root string) error {
 		return err
 	}
 
-	watchSet := map[string]bool{root: true}
+	watchSet := map[string]struct{}{root: struct{}{}}
 	for dir := range dirsWithGo {
 		addAncestors(watchSet, dir, root)
 	}
@@ -112,9 +118,9 @@ func HandleDirEventWith(watcher *fsnotify.Watcher, event fsnotify.Event, watchFn
 
 // addAncestors adds dir and every ancestor up to (and including) root
 // into watchSet. dir must already be filepath.Clean'd.
-func addAncestors(watchSet map[string]bool, dir, root string) {
+func addAncestors(watchSet map[string]struct{}, dir, root string) {
 	for cur := dir; ; {
-		watchSet[cur] = true
+		watchSet[cur] = struct{}{}
 		if cur == root {
 			return
 		}

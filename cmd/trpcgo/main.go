@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -21,15 +23,49 @@ type generateOptions struct {
 	output   string
 	zod      string
 	zodMini  bool
+	stdout   io.Writer
+	stderr   io.Writer
 }
 
+var (
+	errUsage = errors.New("usage")
+	errFlag  = errors.New("flag parse")
+)
+
 func main() {
-	if len(os.Args) < 2 || os.Args[1] != "generate" {
-		fmt.Fprintf(os.Stderr, "Usage: trpcgo generate [flags] [packages]\n")
+	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		if errors.Is(err, errFlag) {
+			os.Exit(2)
+		}
+		if !errors.Is(err, errUsage) {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		os.Exit(1)
 	}
+}
 
-	fs := flag.NewFlagSet("generate", flag.ExitOnError)
+func run(args []string, stdout, stderr io.Writer) error {
+	if len(args) < 1 || args[0] != "generate" {
+		fmt.Fprintln(stderr, "Usage: trpcgo generate [flags] [packages]")
+		return errUsage
+	}
+	return runGenerate(args[1:], stdout, stderr)
+}
+
+func runGenerate(args []string, stdout, stderr io.Writer) error {
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
+	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "Usage: trpcgo generate [flags] [packages]")
+		fs.PrintDefaults()
+	}
 	output := fs.String("o", "", "output file path (default: stdout)")
 	fs.StringVar(output, "output", "", "output file path (default: stdout)")
 	dir := fs.String("dir", ".", "working directory for package resolution")
@@ -37,7 +73,12 @@ func main() {
 	fs.BoolVar(watch, "w", false, "watch Go files and regenerate on change")
 	zodOutput := fs.String("zod", "", "output path for Zod 4 validation schemas")
 	zodMini := fs.Bool("zod-mini", false, "generate zod/mini functional syntax")
-	_ = fs.Parse(os.Args[2:]) // ExitOnError handles parse errors
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return errFlag
+	}
 
 	patterns := fs.Args()
 	if len(patterns) == 0 {
@@ -50,43 +91,58 @@ func main() {
 		output:   *output,
 		zod:      *zodOutput,
 		zodMini:  *zodMini,
+		stdout:   stdout,
+		stderr:   stderr,
 	}
 
 	// Run once.
 	if err := generate(opts); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	if !*watch {
-		return
+		return nil
 	}
+	return watchGenerate(opts, *dir)
+}
 
+func watchGenerate(opts generateOptions, dir string) error {
 	// Watch mode.
-	absDir, err := filepath.Abs(*dir)
+	absDir, err := filepath.Abs(dir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error resolving directory: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("resolving directory: %w", err)
 	}
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating watcher: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("creating watcher: %w", err)
 	}
 	defer func() { _ = watcher.Close() }()
 
 	if err := fsutil.WatchRecursive(watcher, absDir); err != nil {
-		fmt.Fprintf(os.Stderr, "Error watching %s: %v\n", absDir, err)
-		os.Exit(1)
+		return fmt.Errorf("watching %s: %w", absDir, err)
 	}
 
 	log.Printf("Watching directories under %s...", absDir)
+	watchGenerateLoop(opts, watcher, nil, time.After, generate)
+	return nil
+}
+
+func watchGenerateLoop(opts generateOptions, watcher *fsnotify.Watcher, done <-chan struct{}, after func(time.Duration) <-chan time.Time, generateFn func(generateOptions) error) {
+	if after == nil {
+		after = time.After
+	}
+	if generateFn == nil {
+		generateFn = generate
+	}
 
 	// Debounce: regenerate at most once per 200ms.
 	var debounce <-chan time.Time
 	for {
 		select {
+		case <-done:
+			return
+
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return
@@ -94,18 +150,15 @@ func main() {
 			// Handle directory creation/removal for recursive watching.
 			fsutil.HandleDirEventWith(watcher, event, fsutil.WatchRecursive)
 
-			if filepath.Ext(event.Name) != ".go" {
+			if !fsutil.IsGoWriteOrCreate(event) {
 				continue
 			}
-			if event.Op&(fsnotify.Write|fsnotify.Create) == 0 {
-				continue
-			}
-			debounce = time.After(fsutil.DebounceInterval)
+			debounce = after(fsutil.DebounceInterval)
 
 		case <-debounce:
 			debounce = nil
 			log.Println("Change detected, regenerating...")
-			if err := generate(opts); err != nil {
+			if err := generateFn(opts); err != nil {
 				log.Printf("Error: %v", err)
 			} else {
 				log.Println("Done.")
@@ -121,28 +174,36 @@ func main() {
 }
 
 func generate(opts generateOptions) (err error) {
+	if opts.stdout == nil {
+		opts.stdout = os.Stdout
+	}
+	if opts.stderr == nil {
+		opts.stderr = os.Stderr
+	}
+
 	result, err := analysis.Analyze(opts.patterns, opts.dir)
 	if err != nil {
 		return fmt.Errorf("analysis: %w", err)
 	}
 
 	if len(result.Procedures) == 0 {
-		fmt.Fprintln(os.Stderr, "Warning: no tRPC procedure registrations found")
+		fmt.Fprintln(opts.stderr, "Warning: no tRPC procedure registrations found")
 	}
 
-	var w *os.File
+	var w io.Writer
 	if opts.output != "" {
-		w, err = os.Create(opts.output)
+		f, err := os.Create(opts.output)
 		if err != nil {
 			return fmt.Errorf("creating output file: %w", err)
 		}
+		w = f
 		defer func() {
-			if cerr := w.Close(); cerr != nil && err == nil {
+			if cerr := f.Close(); cerr != nil && err == nil {
 				err = fmt.Errorf("closing output file: %w", cerr)
 			}
 		}()
 	} else {
-		w = os.Stdout
+		w = opts.stdout
 	}
 
 	genResult, err := codegen.Generate(w, result, result.TypeMetas)

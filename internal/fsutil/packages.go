@@ -54,7 +54,7 @@ func ResolvePackageDirs(patterns []string, dir string) ([]string, error) {
 // their ancestors up to root (inclusive). Directories outside root are ignored.
 func WatchDirsAndAncestors(watcher WatchAdder, root string, dirs []string) error {
 	root = filepath.Clean(root)
-	watchSet := map[string]bool{root: true}
+	watchSet := map[string]struct{}{root: struct{}{}}
 
 	for _, d := range dirs {
 		if d == "" {
