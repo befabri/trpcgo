@@ -172,6 +172,13 @@ func decodeStrictInput(ptr reflect.Value, raw json.RawMessage) error {
 	if err := dec.Decode(ptr.Interface()); err != nil {
 		return strictInputError(err)
 	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return strictInputError(err)
+		}
+		return NewError(CodeParseError, "failed to parse input")
+	}
 	return nil
 }
 
@@ -180,6 +187,8 @@ func strictInputError(err error) error {
 	var typeErr *json.UnmarshalTypeError
 	switch {
 	case errors.As(err, &syntaxErr):
+		return NewError(CodeParseError, "failed to parse input")
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 		return NewError(CodeParseError, "failed to parse input")
 	case errors.As(err, &typeErr):
 		return NewError(CodeBadRequest, "invalid input type")

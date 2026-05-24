@@ -167,12 +167,11 @@ func WithMaxBatchSize(n int) Option {
 	}
 }
 
-// WithStrictInput enables strict JSON input parsing. When true, procedure
-// inputs that contain unknown fields (fields not present in the input struct)
-// are rejected with a BAD_REQUEST error. This uses json.Decoder's
-// DisallowUnknownFields under the hood.
-//
-// By default, Go's json.Unmarshal silently ignores unknown fields.
+// WithStrictInput configures strict JSON input parsing. When true, typed
+// procedure inputs that contain unknown fields or trailing JSON tokens are
+// rejected. Unknown fields return BAD_REQUEST; malformed JSON and trailing
+// tokens return PARSE_ERROR. This uses json.Decoder's DisallowUnknownFields
+// under the hood and is enabled by default.
 func WithStrictInput(enabled bool) Option {
 	return func(o *routerOptions) {
 		o.strictInput = enabled

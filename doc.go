@@ -48,7 +48,7 @@
 //   - [WithMethodOverride] — allow POST for queries
 //   - [WithMaxBodySize] — request body size limit (default 1 MB)
 //   - [WithMaxBatchSize] — max procedures per batch (default 10)
-//   - [WithStrictInput] — reject unknown JSON fields
+//   - [WithStrictInput] — reject unknown fields and trailing JSON tokens (enabled by default)
 //   - [WithValidator] — input validation (e.g. go-playground/validator)
 //   - [WithDev] — development mode with stack traces and file watcher
 //   - [WithErrorFormatter] — custom error response shapes
