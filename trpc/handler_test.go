@@ -3,6 +3,7 @@ package trpc_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -127,7 +128,14 @@ func TestHandler_NotFound(t *testing.T) {
 }
 
 func TestHandler_MethodNotAllowed(t *testing.T) {
-	r := setupRouter(t)
+	called := false
+	r := trpcgo.NewRouter()
+	if err := trpcgo.Query(r, "echo", func(ctx context.Context, input echoInput) (echoOutput, error) {
+		called = true
+		return echoOutput{Reply: "echo: " + input.Message}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	h := trpc.NewHandler(r, "/trpc")
 
 	req := httptest.NewRequest(http.MethodPut, "/trpc/echo", nil)
@@ -136,6 +144,9 @@ func TestHandler_MethodNotAllowed(t *testing.T) {
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+	if called {
+		t.Fatal("handler should not execute a procedure after rejecting an unsupported HTTP method")
 	}
 }
 
@@ -904,6 +915,102 @@ func TestHandler_BatchGET(t *testing.T) {
 	}
 }
 
+func TestHandler_BatchMaxSizeBoundaries(t *testing.T) {
+	t.Run("exact limit allowed", func(t *testing.T) {
+		called := 0
+		r := trpcgo.NewRouter(trpcgo.WithMaxBatchSize(2))
+		if err := trpcgo.VoidQuery(r, "ping", func(ctx context.Context) (string, error) {
+			called++
+			return "pong", nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		h := trpc.NewHandler(r, "/trpc")
+
+		req := httptest.NewRequest(http.MethodGet, "/trpc/ping,ping?batch=1", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 at batch limit: %s", rec.Code, rec.Body.String())
+		}
+		if called != 2 {
+			t.Fatalf("called = %d, want 2", called)
+		}
+	})
+
+	t.Run("exceeding limit rejected", func(t *testing.T) {
+		called := 0
+		r := trpcgo.NewRouter(trpcgo.WithMaxBatchSize(1))
+		if err := trpcgo.VoidQuery(r, "ping", func(ctx context.Context) (string, error) {
+			called++
+			return "pong", nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		h := trpc.NewHandler(r, "/trpc")
+
+		req := httptest.NewRequest(http.MethodGet, "/trpc/ping,ping?batch=1", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 above batch limit: %s", rec.Code, rec.Body.String())
+		}
+		if called != 0 {
+			t.Fatalf("called = %d, want 0 after batch limit rejection", called)
+		}
+	})
+
+	t.Run("unlimited allows batch", func(t *testing.T) {
+		called := 0
+		r := trpcgo.NewRouter(trpcgo.WithMaxBatchSize(-1))
+		if err := trpcgo.VoidQuery(r, "ping", func(ctx context.Context) (string, error) {
+			called++
+			return "pong", nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		h := trpc.NewHandler(r, "/trpc")
+
+		req := httptest.NewRequest(http.MethodGet, "/trpc/ping,ping?batch=1", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 with unlimited batch size: %s", rec.Code, rec.Body.String())
+		}
+		if called != 2 {
+			t.Fatalf("called = %d, want 2", called)
+		}
+	})
+}
+
+func TestHandler_BatchRejectsSubscriptionsBeforeExecute(t *testing.T) {
+	called := false
+	r := trpcgo.NewRouter()
+	if err := trpcgo.VoidSubscribe(r, "events", func(ctx context.Context) (<-chan string, error) {
+		called = true
+		ch := make(chan string)
+		close(ch)
+		return ch, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := trpc.NewHandler(r, "/trpc")
+
+	req := httptest.NewRequest(http.MethodGet, "/trpc/events,events?batch=1", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for batched subscription: %s", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Fatal("subscription should not execute after batched subscription rejection")
+	}
+}
+
 func TestHandler_JSONLBatchGET(t *testing.T) {
 	r := setupRouter(t)
 	h := trpc.NewHandler(r, "/trpc")
@@ -932,6 +1039,41 @@ func TestHandler_JSONLBatchGET(t *testing.T) {
 	}
 	if !strings.Contains(lines[0], `"0"`) || !strings.Contains(lines[0], `"1"`) {
 		t.Fatalf("head line missing batch indexes: %s", lines[0])
+	}
+	var head map[string][][]any
+	if err := json.Unmarshal([]byte(lines[0]), &head); err != nil {
+		t.Fatalf("failed to unmarshal JSONL head: %v\n%s", err, lines[0])
+	}
+	for i := range 2 {
+		key := string(rune('0' + i))
+		entry := head[key]
+		if len(entry) != 2 || len(entry[0]) != 1 || len(entry[1]) != 3 {
+			t.Fatalf("head[%q] has unexpected shape: %#v", key, entry)
+		}
+		if entry[0][0] != float64(0) || entry[1][1] != float64(0) || entry[1][2] != float64(i) {
+			t.Fatalf("head[%q] = %#v, want [[0],[nil,0,%d]]", key, entry, i)
+		}
+	}
+	seenChunks := make(map[int]bool)
+	for _, line := range lines[1:] {
+		var chunk []any
+		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+			t.Fatalf("failed to unmarshal JSONL chunk: %v\n%s", err, line)
+		}
+		if len(chunk) != 3 {
+			t.Fatalf("chunk has unexpected shape: %#v", chunk)
+		}
+		idx, ok := chunk[0].(float64)
+		if !ok {
+			t.Fatalf("chunk index has type %T, want number", chunk[0])
+		}
+		if chunk[1] != float64(0) {
+			t.Fatalf("chunk control value = %#v, want 0 in %#v", chunk[1], chunk)
+		}
+		seenChunks[int(idx)] = true
+	}
+	if !seenChunks[0] || !seenChunks[1] {
+		t.Fatalf("JSONL chunks missing indexes 0 and 1: %#v", seenChunks)
 	}
 	if !strings.Contains(rec.Body.String(), `"pong"`) {
 		t.Fatalf("JSONL body missing ping result: %s", rec.Body.String())
@@ -1022,6 +1164,170 @@ func TestHandler_Subscription(t *testing.T) {
 	}
 }
 
+func TestHandler_LastEventIDMergedOnlyForSubscriptions(t *testing.T) {
+	t.Run("subscription receives last event id", func(t *testing.T) {
+		type subInput struct {
+			LastEventID string `json:"lastEventId"`
+		}
+		gotID := make(chan string, 1)
+		r := trpcgo.NewRouter()
+		if err := trpcgo.Subscribe(r, "events", func(ctx context.Context, input subInput) (<-chan string, error) {
+			gotID <- input.LastEventID
+			ch := make(chan string)
+			close(ch)
+			return ch, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		h := trpc.NewHandler(r, "/trpc")
+
+		req := httptest.NewRequest(http.MethodGet, "/trpc/events", nil)
+		req.Header.Set("Last-Event-Id", "evt-1")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		select {
+		case id := <-gotID:
+			if id != "evt-1" {
+				t.Fatalf("lastEventId = %q, want evt-1", id)
+			}
+		default:
+			t.Fatal("subscription handler did not receive input")
+		}
+	})
+
+	t.Run("query ignores last event id", func(t *testing.T) {
+		called := false
+		r := trpcgo.NewRouter()
+		if err := trpcgo.Query(r, "echo", func(ctx context.Context, input echoInput) (echoOutput, error) {
+			called = true
+			return echoOutput{Reply: "echo: " + input.Message}, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		h := trpc.NewHandler(r, "/trpc")
+		input, _ := json.Marshal(map[string]string{"message": "world"})
+
+		req := httptest.NewRequest(http.MethodGet, "/trpc/echo?input="+url.QueryEscape(string(input)), nil)
+		req.Header.Set("Last-Event-Id", "evt-ignored")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 when query has Last-Event-Id: %s", rec.Code, rec.Body.String())
+		}
+		if !called {
+			t.Fatal("query did not execute")
+		}
+	})
+}
+
+func TestHandler_SSEUnlimitedMaxDurationWaitsForData(t *testing.T) {
+	r := trpcgo.NewRouter(trpcgo.WithSSEMaxDuration(-1))
+	if err := trpcgo.VoidSubscribe(r, "late", func(ctx context.Context) (<-chan string, error) {
+		ch := make(chan string, 1)
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			ch <- "late"
+			close(ch)
+		}()
+		return ch, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := trpc.NewHandler(r, "/trpc")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/trpc/late", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `data: "late"`) {
+		t.Fatalf("SSE body missing delayed item with unlimited max duration: %s", rec.Body.String())
+	}
+}
+
+func TestHandler_SSEOneNanosecondMaxDurationReturns(t *testing.T) {
+	r := trpcgo.NewRouter(
+		trpcgo.WithSSEMaxDuration(time.Nanosecond),
+		trpcgo.WithSSEPingInterval(time.Hour),
+	)
+	if err := trpcgo.VoidSubscribe(r, "never", func(ctx context.Context) (<-chan string, error) {
+		return make(chan string), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := trpc.NewHandler(r, "/trpc")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/trpc/never", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "event: return\n") {
+		t.Fatalf("SSE body missing max-duration return event: %s", rec.Body.String())
+	}
+}
+
+func TestHandler_SSEStreamPanicWritesSerializedError(t *testing.T) {
+	r := trpcgo.NewRouter(trpcgo.WithSSEMaxDuration(10 * time.Millisecond))
+	if err := trpcgo.VoidSubscribe(r, "panic", func(ctx context.Context) (<-chan string, error) {
+		ch := make(chan string, 1)
+		ch <- "boom"
+		return ch, nil
+	}, trpcgo.WithOutputValidator(func(any) error {
+		panic("validator panic")
+	})); err != nil {
+		t.Fatal(err)
+	}
+	h := trpc.NewHandler(r, "/trpc")
+	req := httptest.NewRequest(http.MethodGet, "/trpc/panic", nil)
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "event: serialized-error\n") {
+		t.Fatalf("SSE body missing serialized error after stream panic: %s", rec.Body.String())
+	}
+}
+
+func TestHandler_SSEConnectionCountDecrementedAfterStream(t *testing.T) {
+	r := trpcgo.NewRouter(trpcgo.WithSSEMaxConnections(1))
+	if err := trpcgo.VoidSubscribe(r, "events", func(ctx context.Context) (<-chan string, error) {
+		ch := make(chan string)
+		close(ch)
+		return ch, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := trpc.NewHandler(r, "/trpc")
+	req := httptest.NewRequest(http.MethodGet, "/trpc/events", nil)
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if got := r.TrackSSEConnection(0); got != 0 {
+		t.Fatalf("SSE connection count = %d, want 0 after stream closes", got)
+	}
+}
+
 func TestHandler_PathTraversal(t *testing.T) {
 	r := setupRouter(t)
 	h := trpc.NewHandler(r, "/trpc")
@@ -1087,9 +1393,43 @@ func TestHandler_ErrorCallback(t *testing.T) {
 	}
 }
 
+func TestHandler_ErrorCallbackForProcedureError(t *testing.T) {
+	cause := errors.New("backend failed")
+	var callbackPath string
+	var callbackErr *trpcgo.Error
+	r := trpcgo.NewRouter(
+		trpcgo.WithOnError(func(ctx context.Context, err *trpcgo.Error, path string) {
+			callbackPath = path
+			callbackErr = err
+		}),
+	)
+	if err := trpcgo.VoidQuery(r, "fail", func(ctx context.Context) (string, error) {
+		return "", cause
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := trpc.NewHandler(r, "/trpc")
+	req := httptest.NewRequest(http.MethodGet, "/trpc/fail", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if callbackPath != "fail" {
+		t.Fatalf("callback path = %q, want fail", callbackPath)
+	}
+	if callbackErr == nil || !errors.Is(callbackErr.Cause, cause) {
+		t.Fatalf("callback error = %#v, want wrapped cause %v", callbackErr, cause)
+	}
+}
+
 func TestHandler_BatchDisabled(t *testing.T) {
+	called := false
 	r := trpcgo.NewRouter(trpcgo.WithBatching(false))
 	if err := trpcgo.VoidQuery(r, "ping", func(ctx context.Context) (string, error) {
+		called = true
 		return "pong", nil
 	}); err != nil {
 		t.Fatal(err)
@@ -1102,6 +1442,9 @@ func TestHandler_BatchDisabled(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for disabled batching, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Fatal("handler should not execute procedures after disabled batch rejection")
 	}
 }
 
