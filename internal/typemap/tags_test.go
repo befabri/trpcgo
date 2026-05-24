@@ -315,6 +315,62 @@ func TestCollectFieldsDive(t *testing.T) {
 	}
 }
 
+func TestCollectFieldsInvalidZodRules(t *testing.T) {
+	pkg := types.NewPackage("main", "main")
+	countField := types.NewField(0, pkg, "Count", types.Typ[types.Int], false)
+	tagsField := types.NewField(0, pkg, "Tags", types.NewSlice(types.Typ[types.String]), false)
+	st := types.NewStruct(
+		[]*types.Var{countField, tagsField},
+		[]string{
+			`json:"count" validate:"min=1); evil()"`,
+			`json:"tags" validate:"min=1,dive,max=2); evil()"`,
+		},
+	)
+
+	m := NewMapper(nil)
+	var fields []Field
+	m.collectFields(st, &fields, nil, nil)
+
+	if len(fields) != 2 {
+		t.Fatalf("got %d fields, want 2", len(fields))
+	}
+	count := fields[0]
+	if len(count.InvalidZod) != 1 || count.InvalidZod[0].Tag != "min" {
+		t.Fatalf("count InvalidZod = %+v, want min rule", count.InvalidZod)
+	}
+	tags := fields[1]
+	if len(tags.InvalidZod) != 1 || tags.InvalidZod[0].Tag != "max" {
+		t.Fatalf("tags InvalidZod = %+v, want element max rule", tags.InvalidZod)
+	}
+}
+
+func TestCollectFieldsTracksPointerSemantics(t *testing.T) {
+	pkg := types.NewPackage("main", "main")
+	nameField := types.NewField(0, pkg, "Name", types.NewPointer(types.Typ[types.String]), false)
+	tagsField := types.NewField(0, pkg, "Tags", types.NewSlice(types.NewPointer(types.Typ[types.String])), false)
+	st := types.NewStruct(
+		[]*types.Var{nameField, tagsField},
+		[]string{
+			`json:"name" validate:"required"`,
+			`json:"tags" validate:"dive,required"`,
+		},
+	)
+
+	m := NewMapper(nil)
+	var fields []Field
+	m.collectFields(st, &fields, nil, nil)
+
+	if len(fields) != 2 {
+		t.Fatalf("got %d fields, want 2", len(fields))
+	}
+	if !fields[0].IsPointer {
+		t.Fatalf("Name IsPointer = false, want true")
+	}
+	if !fields[1].ElementIsPointer {
+		t.Fatalf("Tags ElementIsPointer = false, want true")
+	}
+}
+
 func TestCollectFieldsNoDive(t *testing.T) {
 	// A []string field with validate but no dive — ElementValidate should be nil.
 	pkg := types.NewPackage("main", "main")

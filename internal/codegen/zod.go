@@ -120,7 +120,7 @@ func writeZodObject(w io.Writer, def typemap.TypeDef, cycles map[string]map[stri
 		if f.Comment != "" && style != typemap.ZodMini {
 			zodType += fmt.Sprintf(".describe(%q)", f.Comment)
 		}
-		comment := unsupportedComment(f.UnsupportedZod)
+		comment := validationComment(f.UnsupportedZod, f.InvalidZod)
 		_, _ = fmt.Fprintf(w, "  %s: %s,%s\n", typemap.QuotePropName(f.Name), zodType, comment)
 	}
 
@@ -144,10 +144,10 @@ func writeZodObject(w io.Writer, def typemap.TypeDef, cycles map[string]map[stri
 		if style == typemap.ZodMini {
 			dataParam = "(data: any)"
 		}
-		_, _ = fmt.Fprintf(w, "  %s => data.%s %s data.%s,\n",
-			dataParam, typemap.QuotePropName(ref.Field), ref.Op, typemap.QuotePropName(ref.OtherField))
-		_, _ = fmt.Fprintf(w, "  { message: \"%s must be %s %s\", path: [\"%s\"] }\n",
-			ref.Field, ref.Op, ref.OtherField, ref.Field)
+		_, _ = fmt.Fprintf(w, "  %s => %s %s %s,\n",
+			dataParam, zodDataAccess(ref.Field), ref.Op, zodDataAccess(ref.OtherField))
+		message := fmt.Sprintf("%s must be %s %s", ref.Field, ref.Op, ref.OtherField)
+		_, _ = fmt.Fprintf(w, "  { message: %q, path: [%q] }\n", message, ref.Field)
 		if style == typemap.ZodMini {
 			_, _ = fmt.Fprint(w, "))")
 		} else {
@@ -156,6 +156,14 @@ func writeZodObject(w io.Writer, def typemap.TypeDef, cycles map[string]map[stri
 	}
 	writeZodMeta(w, def, style)
 	_, _ = fmt.Fprintln(w, ";")
+}
+
+func zodDataAccess(prop string) string {
+	quoted := typemap.QuotePropName(prop)
+	if quoted == prop {
+		return "data." + prop
+	}
+	return "data[" + quoted + "]"
 }
 
 // extendsBaseExpr builds the Zod base expression for extends.
@@ -214,18 +222,39 @@ func extendsBaseExprMini(extends []string) string {
 // unsupportedComment returns a trailing inline comment listing validate tags
 // that have no Zod equivalent. Returns "" when all tags are supported.
 func unsupportedComment(unsupported []typemap.ValidateRule) string {
-	if len(unsupported) == 0 {
+	return validationComment(unsupported, nil)
+}
+
+func validationComment(unsupported, invalid []typemap.ValidateRule) string {
+	var parts []string
+	if len(unsupported) > 0 {
+		parts = append(parts, "unsupported: "+ruleListComment(unsupported))
+	}
+	if len(invalid) > 0 {
+		parts = append(parts, "invalid zod params: "+ruleListComment(invalid))
+	}
+	if len(parts) == 0 {
 		return ""
 	}
-	parts := make([]string, len(unsupported))
-	for i, r := range unsupported {
+	return " /* " + strings.Join(parts, "; ") + " */"
+}
+
+func ruleListComment(rules []typemap.ValidateRule) string {
+	parts := make([]string, len(rules))
+	for i, r := range rules {
 		if r.Param != "" {
-			parts[i] = r.Tag + "=" + r.Param
+			parts[i] = safeBlockCommentText(r.Tag) + "=" + safeBlockCommentText(r.Param)
 		} else {
-			parts[i] = r.Tag
+			parts[i] = safeBlockCommentText(r.Tag)
 		}
 	}
-	return " /* unsupported: " + strings.Join(parts, ", ") + " */"
+	return strings.Join(parts, ", ")
+}
+
+func safeBlockCommentText(s string) string {
+	s = strings.ReplaceAll(s, "*/", "* /")
+	s = strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+	return s
 }
 
 // writeZodMeta emits .meta({ id: "TypeName" }) for the schema if the type
@@ -248,7 +277,7 @@ func writeZodEnum(w io.Writer, def typemap.TypeDef, style typemap.ZodStyle) {
 		for i, m := range def.UnionMembers {
 			literals[i] = "z.literal(" + m + ")"
 		}
-		_, _ = fmt.Fprintf(w, "export const %s = z.union([%s])", schemaName, strings.Join(literals, ", "))
+		_, _ = fmt.Fprintf(w, "export const %s = %s", schemaName, zodLiteralUnion(literals))
 		writeZodMeta(w, def, style)
 		_, _ = fmt.Fprintln(w, ";")
 		return
@@ -257,6 +286,13 @@ func writeZodEnum(w io.Writer, def typemap.TypeDef, style typemap.ZodStyle) {
 	_, _ = fmt.Fprintf(w, "export const %s = z.enum([%s])", schemaName, strings.Join(def.UnionMembers, ", "))
 	writeZodMeta(w, def, style)
 	_, _ = fmt.Fprintln(w, ";")
+}
+
+func zodLiteralUnion(literals []string) string {
+	if len(literals) == 1 {
+		return literals[0]
+	}
+	return "z.union([" + strings.Join(literals, ", ") + "])"
 }
 
 func writeZodAlias(w io.Writer, def typemap.TypeDef, style typemap.ZodStyle) {
@@ -326,9 +362,10 @@ func arrayFieldToZod(elemType string, f typemap.Field, style typemap.ZodStyle) s
 func elementZod(elemType string, f typemap.Field, style typemap.ZodStyle) string {
 	if len(f.ElementValidate) > 0 && f.ElementGoKind != "" && f.ElementGoKind != "struct" {
 		return typemap.ZodType(typemap.Field{
-			Type:     elemType,
-			GoKind:   f.ElementGoKind,
-			Validate: f.ElementValidate,
+			Type:      elemType,
+			GoKind:    f.ElementGoKind,
+			IsPointer: f.ElementIsPointer,
+			Validate:  f.ElementValidate,
 		}, style)
 	}
 	return tsTypeToZodRef(elemType, f.ElementGoKind)
@@ -349,7 +386,11 @@ func arrayConstraints(rules []typemap.ValidateRule, style typemap.ZodStyle) stri
 			if method == "len" {
 				method = "length"
 			}
-			result += fmt.Sprintf(".%s(%s)", method, rule.Param)
+			param, ok := typemap.ZodLengthLiteral(rule.Param)
+			if !ok {
+				continue
+			}
+			result += fmt.Sprintf(".%s(%s)", method, param)
 		}
 	}
 	return result
@@ -363,11 +404,20 @@ func arrayConstraintsMini(rules []typemap.ValidateRule) string {
 		}
 		switch rule.Tag {
 		case "min":
-			checks = append(checks, fmt.Sprintf("z.minLength(%s)", rule.Param))
+			param, ok := typemap.ZodLengthLiteral(rule.Param)
+			if ok {
+				checks = append(checks, fmt.Sprintf("z.minLength(%s)", param))
+			}
 		case "max":
-			checks = append(checks, fmt.Sprintf("z.maxLength(%s)", rule.Param))
+			param, ok := typemap.ZodLengthLiteral(rule.Param)
+			if ok {
+				checks = append(checks, fmt.Sprintf("z.maxLength(%s)", param))
+			}
 		case "len":
-			checks = append(checks, fmt.Sprintf("z.length(%s)", rule.Param))
+			param, ok := typemap.ZodLengthLiteral(rule.Param)
+			if ok {
+				checks = append(checks, fmt.Sprintf("z.length(%s)", param))
+			}
 		}
 	}
 	if len(checks) == 0 {

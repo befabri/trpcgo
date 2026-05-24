@@ -31,6 +31,7 @@ func TestZodBaseFromKindAndTypeCoversFormatsOneOfAndFallbacks(t *testing.T) {
 		{"cidrv6 format", "string", "string", []ValidateRule{{Tag: "cidrv6"}}, "z.cidrv6()"},
 		{"uppercase format", "string", "string", []ValidateRule{{Tag: "uppercase"}}, "z.uppercase()"},
 		{"numeric oneof", "number", "int", []ValidateRule{{Tag: "oneof", Param: "1 2 3"}}, "z.union([z.literal(1), z.literal(2), z.literal(3)])"},
+		{"single numeric oneof", "number", "int", []ValidateRule{{Tag: "oneof", Param: "1"}}, "z.literal(1)"},
 		{"string oneof", "string", "string", []ValidateRule{{Tag: "oneof", Param: "a b"}}, `z.enum(["a", "b"])`},
 		{"time", "string", "time.Time", nil, "z.iso.datetime()"},
 		{"bytes", "string", "[]byte", nil, "z.base64()"},
@@ -369,6 +370,18 @@ func TestZodOneofEnum(t *testing.T) {
 			want: `z.enum(["admin", "editor", "viewer"])`,
 		},
 		{
+			name: "string oneof with quoted spaces → z.enum",
+			field: Field{
+				Name:   "role",
+				Type:   "string",
+				GoKind: "string",
+				Validate: []ValidateRule{
+					{Tag: "oneof", Param: "'red green' blue"},
+				},
+			},
+			want: `z.enum(["red green", "blue"])`,
+		},
+		{
 			name: "int oneof → z.union of literals",
 			field: Field{
 				Name:   "status",
@@ -405,7 +418,7 @@ func TestZodOneofEnum(t *testing.T) {
 			want: "z.union([z.literal(0), z.literal(1), z.literal(2)])",
 		},
 		{
-			name: "float64 oneof → z.union of literals",
+			name: "float64 oneof is not emitted because validator oneof does not support floats",
 			field: Field{
 				Name:   "ratio",
 				Type:   "number",
@@ -414,7 +427,19 @@ func TestZodOneofEnum(t *testing.T) {
 					{Tag: "oneof", Param: "0.5 1.0 2.0"},
 				},
 			},
-			want: "z.union([z.literal(0.5), z.literal(1.0), z.literal(2.0)])",
+			want: "z.float64()",
+		},
+		{
+			name: "int oneof rejects non-canonical values that server will not match",
+			field: Field{
+				Name:   "status",
+				Type:   "number",
+				GoKind: "int",
+				Validate: []ValidateRule{
+					{Tag: "oneof", Param: "01 2"},
+				},
+			},
+			want: "z.int()",
 		},
 		{
 			name: "string oneof optional",
@@ -534,13 +559,246 @@ func TestZodRequiredStringEmitsMin1(t *testing.T) {
 	}
 
 	got := ZodType(f, ZodStandard)
-	// "required" on a string field should emit .min(1) since Zod accepts "" by default.
-	// Currently the implementation doesn't add .min(1) for required — this test documents
-	// whether that behavior exists. If it doesn't, this is a known gap.
-	// The validate:"required" is handled at the optional/required level, not as a Zod constraint.
-	// For now, just verify the output is reasonable.
+	if got != "z.string().min(1).max(100)" {
+		t.Errorf("ZodType = %q, want %q", got, "z.string().min(1).max(100)")
+	}
+
+	gotMini := ZodType(f, ZodMini)
+	if gotMini != "z.string().check(z.minLength(1), z.maxLength(100))" {
+		t.Errorf("ZodType mini = %q", gotMini)
+	}
+}
+
+func TestZodRequiredPointerStringDoesNotEmitMin1(t *testing.T) {
+	f := Field{
+		Name:      "name",
+		Type:      "string",
+		GoKind:    "string",
+		IsPointer: true,
+		Validate: []ValidateRule{
+			{Tag: "required"},
+			{Tag: "max", Param: "100"},
+		},
+	}
+
+	got := ZodType(f, ZodStandard)
 	if got != "z.string().max(100)" {
 		t.Errorf("ZodType = %q, want %q", got, "z.string().max(100)")
+	}
+
+	gotMini := ZodType(f, ZodMini)
+	if gotMini != "z.string().check(z.maxLength(100))" {
+		t.Errorf("ZodType mini = %q", gotMini)
+	}
+}
+
+func TestZodRequiredStringDoesNotWeakenExistingMin(t *testing.T) {
+	f := Field{
+		Name:   "password",
+		Type:   "string",
+		GoKind: "string",
+		Validate: []ValidateRule{
+			{Tag: "required"},
+			{Tag: "min", Param: "8"},
+			{Tag: "max", Param: "128"},
+		},
+	}
+
+	got := ZodType(f, ZodStandard)
+	if got != "z.string().min(8).max(128)" {
+		t.Errorf("ZodType = %q, want %q", got, "z.string().min(8).max(128)")
+	}
+}
+
+func TestZodNumericParamsRejectUnsafeLiterals(t *testing.T) {
+	tests := []struct {
+		name  string
+		field Field
+		want  string
+	}{
+		{
+			name: "numeric constraint injection",
+			field: Field{Type: "number", GoKind: "int", Validate: []ValidateRule{
+				{Tag: "min", Param: `1); evil()`},
+			}},
+			want: "z.int()",
+		},
+		{
+			name: "numeric oneof injection",
+			field: Field{Type: "number", GoKind: "int", Validate: []ValidateRule{
+				{Tag: "oneof", Param: `1 2); evil()`},
+			}},
+			want: "z.int()",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ZodType(tt.field, ZodStandard)
+			if got != tt.want {
+				t.Fatalf("ZodType = %q, want %q", got, tt.want)
+			}
+			if strings.Contains(got, "evil") {
+				t.Fatalf("unsafe validate tag parameter leaked into Zod output: %q", got)
+			}
+		})
+	}
+}
+
+func TestZodNumericParamsFollowValidatorParsing(t *testing.T) {
+	tests := []struct {
+		name  string
+		field Field
+		want  string
+	}{
+		{
+			name: "string length accepts base zero integer and normalizes",
+			field: Field{Type: "string", GoKind: "string", Validate: []ValidateRule{
+				{Tag: "min", Param: "0x10"},
+			}},
+			want: "z.string().min(16)",
+		},
+		{
+			name: "int accepts base zero integer and normalizes",
+			field: Field{Type: "number", GoKind: "int", Validate: []ValidateRule{
+				{Tag: "min", Param: "0x10"},
+			}},
+			want: "z.int().gte(16)",
+		},
+		{
+			name: "int rejects float exponent param",
+			field: Field{Type: "number", GoKind: "int", Validate: []ValidateRule{
+				{Tag: "min", Param: "1e3"},
+			}},
+			want: "z.int()",
+		},
+		{
+			name: "uint rejects negative param",
+			field: Field{Type: "number", GoKind: "uint", Validate: []ValidateRule{
+				{Tag: "min", Param: "-1"},
+			}},
+			want: "z.number()",
+		},
+		{
+			name: "float accepts exponent param",
+			field: Field{Type: "number", GoKind: "float64", Validate: []ValidateRule{
+				{Tag: "min", Param: "1e3"},
+			}},
+			want: "z.float64().gte(1000)",
+		},
+		{
+			name: "int len emits equality range",
+			field: Field{Type: "number", GoKind: "int", Validate: []ValidateRule{
+				{Tag: "len", Param: "0x10"},
+			}},
+			want: "z.int().gte(16).lte(16)",
+		},
+		{
+			name: "float len emits equality range",
+			field: Field{Type: "number", GoKind: "float64", Validate: []ValidateRule{
+				{Tag: "len", Param: "1.5"},
+			}},
+			want: "z.float64().gte(1.5).lte(1.5)",
+		},
+		{
+			name: "bool numeric constraint is skipped",
+			field: Field{Type: "boolean", GoKind: "bool", Validate: []ValidateRule{
+				{Tag: "min", Param: "1"},
+			}},
+			want: "z.boolean()",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ZodType(tt.field, ZodStandard)
+			if got != tt.want {
+				t.Fatalf("ZodType = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestZodNumericLenMiniEmitsEqualityRange(t *testing.T) {
+	f := Field{Type: "number", GoKind: "int", Validate: []ValidateRule{
+		{Tag: "len", Param: "5"},
+	}}
+
+	got := ZodType(f, ZodMini)
+	if got != "z.int().check(z.gte(5), z.lte(5))" {
+		t.Fatalf("ZodType mini = %q, want equality range", got)
+	}
+}
+
+func TestZodNumberAndLengthLiteralsNormalizeSafeForms(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		param string
+		want  string
+	}{
+		{name: "decimal", param: "1.0", want: "1"},
+		{name: "exponent", param: "1e3", want: "1000"},
+		{name: "hex float", param: "0x1p2", want: "4"},
+		{name: "plus sign", param: "+1", want: "1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ZodNumberLiteral(tt.param)
+			if !ok || got != tt.want {
+				t.Fatalf("ZodNumberLiteral(%q) = %q, %v; want %q, true", tt.param, got, ok, tt.want)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name  string
+		param string
+		want  string
+	}{
+		{name: "hex integer", param: "0x10", want: "16"},
+		{name: "underscore integer", param: "1_000", want: "1000"},
+		{name: "octal integer", param: "010", want: "8"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ZodLengthLiteral(tt.param)
+			if !ok || got != tt.want {
+				t.Fatalf("ZodLengthLiteral(%q) = %q, %v; want %q, true", tt.param, got, ok, tt.want)
+			}
+		})
+	}
+
+	for _, param := range []string{"NaN", "Inf", "1); evil()", "1e3"} {
+		t.Run("invalid length "+param, func(t *testing.T) {
+			if got, ok := ZodLengthLiteral(param); ok {
+				t.Fatalf("ZodLengthLiteral(%q) = %q, true; want false", param, got)
+			}
+		})
+	}
+}
+
+func TestZodMiniStringConstraintsWithClosingParen(t *testing.T) {
+	f := Field{Type: "string", GoKind: "string", Validate: []ValidateRule{
+		{Tag: "startswith", Param: ")"},
+		{Tag: "contains", Param: "a)b"},
+	}}
+
+	got := ZodType(f, ZodMini)
+	for _, want := range []string{`z.startsWith(")")`, `z.includes("a)b")`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ZodType mini missing %q in %q", want, got)
+		}
+	}
+}
+
+func TestParseOneofValuesMatchesValidatorQuotedValues(t *testing.T) {
+	got := parseOneofValues("'red green' blue can't")
+	want := []string{"red green", "blue", "cant"}
+	if len(got) != len(want) {
+		t.Fatalf("parseOneofValues length = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("parseOneofValues[%d] = %q, want %q; all values: %v", i, got[i], want[i], got)
+		}
 	}
 }
 
@@ -899,6 +1157,84 @@ func TestUnsupportedZodRules(t *testing.T) {
 	})
 }
 
+func TestInvalidZodRules(t *testing.T) {
+	t.Run("invalid numeric constraints returned", func(t *testing.T) {
+		rules := []ValidateRule{
+			{Tag: "required"},
+			{Tag: "min", Param: "1); evil()"},
+			{Tag: "max", Param: "0x10"},
+		}
+		got := InvalidZodRules(rules, "int")
+		if len(got) != 1 {
+			t.Fatalf("expected 1 invalid rule, got %d: %v", len(got), got)
+		}
+		if got[0].Tag != "min" || got[0].Param != "1); evil()" {
+			t.Fatalf("invalid rule = %+v", got[0])
+		}
+	})
+
+	t.Run("integer constraints use validator base zero parsing", func(t *testing.T) {
+		rules := []ValidateRule{{Tag: "min", Param: "0x10"}, {Tag: "max", Param: "1e3"}}
+		got := InvalidZodRules(rules, "int")
+		if len(got) != 1 || got[0].Param != "1e3" {
+			t.Fatalf("expected only exponent int param to be invalid, got %v", got)
+		}
+	})
+
+	t.Run("invalid numeric oneof returned for numeric fields only", func(t *testing.T) {
+		rules := []ValidateRule{{Tag: "oneof", Param: "1 2); evil()"}}
+		got := InvalidZodRules(rules, "int")
+		if len(got) != 1 || got[0].Tag != "oneof" {
+			t.Fatalf("numeric oneof should be invalid, got %v", got)
+		}
+		if got := InvalidZodRules(rules, "string"); len(got) != 0 {
+			t.Fatalf("string oneof should not be invalid, got %v", got)
+		}
+	})
+
+	t.Run("numeric oneof uses canonical server values", func(t *testing.T) {
+		rules := []ValidateRule{{Tag: "oneof", Param: "01 2"}}
+		got := InvalidZodRules(rules, "int")
+		if len(got) != 1 || got[0].Tag != "oneof" {
+			t.Fatalf("non-canonical int oneof should be invalid, got %v", got)
+		}
+		if got := InvalidZodRules([]ValidateRule{{Tag: "oneof", Param: "0.5"}}, "float64"); len(got) != 1 {
+			t.Fatalf("float oneof should be invalid, got %v", got)
+		}
+	})
+
+	t.Run("unsupported tags are not duplicated as invalid", func(t *testing.T) {
+		rules := []ValidateRule{{Tag: "custom", Param: "1); evil()"}}
+		if got := InvalidZodRules(rules, "int"); len(got) != 0 {
+			t.Fatalf("unsupported tag should not be invalid too: %v", got)
+		}
+	})
+
+	t.Run("missing required params are invalid", func(t *testing.T) {
+		rules := []ValidateRule{{Tag: "min"}, {Tag: "oneof"}}
+		got := InvalidZodRules(rules, "int")
+		if len(got) != 2 {
+			t.Fatalf("expected missing params to be invalid, got %v", got)
+		}
+	})
+
+	t.Run("len on unsupported primitive kind is invalid", func(t *testing.T) {
+		rules := []ValidateRule{{Tag: "len", Param: "1"}}
+		got := InvalidZodRules(rules, "bool")
+		if len(got) != 1 || got[0].Tag != "len" {
+			t.Fatalf("bool len should be invalid, got %v", got)
+		}
+	})
+
+	t.Run("min on unsupported primitive kind is invalid", func(t *testing.T) {
+		rules := []ValidateRule{{Tag: "min", Param: "1"}}
+		got := InvalidZodRules(rules, "bool")
+		if len(got) != 1 || got[0].Tag != "min" {
+			t.Fatalf("bool min should be invalid, got %v", got)
+		}
+	})
+}
+
 func TestCrossFieldOp(t *testing.T) {
 	tests := []struct {
 		tag    string
@@ -939,5 +1275,64 @@ func TestParseZodOmitTag(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("ParseZodOmitTag(%q) = %v, want %v", tc.tag, got, tc.want)
 		}
+	}
+}
+
+// go-playground/validator interprets gt/gte/lt/lte on a string as bounds on its
+// length, not numeric comparisons. ZodString exposes only inclusive .min()/.max()
+// (and z.minLength/z.maxLength in mini) — it has no .gt/.gte/.lt/.lte — so these
+// tags must be translated to length checks, with a ±1 offset for the strict forms.
+// Emitting z.string().gte(n) produces a runtime "x.gte is not a function" in the
+// generated client.
+func TestZodStringLengthComparisonTagsEmitValidZod(t *testing.T) {
+	tests := []struct {
+		name     string
+		tag      string
+		param    string
+		want     string
+		wantMini string
+	}{
+		{"gte is inclusive min length", "gte", "3", "z.string().min(3)", "z.string().check(z.minLength(3))"},
+		{"gt is exclusive min length", "gt", "3", "z.string().min(4)", "z.string().check(z.minLength(4))"},
+		{"lte is inclusive max length", "lte", "3", "z.string().max(3)", "z.string().check(z.maxLength(3))"},
+		{"lt is exclusive max length", "lt", "3", "z.string().max(2)", "z.string().check(z.maxLength(2))"},
+		{"gte respects base-zero parsing", "gte", "0x10", "z.string().min(16)", "z.string().check(z.minLength(16))"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := Field{Name: "code", Type: "string", GoKind: "string",
+				Validate: []ValidateRule{{Tag: tt.tag, Param: tt.param}}}
+
+			if got := ZodType(f, ZodStandard); got != tt.want {
+				t.Errorf("ZodType standard = %q, want %q", got, tt.want)
+			}
+			if got := ZodType(f, ZodMini); got != tt.wantMini {
+				t.Errorf("ZodType mini = %q, want %q", got, tt.wantMini)
+			}
+
+			// Regression guard: numeric comparators must never appear on a string schema.
+			for _, style := range []ZodStyle{ZodStandard, ZodMini} {
+				out := ZodType(f, style)
+				for _, bad := range []string{".gte(", ".gt(", ".lte(", ".lt(", "z.gte(", "z.gt(", "z.lte(", "z.lt("} {
+					if strings.Contains(out, bad) {
+						t.Errorf("emitted numeric comparator %q on a string schema: %q", bad, out)
+					}
+				}
+			}
+		})
+	}
+}
+
+// An unparseable length parameter on a string comparison tag must be dropped
+// (and flagged via InvalidZod), never emitted as code.
+func TestZodStringLengthComparisonRejectsInvalidParam(t *testing.T) {
+	f := Field{Name: "code", Type: "string", GoKind: "string",
+		Validate: []ValidateRule{{Tag: "gt", Param: "1); evil()"}}}
+
+	if got := ZodType(f, ZodStandard); got != "z.string()" {
+		t.Errorf("ZodType = %q, want bare z.string() for unsafe param", got)
+	}
+	if invalid := InvalidZodRules(f.Validate, "string"); len(invalid) != 1 || invalid[0].Tag != "gt" {
+		t.Errorf("InvalidZodRules = %+v, want the gt rule flagged", invalid)
 	}
 }

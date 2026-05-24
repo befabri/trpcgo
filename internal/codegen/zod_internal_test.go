@@ -70,6 +70,22 @@ func TestFieldToZodComplexTypes(t *testing.T) {
 			style: typemap.ZodMini,
 			want:  "z.optional(z.array(z.int()).check(z.minLength(1), z.maxLength(3), z.length(2)))",
 		},
+		{
+			name: "array constraints normalize validator length params",
+			field: typemap.Field{Type: "string[]", ElementGoKind: "string", Validate: []typemap.ValidateRule{
+				{Tag: "min", Param: "0x10"},
+			}},
+			style: typemap.ZodStandard,
+			want:  "z.array(z.string()).min(16)",
+		},
+		{
+			name: "pointer string element required does not imply non-empty",
+			field: typemap.Field{Type: "string[]", ElementGoKind: "string", ElementIsPointer: true, ElementValidate: []typemap.ValidateRule{
+				{Tag: "required"},
+			}},
+			style: typemap.ZodStandard,
+			want:  "z.array(z.string())",
+		},
 	}
 
 	for _, tt := range tests {
@@ -130,5 +146,75 @@ func TestWriteZodAliasAndExtendedObjectPaths(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Errorf("output missing %q:\n%s", want, output)
 		}
+	}
+}
+
+func TestWriteZodCrossFieldUsesSafePropertyAccess(t *testing.T) {
+	procs := []ProcEntry{{Path: "create", ProcType: "mutation", InputTS: "Window", OutputTS: "void"}}
+	defs := []typemap.TypeDef{
+		{
+			Name: "Window",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{Name: "start-date", Type: "number", GoKind: "int"},
+				{Name: "end-date", Type: "number", GoKind: "int"},
+			},
+			Refinements: []typemap.Refinement{
+				{Field: "end-date", Op: ">=", OtherField: "start-date", Tag: "gtefield"},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+	if !strings.Contains(output, `data["end-date"] >= data["start-date"]`) {
+		t.Fatalf("cross-field refinement should use bracket property access:\n%s", output)
+	}
+	if strings.Contains(output, `data."end-date"`) {
+		t.Fatalf("cross-field refinement emitted invalid dot access:\n%s", output)
+	}
+	if !strings.Contains(output, `path: ["end-date"]`) {
+		t.Fatalf("cross-field refinement path should be quoted safely:\n%s", output)
+	}
+}
+
+func TestUnsupportedCommentEscapesCommentTerminators(t *testing.T) {
+	comment := unsupportedComment([]typemap.ValidateRule{{Tag: "custom", Param: "x */ alert(1)"}})
+	if strings.Contains(comment[:len(comment)-2], "*/") {
+		t.Fatalf("unsupported comment contains embedded terminator: %q", comment)
+	}
+	if !strings.Contains(comment, "x * / alert(1)") {
+		t.Fatalf("unsupported comment did not preserve sanitized text: %q", comment)
+	}
+}
+
+func TestWriteZodSingleNumericUnionUsesLiteral(t *testing.T) {
+	procs := []ProcEntry{{Path: "create", ProcType: "mutation", InputTS: "Input", OutputTS: "void"}}
+	defs := []typemap.TypeDef{
+		{
+			Name:   "Input",
+			Kind:   typemap.TypeDefInterface,
+			Fields: []typemap.Field{{Name: "priority", Type: "Priority"}},
+		},
+		{
+			Name:         "Priority",
+			Kind:         typemap.TypeDefUnion,
+			UnionMembers: []string{"1"},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+	if !strings.Contains(output, "export const PrioritySchema = z.literal(1)") {
+		t.Fatalf("single numeric union should use z.literal, got:\n%s", output)
+	}
+	if strings.Contains(output, "z.union([z.literal(1)])") {
+		t.Fatalf("single numeric union emitted invalid one-option union:\n%s", output)
 	}
 }

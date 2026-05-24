@@ -2,6 +2,8 @@ package typemap
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 )
 
@@ -188,11 +190,17 @@ func zodBaseFromKindAndType(tsType, goKind string, rules []ValidateRule) string 
 	// z.enum() is string-only in Zod 4; numeric oneofs need z.literal() inside z.union().
 	for _, rule := range rules {
 		if rule.Tag == "oneof" && rule.Param != "" {
-			values := strings.Fields(rule.Param)
+			values := parseOneofValues(rule.Param)
+			if len(values) == 0 {
+				continue
+			}
 			if isNumericKind(goKind) {
-				lits := make([]string, len(values))
-				for i, v := range values {
-					lits[i] = "z.literal(" + v + ")"
+				lits, ok := zodNumericOneofLiterals(values, goKind)
+				if !ok {
+					continue
+				}
+				if len(lits) == 1 {
+					return lits[0]
 				}
 				return fmt.Sprintf("z.union([%s])", strings.Join(lits, ", "))
 			}
@@ -231,9 +239,12 @@ func zodConstraints(f Field, base string) string {
 
 	isStr := isStringBase(base)
 	var parts []string
+	if shouldRequireNonEmptyString(f, isStr) {
+		parts = append(parts, `.min(1)`)
+	}
 
 	for _, rule := range f.Validate {
-		if part := zodConstraint(rule, isStr); part != "" {
+		if part := zodConstraint(rule, f, isStr); part != "" {
 			parts = append(parts, part)
 		}
 	}
@@ -241,7 +252,7 @@ func zodConstraints(f Field, base string) string {
 	return strings.Join(parts, "")
 }
 
-func zodConstraint(rule ValidateRule, isStr bool) string {
+func zodConstraint(rule ValidateRule, f Field, isStr bool) string {
 	if rule.Tag == "alphanum" {
 		return `.regex(/^[a-zA-Z0-9]*$/)`
 	}
@@ -261,7 +272,243 @@ func zodConstraint(rule ValidateRule, isStr bool) string {
 	if method == "startsWith" || method == "endsWith" || method == "includes" {
 		return fmt.Sprintf(".%s(%q)", method, rule.Param)
 	}
-	return fmt.Sprintf(".%s(%s)", method, rule.Param)
+	// ZodString has no .gt/.gte/.lt/.lte; go-playground/validator treats these on
+	// a string as bounds on its length, so translate them to .min()/.max().
+	if isStr {
+		switch rule.Tag {
+		case "gt", "gte", "lt", "lte":
+			part, ok := zodStringLengthConstraint(rule.Tag, rule.Param)
+			if !ok {
+				return ""
+			}
+			return part
+		}
+	}
+	if f.GoKind != "" && !isStr && !isLengthKind(f.GoKind) && !isNumericField(f) {
+		return ""
+	}
+	param, ok := zodConstraintNumberLiteral(rule.Param, f.GoKind, isStr)
+	if !ok {
+		return ""
+	}
+	if rule.Tag == "len" && !isStr {
+		if !isNumericField(f) {
+			return ""
+		}
+		return fmt.Sprintf(".gte(%s).lte(%s)", param, param)
+	}
+	return fmt.Sprintf(".%s(%s)", method, param)
+}
+
+// zodStringLengthConstraint translates a numeric-comparison validator tag on a
+// string field into the equivalent Zod string-length method. ZodString only
+// exposes inclusive .min()/.max(), so the strict forms gain a ±1 offset:
+// gte=n→.min(n), gt=n→.min(n+1), lte=n→.max(n), lt=n→.max(n-1). Returns false
+// when the parameter is not a safe length literal so the caller drops it.
+func zodStringLengthConstraint(tag, param string) (string, bool) {
+	n, ok := zodLengthValue(param)
+	if !ok {
+		return "", false
+	}
+	switch tag {
+	case "gte":
+		return fmt.Sprintf(".min(%d)", n), true
+	case "gt":
+		if n == math.MaxInt64 {
+			return "", false
+		}
+		return fmt.Sprintf(".min(%d)", n+1), true
+	case "lte":
+		return fmt.Sprintf(".max(%d)", n), true
+	case "lt":
+		if n == math.MinInt64 {
+			return "", false
+		}
+		return fmt.Sprintf(".max(%d)", n-1), true
+	}
+	return "", false
+}
+
+func shouldRequireNonEmptyString(f Field, isStr bool) bool {
+	if !isStr || f.IsPointer || f.ValidateOmitempty {
+		return false
+	}
+	required := false
+	for _, rule := range f.Validate {
+		switch rule.Tag {
+		case "required":
+			required = true
+		case "min", "len":
+			if zodLengthLiteralAtLeast(rule.Param, 1) {
+				return false
+			}
+		}
+	}
+	return required
+}
+
+func zodConstraintNumberLiteral(param, goKind string, isStr bool) (string, bool) {
+	if isStr || isLengthKind(goKind) {
+		return zodLengthLiteral(param)
+	}
+	switch {
+	case isSignedIntegerKind(goKind):
+		return zodSignedIntegerLiteral(param)
+	case isUnsignedIntegerKind(goKind):
+		return zodUnsignedIntegerLiteral(param)
+	case goKind == "float32":
+		return zodFloatLiteral(param, 32)
+	case goKind == "float64":
+		return zodFloatLiteral(param, 64)
+	default:
+		return ZodNumberLiteral(param)
+	}
+}
+
+func zodLengthLiteralAtLeast(param string, min int64) bool {
+	n, ok := zodLengthValue(param)
+	return ok && n >= min
+}
+
+func zodLengthLiteral(param string) (string, bool) {
+	n, ok := zodLengthValue(param)
+	if !ok {
+		return "", false
+	}
+	return strconv.FormatInt(n, 10), true
+}
+
+func zodLengthValue(param string) (int64, bool) {
+	if param == "" || strings.TrimSpace(param) != param {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(param, 0, 64)
+	return n, err == nil
+}
+
+func zodSignedIntegerLiteral(param string) (string, bool) {
+	if param == "" || strings.TrimSpace(param) != param {
+		return "", false
+	}
+	n, err := strconv.ParseInt(param, 0, 64)
+	if err != nil {
+		return "", false
+	}
+	return strconv.FormatInt(n, 10), true
+}
+
+func zodUnsignedIntegerLiteral(param string) (string, bool) {
+	if param == "" || strings.TrimSpace(param) != param {
+		return "", false
+	}
+	n, err := strconv.ParseUint(param, 0, 64)
+	if err != nil {
+		return "", false
+	}
+	return strconv.FormatUint(n, 10), true
+}
+
+func zodFloatLiteral(param string, bitSize int) (string, bool) {
+	if param == "" || strings.TrimSpace(param) != param {
+		return "", false
+	}
+	n, err := strconv.ParseFloat(param, bitSize)
+	if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
+		return "", false
+	}
+	return strconv.FormatFloat(n, 'g', -1, bitSize), true
+}
+
+// ZodNumberLiteral returns param when it is safe to emit as a TypeScript
+// numeric literal inside generated Zod code.
+func ZodNumberLiteral(param string) (string, bool) {
+	return zodFloatLiteral(param, 64)
+}
+
+// ZodLengthLiteral returns param normalized as the integer literal semantics
+// used by go-playground/validator for string, array, slice, and map lengths.
+func ZodLengthLiteral(param string) (string, bool) {
+	return zodLengthLiteral(param)
+}
+
+func zodNumericOneofLiterals(values []string, goKind string) ([]string, bool) {
+	if len(values) == 0 {
+		return nil, false
+	}
+	lits := make([]string, len(values))
+	for i, v := range values {
+		param, ok := zodNumericOneofLiteral(v, goKind)
+		if !ok {
+			return nil, false
+		}
+		lits[i] = "z.literal(" + param + ")"
+	}
+	return lits, true
+}
+
+func zodNumericOneofLiteral(value, goKind string) (string, bool) {
+	if value == "" || strings.TrimSpace(value) != value {
+		return "", false
+	}
+	if isSignedIntegerKind(goKind) {
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return "", false
+		}
+		if value != strconv.FormatInt(n, 10) {
+			return "", false
+		}
+		return value, true
+	}
+	if isUnsignedIntegerKind(goKind) {
+		n, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return "", false
+		}
+		if value != strconv.FormatUint(n, 10) {
+			return "", false
+		}
+		return value, true
+	}
+	return "", false
+}
+
+func parseOneofValues(param string) []string {
+	var values []string
+	for i := 0; i < len(param); {
+		for i < len(param) && isASCIISpace(param[i]) {
+			i++
+		}
+		if i >= len(param) {
+			break
+		}
+		start := i
+		if param[i] == '\'' {
+			end := i + 1
+			for end < len(param) && param[end] != '\'' {
+				end++
+			}
+			if end < len(param) {
+				values = append(values, strings.ReplaceAll(param[start:end+1], "'", ""))
+				i = end + 1
+				continue
+			}
+		}
+		for i < len(param) && !isASCIISpace(param[i]) {
+			i++
+		}
+		values = append(values, strings.ReplaceAll(param[start:i], "'", ""))
+	}
+	return values
+}
+
+func isASCIISpace(ch byte) bool {
+	switch ch {
+	case ' ', '\t', '\n', '\r', '\f', '\v':
+		return true
+	default:
+		return false
+	}
 }
 
 func zodConstraintMethod(tag string, isStr bool) string {
@@ -311,8 +558,8 @@ func zodMini(base string, constraints string, optional bool, omitemptyLit string
 				break
 			}
 			method := remaining[:parenIdx]
-			// Find matching close paren.
-			closeIdx := strings.IndexByte(remaining[parenIdx:], ')')
+			// Find matching close paren, respecting quoted string args.
+			closeIdx := zodCallCloseIndex(remaining[parenIdx:])
 			if closeIdx < 0 {
 				break
 			}
@@ -338,6 +585,42 @@ func zodMini(base string, constraints string, optional bool, omitemptyLit string
 		return fmt.Sprintf("z.optional(%s)", inner)
 	}
 	return inner
+}
+
+func zodCallCloseIndex(s string) int {
+	depth := 0
+	var quote byte
+	escaped := false
+	for i := range len(s) {
+		ch := s[i]
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+
+		switch ch {
+		case '\'', '"', '`':
+			quote = ch
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // supportedZodTags is the complete set of validate tags that produce Zod output.
@@ -422,19 +705,94 @@ func UnsupportedZodRules(rules []ValidateRule) []ValidateRule {
 	return unsupported
 }
 
+// InvalidZodRules returns validate rules that are recognized but cannot be
+// emitted safely as Zod code, for example numeric constraints with non-numeric
+// parameters.
+func InvalidZodRules(rules []ValidateRule, goKind string) []ValidateRule {
+	var invalid []ValidateRule
+	for _, r := range rules {
+		if invalidZodRule(r, goKind) {
+			invalid = append(invalid, r)
+		}
+	}
+	return invalid
+}
+
+func invalidZodRule(rule ValidateRule, goKind string) bool {
+	if !supportedZodTags[rule.Tag] {
+		return false
+	}
+	switch rule.Tag {
+	case "len":
+		if rule.Param == "" {
+			return true
+		}
+		if goKind != "string" && !isLengthKind(goKind) && !isNumericKind(goKind) && goKind != "" {
+			return true
+		}
+		_, ok := zodConstraintNumberLiteral(rule.Param, goKind, goKind == "string")
+		return !ok
+	case "min", "max", "gt", "gte", "lt", "lte":
+		if rule.Param == "" {
+			return true
+		}
+		if goKind != "string" && !isLengthKind(goKind) && !isNumericKind(goKind) && goKind != "" {
+			return true
+		}
+		_, ok := zodConstraintNumberLiteral(rule.Param, goKind, goKind == "string")
+		return !ok
+	case "oneof":
+		if rule.Param == "" {
+			return true
+		}
+		if !isNumericKind(goKind) {
+			return false
+		}
+		_, ok := zodNumericOneofLiterals(parseOneofValues(rule.Param), goKind)
+		return !ok
+	default:
+		return false
+	}
+}
+
 // isStringBase returns true if the Zod base type is string-like
 // (determines whether min/max mean length vs numeric bound).
 func isStringBase(base string) bool {
 	return strings.HasPrefix(base, "z.string()") || zodStringBases[base]
 }
 
-// isNumericKind reports whether a Go kind string represents a numeric type.
-func isNumericKind(goKind string) bool {
+func isLengthKind(goKind string) bool {
 	switch goKind {
-	case "int", "int8", "int16", "int32", "int64",
-		"uint", "uint8", "uint16", "uint32", "uint64",
-		"float32", "float64":
+	case "string", "slice", "array", "map":
 		return true
 	}
 	return false
+}
+
+func isSignedIntegerKind(goKind string) bool {
+	switch goKind {
+	case "int", "int8", "int16", "int32", "int64":
+		return true
+	}
+	return false
+}
+
+func isUnsignedIntegerKind(goKind string) bool {
+	switch goKind {
+	case "uint", "uint8", "uint16", "uint32", "uint64":
+		return true
+	}
+	return false
+}
+
+func isNumericField(f Field) bool {
+	return isNumericKind(f.GoKind) || (f.GoKind == "" && f.Type == "number")
+}
+
+// isNumericKind reports whether a Go kind string represents a numeric type.
+func isNumericKind(goKind string) bool {
+	return isSignedIntegerKind(goKind) ||
+		isUnsignedIntegerKind(goKind) ||
+		goKind == "float32" ||
+		goKind == "float64"
 }

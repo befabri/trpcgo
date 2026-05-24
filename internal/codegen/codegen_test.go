@@ -1235,7 +1235,7 @@ func TestZodUnsupportedComment(t *testing.T) {
 				{Name: "maxVal", Type: "number", GoKind: "float64",
 					Validate: []typemap.ValidateRule{{Tag: "required"}, {Tag: "gte", Param: "0"}}},
 				{Name: "label", Type: "string", GoKind: "string",
-					Validate: []typemap.ValidateRule{{Tag: "required"}, {Tag: "custom_check"}},
+					Validate:       []typemap.ValidateRule{{Tag: "required"}, {Tag: "custom_check"}},
 					UnsupportedZod: []typemap.ValidateRule{{Tag: "custom_check"}}},
 			},
 			Refinements: []typemap.Refinement{
@@ -1272,6 +1272,42 @@ func TestZodUnsupportedComment(t *testing.T) {
 	// label should have the custom_check comment.
 	if !strings.Contains(output, "/* unsupported: custom_check */") {
 		t.Errorf("label should have unsupported comment.\nOutput:\n%s", output)
+	}
+}
+
+func TestZodInvalidParamComment(t *testing.T) {
+	procs := []codegen.ProcEntry{
+		{Path: "create", ProcType: "mutation", InputTS: "Input", OutputTS: "string"},
+	}
+	defs := []typemap.TypeDef{
+		{
+			Name: "Input",
+			Kind: typemap.TypeDefInterface,
+			Fields: []typemap.Field{
+				{
+					Name:       "count",
+					Type:       "number",
+					GoKind:     "int",
+					Validate:   []typemap.ValidateRule{{Tag: "min", Param: "1); evil() */ alert(1)"}},
+					InvalidZod: []typemap.ValidateRule{{Tag: "min", Param: "1); evil() */ alert(1)"}},
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+	if strings.Contains(output, ".min(") {
+		t.Fatalf("invalid numeric param should not be emitted as code:\n%s", output)
+	}
+	if !strings.Contains(output, "/* invalid zod params: min=1); evil() * / alert(1) */") {
+		t.Fatalf("missing sanitized invalid-param comment:\n%s", output)
+	}
+	if strings.Contains(output, "*/ alert") {
+		t.Fatalf("invalid-param comment contains embedded block terminator:\n%s", output)
 	}
 }
 
@@ -1407,4 +1443,3 @@ func TestZodOmitE2E(t *testing.T) {
 		}
 	})
 }
-

@@ -190,7 +190,7 @@ func TestGenerateZodExtends(t *testing.T) {
 		if !strings.Contains(zod, "export const ZodBaseSchema = z.object({") {
 			t.Error("missing ZodBaseSchema")
 		}
-		if !strings.Contains(zod, "id: z.string(),") {
+		if !strings.Contains(zod, "id: z.string().min(1),") {
 			t.Error("ZodBaseSchema missing id field")
 		}
 
@@ -708,6 +708,7 @@ mustReject("CreateItemInput: array too long", S.ZodCreateItemInputSchema, { name
 mustReject("CreateItemInput: element too long", S.ZodCreateItemInputSchema, { name: "x", tags: ["a".repeat(51)], count: 0 });
 
 mustReject("DerivedSchema: missing base id", S.ZodDerivedSchema, { name: "Alice" });
+mustReject("DerivedSchema: base id empty", S.ZodDerivedSchema, { id: "", name: "Alice" });
 mustReject("DerivedSchema: name too short", S.ZodDerivedSchema, { id: "1", name: "" });
 
 mustReject("CrossField: max < min", S.ZodCrossFieldInputSchema, { min_val: 10, max_val: 5, start_val: 1, end_val: 10 });
@@ -807,6 +808,7 @@ mustReject("CreateItemInput: count above max", S.ZodCreateItemInputSchema, { nam
 mustReject("CreateItemInput: name too long", S.ZodCreateItemInputSchema, { name: "x".repeat(101), tags: [], count: 0 });
 mustReject("CreateItemInput: element too long", S.ZodCreateItemInputSchema, { name: "x", tags: ["a".repeat(51)], count: 0 });
 mustReject("DerivedSchema: missing base id", S.ZodDerivedSchema, { name: "Alice" });
+mustReject("DerivedSchema: base id empty", S.ZodDerivedSchema, { id: "", name: "Alice" });
 mustReject("CrossField: max < min", S.ZodCrossFieldInputSchema, { min_val: 10, max_val: 5, start_val: 1, end_val: 10 });
 
 // ---- Summary ----

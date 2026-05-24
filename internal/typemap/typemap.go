@@ -47,6 +47,7 @@ type Field struct {
 	Name              string
 	Type              string
 	GoKind            string // Go kind for Zod: "string", "int", "int32", "float64", etc.
+	IsPointer         bool   // original Go field was a pointer; affects validate:"required" semantics
 	Optional          bool
 	Readonly          bool           // from tstype:",readonly"
 	Required          bool           // from tstype:",required" (overrides optional)
@@ -55,7 +56,9 @@ type Field struct {
 	Validate          []ValidateRule // parsed validate tag rules (before dive)
 	ElementValidate   []ValidateRule // parsed validate tag rules after dive (for slice elements)
 	ElementGoKind     string         // Go kind of slice/array element type
+	ElementIsPointer  bool           // original slice/array element was a pointer
 	UnsupportedZod    []ValidateRule // validate rules with no Zod equivalent
+	InvalidZod        []ValidateRule // validate rules that cannot be emitted safely
 	ZodOmit           bool           // zod_omit:"true" — exclude from Zod schema
 }
 
@@ -527,10 +530,11 @@ func embeddedExtendsName(tsName string, isPtr, required bool) string {
 
 func (m *Mapper) collectField(field *types.Var, tag, jsonName string, omitempty bool, tstag TSTypeTag, hasTSTag bool, fieldComments map[int]string, index int) Field {
 	f := Field{
-		Name:     jsonName,
-		Type:     m.convert(field.Type()),
-		GoKind:   goKind(field.Type()),
-		Optional: omitempty || isPointer(field.Type()),
+		Name:      jsonName,
+		Type:      m.convert(field.Type()),
+		GoKind:    goKind(field.Type()),
+		IsPointer: isPointer(field.Type()),
+		Optional:  omitempty || isPointer(field.Type()),
 	}
 	applyValidateRules(&f, tag, field.Type())
 	applyTSTypeTag(&f, tstag, hasTSTag)
@@ -547,7 +551,10 @@ func applyValidateRules(f *Field, tag string, typ types.Type) {
 	f.UnsupportedZod = append(f.UnsupportedZod, UnsupportedZodRules(elemRules)...)
 	if f.GoKind == "slice" || f.GoKind == "array" {
 		f.ElementGoKind = sliceElementGoKind(typ)
+		f.ElementIsPointer = sliceElementIsPointer(typ)
 	}
+	f.InvalidZod = InvalidZodRules(sliceRules, f.GoKind)
+	f.InvalidZod = append(f.InvalidZod, InvalidZodRules(elemRules, f.ElementGoKind)...)
 	for _, rule := range f.Validate {
 		if rule.Tag == "required" {
 			f.Optional = false
@@ -776,4 +783,23 @@ func sliceElementGoKind(t types.Type) string {
 		return goKind(u.Elem())
 	}
 	return ""
+}
+
+// sliceElementIsPointer reports whether a slice or array's element type is a pointer.
+func sliceElementIsPointer(t types.Type) bool {
+	// Unwrap pointers to the container.
+	for {
+		if ptr, ok := t.(*types.Pointer); ok {
+			t = ptr.Elem()
+		} else {
+			break
+		}
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Slice:
+		return isPointer(u.Elem())
+	case *types.Array:
+		return isPointer(u.Elem())
+	}
+	return false
 }
