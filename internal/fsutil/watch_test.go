@@ -5,9 +5,16 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
+
+func TestDebounceInterval(t *testing.T) {
+	if DebounceInterval != 300*time.Millisecond {
+		t.Fatalf("DebounceInterval = %s, want 300ms", DebounceInterval)
+	}
+}
 
 func TestWatchRecursive(t *testing.T) {
 	root := t.TempDir()
@@ -21,9 +28,9 @@ func TestWatchRecursive(t *testing.T) {
 	//     node_modules/ (skipped)
 	//     .claude/    (skipped)
 	//     c/
-	dirs := []string{
-		"a", "a/b", ".git", "vendor", "node_modules", ".claude", "c",
-	}
+	skippedDirs := []string{".git", ".claude", ".turbo", ".next", ".cache", "vendor", "node_modules", "testdata", "dist", "build", "coverage"}
+	dirs := []string{"a", "a/b", "c"}
+	dirs = append(dirs, skippedDirs...)
 	for _, d := range dirs {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
 			t.Fatal(err)
@@ -54,10 +61,32 @@ func TestWatchRecursive(t *testing.T) {
 	}
 
 	// Should NOT be watched.
-	for _, skip := range []string{".git", "vendor", "node_modules", ".claude"} {
+	for _, skip := range skippedDirs {
 		if watched[skip] {
 			t.Errorf("expected %q to be skipped, but it was watched", skip)
 		}
+	}
+}
+
+func TestIsGoWriteOrCreate(t *testing.T) {
+	tests := []struct {
+		name  string
+		event fsnotify.Event
+		want  bool
+	}{
+		{name: "go write", event: fsnotify.Event{Name: "router.go", Op: fsnotify.Write}, want: true},
+		{name: "go create", event: fsnotify.Event{Name: filepath.Join("pkg", "router.go"), Op: fsnotify.Create}, want: true},
+		{name: "go chmod", event: fsnotify.Event{Name: "router.go", Op: fsnotify.Chmod}, want: false},
+		{name: "non-go write", event: fsnotify.Event{Name: "router.ts", Op: fsnotify.Write}, want: false},
+		{name: "extension suffix only", event: fsnotify.Event{Name: "router.go.tmp", Op: fsnotify.Write}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsGoWriteOrCreate(tt.event); got != tt.want {
+				t.Fatalf("IsGoWriteOrCreate(%v) = %v, want %v", tt.event, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -122,6 +151,36 @@ func TestHandleDirEvent_FileIgnored(t *testing.T) {
 	after := len(watcher.WatchList())
 	if after != before {
 		t.Errorf("file Create event should not add watches, got %d -> %d", before, after)
+	}
+}
+
+func TestHandleDirEventWithRequiresCreateDirectory(t *testing.T) {
+	root := t.TempDir()
+	dirPath := filepath.Join(root, "pkg")
+	if err := os.Mkdir(dirPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(root, "main.go")
+	if err := os.WriteFile(filePath, []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	called := 0
+	watchFn := func(*fsnotify.Watcher, string) error {
+		called++
+		return nil
+	}
+	HandleDirEventWith(nil, fsnotify.Event{Name: filePath, Op: fsnotify.Create}, watchFn)
+	HandleDirEventWith(nil, fsnotify.Event{Name: dirPath, Op: fsnotify.Write}, watchFn)
+
+	if called != 0 {
+		t.Fatalf("watchFn called %d times, want 0 for file create and directory write", called)
+	}
+}
+
+func TestIsDirMissingPath(t *testing.T) {
+	if isDir(filepath.Join(t.TempDir(), "missing")) {
+		t.Fatal("isDir returned true for a missing path")
 	}
 }
 
