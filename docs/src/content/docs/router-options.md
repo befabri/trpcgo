@@ -60,11 +60,14 @@ handler := trpc.NewHandler(router, "/trpc",
 | `trpc.WithContentTypeEnforcement(bool)` | `true` | Requires `Content-Type: application/json` for `POST` requests with bodies. |
 | `trpc.WithCSRFProtection(bool)` | `true` | Rejects cross-origin `POST` requests unless the `Origin` or `Referer` is same-origin or trusted. |
 | `trpc.WithCSRFRequireOrigin(bool)` | `false` | Rejects all `POST` requests that lack both `Origin` and `Referer`. Cookie-bearing POSTs are rejected without those headers even when this is false. |
+| `trpc.WithSubscriptionOriginCheck(bool)` | `false` | Rejects browser subscription requests whose `Origin` or `Referer` is not same-origin, trusted, public, or CORS-allowed. Cookie-bearing subscriptions without either header are rejected. |
 | `trpc.WithPublicOrigin(origin)` / `trpc.WithPublicOrigins(origins...)` | none | Treats exact public API origins as same-origin for deployments behind TLS-terminating proxies. |
 | `trpc.WithTrustedOrigins(origins...)` | none | Adds exact scheme+host origins that may send cross-origin `POST` requests. |
 | `trpc.WithCORS(config)` | disabled | Handles CORS preflights and response headers for configured origins. CORS origins do not grant CSRF trust. |
 
 Handler options are separate from router options because they depend on HTTP deployment details. `WithCORS` accepts exact origins such as `https://app.example.com`; wildcard CORS (`*`) can emit `Access-Control-Allow-Origin: *` when credentials are disabled, but it is not trusted by the CSRF check. For cross-origin browser mutations, configure both CORS read access with `WithCORS` and POST trust with `WithTrustedOrigins`.
+
+`WithSubscriptionOriginCheck(true)` is opt-in: it gates GET/SSE subscriptions before their resolvers run, accepting same-origin requests and origins from `WithTrustedOrigins`, `WithPublicOrigin`, or `WithCORS`. POST subscriptions go through the normal CSRF check first.
 
 `CORSConfig.AllowedHeaders` replaces the default allow-list. The default is `Authorization`, `Content-Type`, `Last-Event-Id`, and `trpc-accept`; include those headers when you add custom headers and still need auth, tRPC JSONL, or subscription resume support.
 

@@ -38,9 +38,10 @@ type CORSConfig struct {
 }
 
 type handlerOptions struct {
-	enforceContentType bool
-	cors               corsOptions
-	csrf               csrfOptions
+	enforceContentType      bool
+	checkSubscriptionOrigin bool
+	cors                    corsOptions
+	csrf                    csrfOptions
 }
 
 type corsOptions struct {
@@ -94,6 +95,21 @@ func WithCSRFProtection(enabled bool) HandlerOption {
 	}
 }
 
+// WithSubscriptionOriginCheck controls an opt-in Origin/Referer check for
+// subscription requests. It targets browser GET/SSE subscriptions, which are
+// not covered by the POST-only CSRF check. When enabled, a subscription request
+// carrying an Origin or Referer must be same-origin, a configured public or
+// trusted origin, or allowed by CORS. Cookie-bearing subscription requests
+// without those headers are rejected; non-cookie requests without those headers
+// are allowed for non-browser clients. Subscriptions sent via POST pass through
+// the normal CSRF check first, which honors same-origin, public, and trusted
+// origins.
+func WithSubscriptionOriginCheck(enabled bool) HandlerOption {
+	return func(o *handlerOptions) {
+		o.checkSubscriptionOrigin = enabled
+	}
+}
+
 // WithCSRFRequireOrigin controls whether CSRF protection rejects every POST
 // request that lacks both Origin and Referer. By default, missing Origin and
 // Referer are allowed for non-browser API clients, but cookie-bearing POSTs are
@@ -105,16 +121,17 @@ func WithCSRFRequireOrigin(enabled bool) HandlerOption {
 }
 
 // WithPublicOrigin adds public origins that should be considered same-origin
-// for CSRF checks. This is useful behind TLS-terminating reverse proxies where
-// the Go server receives internal http requests while browsers use a public
-// https origin. Origins must be exact scheme+host values such as
+// for CSRF and subscription origin checks. This is useful behind
+// TLS-terminating reverse proxies where the Go server receives internal http
+// requests while browsers use a public https origin. Origins must be exact
+// scheme+host values such as
 // "https://api.example.com".
 func WithPublicOrigin(origin string) HandlerOption {
 	return WithPublicOrigins(origin)
 }
 
 // WithPublicOrigins adds public origins that should be considered same-origin
-// for CSRF checks. Invalid origins are ignored.
+// for CSRF and subscription origin checks. Invalid origins are ignored.
 func WithPublicOrigins(origins ...string) HandlerOption {
 	return func(o *handlerOptions) {
 		ensurePublicOrigins(o)
@@ -290,6 +307,81 @@ func (h *Handler) rejectCSRF(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	return false
+}
+
+func (h *Handler) rejectSubscriptionOrigin(w http.ResponseWriter, r *http.Request, calls []parsedRequest) bool {
+	if !h.opts.checkSubscriptionOrigin || !h.hasSubscriptionCall(calls) {
+		return false
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		addVary(w.Header(), "Origin")
+		if h.allowedSubscriptionOrigin(r, origin, false) {
+			return false
+		}
+		h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeForbidden, "subscription origin not allowed"), "", nil, "")
+		return true
+	}
+	if referer := r.Header.Get("Referer"); referer != "" {
+		addVary(w.Header(), "Referer")
+		if h.allowedSubscriptionOrigin(r, referer, true) {
+			return false
+		}
+		h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeForbidden, "subscription referer not allowed"), "", nil, "")
+		return true
+	}
+	if r.Header.Get("Cookie") != "" {
+		h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeForbidden, "subscription origin required"), "", nil, "")
+		return true
+	}
+	return false
+}
+
+func (h *Handler) hasSubscriptionCall(calls []parsedRequest) bool {
+	for _, call := range calls {
+		proc, ok := h.procedures.Lookup(call.path)
+		if ok && proc.Type() == trpcgo.ProcedureSubscription {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) allowedSubscriptionOrigin(r *http.Request, value string, allowExtraParts bool) bool {
+	origin, ok := parseOrigin(value, allowExtraParts)
+	if !ok {
+		return false
+	}
+	if reqOrigin, ok := requestOrigin(r); ok && origin == reqOrigin {
+		return true
+	}
+	if h.opts.csrf.publicOrigins[origin] {
+		return true
+	}
+	// Trusted origins are explicitly allowed to send cross-origin POSTs, a
+	// stronger trust signal than CORS read access, so they may subscribe too.
+	// This also lets users with external CORS middleware (no trpc.WithCORS)
+	// enable the check via WithTrustedOrigins.
+	if h.opts.csrf.trustedOrigins[origin] {
+		return true
+	}
+	return h.corsAllowsOrigin(origin, r.Header.Get("Cookie") != "")
+}
+
+func (h *Handler) corsAllowsOrigin(origin string, hasCookie bool) bool {
+	if !h.opts.cors.enabled {
+		return false
+	}
+	if h.opts.cors.allowedOrigins[origin] {
+		return true
+	}
+	// Wildcard CORS only means "any origin may read non-credentialed
+	// responses". It must not let a cookie-bearing cross-site request reach a
+	// subscription resolver, since the side effect would run before the browser
+	// blocks the response read.
+	if hasCookie {
+		return false
+	}
+	return h.opts.cors.allowWildcard && !h.opts.cors.allowCredentials
 }
 
 func (h *Handler) trustedRequestOrigin(r *http.Request, value string, allowExtraParts bool) bool {

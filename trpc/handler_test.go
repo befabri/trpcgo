@@ -43,6 +43,23 @@ func setupRouter(t *testing.T) *trpcgo.Router {
 	return r
 }
 
+func setupSubscriptionRouter(t *testing.T, called *bool) *trpcgo.Router {
+	t.Helper()
+	r := trpcgo.NewRouter()
+	if err := trpcgo.VoidSubscribe(r, "events", func(ctx context.Context) (<-chan string, error) {
+		if called != nil {
+			*called = true
+		}
+		ch := make(chan string, 1)
+		ch <- "hello"
+		close(ch)
+		return ch, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 func TestHandler_QueryGET(t *testing.T) {
 	r := setupRouter(t)
 	h := trpc.NewHandler(r, "/trpc")
@@ -395,6 +412,275 @@ func TestHandler_CSRFRequireOriginRejectsPostWithoutOriginOrReferer(t *testing.T
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_SubscriptionOriginCheckDisabledByDefault(t *testing.T) {
+	called := false
+	r := setupSubscriptionRouter(t, &called)
+	h := trpc.NewHandler(r, "/trpc")
+
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/trpc/events", nil)
+	req.Header.Set("Origin", "https://evil.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 when subscription origin check is disabled: %s", rec.Code, rec.Body.String())
+	}
+	if !called {
+		t.Fatal("subscription should run when origin check is disabled")
+	}
+}
+
+func TestHandler_SubscriptionOriginCheckRejectsCrossOriginGet(t *testing.T) {
+	called := false
+	r := setupSubscriptionRouter(t, &called)
+	h := trpc.NewHandler(r, "/trpc", trpc.WithSubscriptionOriginCheck(true))
+
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/trpc/events", nil)
+	req.Header.Set("Origin", "https://evil.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Fatal("subscription should not run for rejected cross-origin GET")
+	}
+}
+
+func TestHandler_SubscriptionOriginCheckRejectsCookieGetWithoutOriginOrReferer(t *testing.T) {
+	called := false
+	r := setupSubscriptionRouter(t, &called)
+	h := trpc.NewHandler(r, "/trpc", trpc.WithSubscriptionOriginCheck(true))
+
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/trpc/events", nil)
+	req.Header.Set("Cookie", "sid=123")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Fatal("subscription should not run for cookie GET without Origin or Referer")
+	}
+}
+
+func TestHandler_SubscriptionOriginCheckAllowsNonCookieGetWithoutOriginOrReferer(t *testing.T) {
+	called := false
+	r := setupSubscriptionRouter(t, &called)
+	h := trpc.NewHandler(r, "/trpc", trpc.WithSubscriptionOriginCheck(true))
+
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/trpc/events", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for non-cookie subscription without browser origin headers: %s", rec.Code, rec.Body.String())
+	}
+	if !called {
+		t.Fatal("subscription should run for non-cookie GET without Origin or Referer")
+	}
+}
+
+func TestHandler_SubscriptionOriginCheckAllowsSameOriginGet(t *testing.T) {
+	called := false
+	r := setupSubscriptionRouter(t, &called)
+	h := trpc.NewHandler(r, "/trpc", trpc.WithSubscriptionOriginCheck(true))
+
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/trpc/events", nil)
+	req.Header.Set("Origin", "https://api.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for same-origin subscription: %s", rec.Code, rec.Body.String())
+	}
+	if !called {
+		t.Fatal("subscription should run for same-origin GET")
+	}
+}
+
+func TestHandler_SubscriptionOriginCheckAllowsCORSOrigin(t *testing.T) {
+	called := false
+	r := setupSubscriptionRouter(t, &called)
+	h := trpc.NewHandler(r, "/trpc",
+		trpc.WithCORS(trpc.CORSConfig{
+			AllowedOrigins:   []string{"https://app.example.test"},
+			AllowCredentials: true,
+		}),
+		trpc.WithSubscriptionOriginCheck(true),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/trpc/events", nil)
+	req.Header.Set("Origin", "https://app.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for CORS-allowed subscription: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.test" {
+		t.Fatalf("Access-Control-Allow-Origin = %q", got)
+	}
+	if !called {
+		t.Fatal("subscription should run for CORS-allowed origin")
+	}
+}
+
+func TestHandler_SubscriptionOriginCheckAllowsTrustedOriginWithoutCORS(t *testing.T) {
+	// External CORS middleware case: no trpc.WithCORS, but the origin is
+	// explicitly trusted. The subscription check must honor WithTrustedOrigins.
+	called := false
+	r := setupSubscriptionRouter(t, &called)
+	h := trpc.NewHandler(r, "/trpc",
+		trpc.WithTrustedOrigins("https://app.example.test"),
+		trpc.WithSubscriptionOriginCheck(true),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/trpc/events", nil)
+	req.Header.Set("Origin", "https://app.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for trusted-origin subscription: %s", rec.Code, rec.Body.String())
+	}
+	if !called {
+		t.Fatal("subscription should run for trusted origin")
+	}
+}
+
+func TestHandler_SubscriptionOriginCheckAllowsSameOriginRefererWithPath(t *testing.T) {
+	called := false
+	r := setupSubscriptionRouter(t, &called)
+	h := trpc.NewHandler(r, "/trpc", trpc.WithSubscriptionOriginCheck(true))
+
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/trpc/events", nil)
+	req.Header.Set("Referer", "https://api.example.test/dashboard?tab=live")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for same-origin referer: %s", rec.Code, rec.Body.String())
+	}
+	if !called {
+		t.Fatal("subscription should run for same-origin referer")
+	}
+}
+
+func TestHandler_SubscriptionOriginCheckRejectsCrossOriginReferer(t *testing.T) {
+	called := false
+	r := setupSubscriptionRouter(t, &called)
+	h := trpc.NewHandler(r, "/trpc", trpc.WithSubscriptionOriginCheck(true))
+
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/trpc/events", nil)
+	req.Header.Set("Referer", "https://evil.example.test/page")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for cross-origin referer: %s", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Fatal("subscription should not run for cross-origin referer")
+	}
+}
+
+func TestHandler_SubscriptionOriginCheckAllowsPublicOriginProxy(t *testing.T) {
+	// TLS-terminating proxy: the server sees internal http while the browser
+	// uses the public https origin.
+	called := false
+	r := setupSubscriptionRouter(t, &called)
+	h := trpc.NewHandler(r, "/trpc",
+		trpc.WithPublicOrigin("https://api.example.test"),
+		trpc.WithSubscriptionOriginCheck(true),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "http://api.example.test/trpc/events", nil)
+	req.Header.Set("Origin", "https://api.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for configured public origin: %s", rec.Code, rec.Body.String())
+	}
+	if !called {
+		t.Fatal("subscription should run for public origin behind TLS proxy")
+	}
+}
+
+func TestHandler_SubscriptionOriginCheckPostRequiresCSRFTrust(t *testing.T) {
+	// POST subscriptions pass through the POST CSRF check first, which honors
+	// trusted origins but not CORS read access. A CORS-allowed but untrusted
+	// origin is therefore rejected before the subscription check runs.
+	called := false
+	r := setupSubscriptionRouter(t, &called)
+	h := trpc.NewHandler(r, "/trpc",
+		trpc.WithCORS(trpc.CORSConfig{AllowedOrigins: []string{"https://app.example.test"}}),
+		trpc.WithSubscriptionOriginCheck(true),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.example.test/trpc/events", nil)
+	req.Header.Set("Origin", "https://app.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for cross-origin POST subscription without trust: %s", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Fatal("POST subscription should not run for untrusted cross-origin request")
+	}
+}
+
+func TestHandler_SubscriptionOriginCheckWildcardRejectsCookieRequest(t *testing.T) {
+	// Wildcard CORS must not let a cookie-bearing cross-site subscription reach
+	// the resolver, even though the browser would block the response read.
+	called := false
+	r := setupSubscriptionRouter(t, &called)
+	h := trpc.NewHandler(r, "/trpc",
+		trpc.WithCORS(trpc.CORSConfig{AllowedOrigins: []string{"*"}}),
+		trpc.WithSubscriptionOriginCheck(true),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/trpc/events", nil)
+	req.Header.Set("Origin", "https://evil.example.test")
+	req.Header.Set("Cookie", "sid=123")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for wildcard CORS cookie subscription: %s", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Fatal("subscription should not run for cookie-bearing cross-site request under wildcard CORS")
+	}
+}
+
+func TestHandler_SubscriptionOriginCheckWildcardAllowsCookielessRequest(t *testing.T) {
+	// Without a cookie there is no ambient credential, so wildcard CORS may
+	// still admit an anonymous cross-site subscription.
+	called := false
+	r := setupSubscriptionRouter(t, &called)
+	h := trpc.NewHandler(r, "/trpc",
+		trpc.WithCORS(trpc.CORSConfig{AllowedOrigins: []string{"*"}}),
+		trpc.WithSubscriptionOriginCheck(true),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/trpc/events", nil)
+	req.Header.Set("Origin", "https://other.example.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for cookie-less wildcard subscription: %s", rec.Code, rec.Body.String())
+	}
+	if !called {
+		t.Fatal("cookie-less wildcard subscription should run")
 	}
 }
 

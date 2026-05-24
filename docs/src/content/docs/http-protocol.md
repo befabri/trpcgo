@@ -49,7 +49,7 @@ Content-Type: application/json
 
 Empty input is passed as the zero value for typed procedures or `nil` for void procedures.
 
-`POST` requests with bodies must use `Content-Type: application/json`; charset parameters are allowed and empty-body `POST` requests do not need a content type. The handler also rejects cross-origin `POST` requests by default unless the `Origin` or `Referer` is same-origin or trusted with `trpc.WithTrustedOrigins`. For TLS-terminating reverse proxies, configure the public API origin with `trpc.WithPublicOrigin`.
+`POST` requests with bodies must use `Content-Type: application/json`; charset parameters are allowed and empty-body `POST` requests do not need a content type. The handler also rejects cross-origin `POST` requests by default unless the `Origin` or `Referer` is same-origin or trusted with `trpc.WithTrustedOrigins`. `GET` subscriptions do not receive that CSRF check by default; enable `trpc.WithSubscriptionOriginCheck(true)` to gate browser subscription requests by same-origin, trusted, public, or CORS-allowed origins before resolvers run. For TLS-terminating reverse proxies, configure the public API origin with `trpc.WithPublicOrigin`.
 
 ## Success Envelope
 

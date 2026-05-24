@@ -120,7 +120,9 @@ When both `Origin` and `Referer` are missing, non-cookie API clients are allowed
 
 If the Go server runs behind TLS termination and receives internal `http` requests, add the public API origin with `WithPublicOrigin("https://api.example.com")`. Disable the built-in check with `trpc.WithCSRFProtection(false)` only when another layer enforces it.
 
-CSRF protection applies to `POST` requests only. Queries and subscriptions are served over `GET`, which browsers treat as safe and which therefore receives no Origin/Referer check — cross-origin reads are governed by CORS instead. A resolver runs when the request reaches the server, before the browser's CORS check decides whether the caller may read the response, so keep query and subscription resolvers free of state changes and put any state-changing operation in a mutation so the CSRF check applies. As defense in depth, set `SameSite=Lax` (or `Strict`) on session cookies; modern browsers then withhold them from cross-site subscription requests entirely.
+CSRF protection covers `POST` only. Queries and subscriptions use `GET`, which gets no Origin/Referer check — CORS, not CSRF, decides who may read their responses. But the resolver runs before that CORS check does, so keep query and subscription resolvers free of side effects and move any state change into a mutation. Setting `SameSite=Lax` (or `Strict`) on session cookies adds a second layer: browsers then omit them from cross-site subscription requests.
+
+For defense in depth on side-effectful subscriptions, enable `trpc.WithSubscriptionOriginCheck(true)`. It extends the Origin/Referer check to GET/SSE subscriptions, accepting same-origin requests and origins allowed by `WithTrustedOrigins`, `WithPublicOrigin`, or `WithCORS`. A request with neither header is rejected only when it carries a cookie, so non-browser clients are unaffected. POST subscriptions go through the CSRF check first.
 
 ## Treat Reconnect IDs As Untrusted
 

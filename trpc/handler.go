@@ -71,6 +71,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeParseError(w, err)
 		return
 	}
+	if h.rejectSubscriptionOrigin(w, r, calls) {
+		return
+	}
 
 	ctx, cancel := h.requestContext(r)
 	defer cancel()
