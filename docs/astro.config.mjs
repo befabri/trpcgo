@@ -11,6 +11,12 @@ export default defineConfig({
 		starlight({
 			title: 'trpcgo',
 			description: 'Build Go APIs for TypeScript tRPC clients.',
+			favicon: '/favicon.svg',
+			logo: {
+				src: './src/assets/logo.svg',
+				alt: '',
+				replacesTitle: true,
+			},
 			customCss: ['./src/styles/copy-page-markdown.css'],
 			components: {
 				Head: './src/components/Head.astro',

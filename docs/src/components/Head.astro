@@ -5,3 +5,13 @@ import { ClientRouter } from 'astro:transitions';
 
 <DefaultHead />
 <ClientRouter fallback="swap" />
+
+<style is:global>
+	.site-title img[src*='logo.svg'] {
+		display: block;
+		width: 2.75rem !important;
+		height: 1.5rem !important;
+		max-width: none;
+		object-fit: contain;
+	}
+</style>
