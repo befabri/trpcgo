@@ -9,8 +9,8 @@ export default defineConfig({
 	site,
 	integrations: [
 		starlight({
-			title: 'trpcgo Docs',
-			description: 'Write tRPC-compatible APIs in Go and generate TypeScript client contracts.',
+			title: 'trpcgo',
+			description: 'Build Go APIs for TypeScript tRPC clients.',
 			customCss: ['./src/styles/copy-page-markdown.css'],
 			components: {
 				Head: './src/components/Head.astro',

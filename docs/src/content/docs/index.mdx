@@ -1,27 +1,27 @@
 ---
-title: trpcgo
-description: Write tRPC-compatible APIs in Go and generate the TypeScript router contract your frontend consumes.
+title: Go Backend for tRPC TypeScript Clients
+description: Build Go (Golang) APIs that work with @trpc/client, React Query, and generated TypeScript AppRouter contracts.
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-trpcgo is for teams that want the tRPC developer experience without running the API server in TypeScript.
-Your Go handlers and structs are the source of truth. trpcgo serves them over the tRPC HTTP protocol and generates the TypeScript `AppRouter` type that `@trpc/client`, `@trpc/react-query`, and `@trpc/tanstack-react-query` understand.
+trpcgo lets you keep your API server in Go while giving frontend teams the TypeScript tRPC workflow: typed procedure calls, generated `AppRouter` contracts, and Zod schemas from Go structs.
+Your Go handlers and structs are the source of truth. trpcgo serves them over the tRPC HTTP protocol so `@trpc/client`, `@trpc/react-query`, and `@trpc/tanstack-react-query` can consume them without a TypeScript API server.
 
 ## Why Use It
 
 <CardGrid stagger>
-	<Card title="Go API server" icon="setting">
-		Register typed Go queries, mutations, and SSE subscriptions on a plain `net/http` handler.
+	<Card title="Go source of truth" icon="setting">
+		Register typed Go queries, mutations, and SSE subscriptions from your handlers and structs.
 	</Card>
-	<Card title="Typed frontend" icon="document">
-		Generate a structural `AppRouter` contract so TypeScript catches broken procedure calls.
+	<Card title="TypeScript tRPC clients" icon="document">
+		Generate an `AppRouter` contract that plugs into the existing tRPC client ecosystem.
 	</Card>
 	<Card title="Validation schemas" icon="pencil">
 		Generate Zod input schemas from Go `validate` tags for client-side form validation.
 	</Card>
-	<Card title="Runtime controls" icon="add-document">
-		Configure batching, strict JSON decoding, body limits, SSE limits, context, middleware, and error formatting.
+	<Card title="Plain HTTP runtime" icon="add-document">
+		Serve procedures from a `net/http` handler with batching, SSE, middleware, and error formatting.
 	</Card>
 	<Card title="Source analysis" icon="open-book">
 		Use `trpcgo generate` to preserve comments, const unions, aliases, generics, and validation metadata.
@@ -32,6 +32,8 @@ Your Go handlers and structs are the source of truth. trpcgo serves them over th
 </CardGrid>
 
 ## The Basic Shape
+
+Register procedures in Go, generate the TypeScript router type, then call the API from the same tRPC clients you already use.
 
 ```go
 router := trpcgo.NewRouter(

@@ -107,9 +107,13 @@ function createMarkdownConverter(): TurndownService {
 				return '\n\n';
 			}
 
+			const pre = code.closest('pre');
 			const language =
-				code.getAttribute('data-language') || code.className.match(/language-([\w-]+)/)?.[1] || '';
-			const rawCode = normalizeNewlines(code.textContent || '').replace(/\n$/, '');
+				pre?.getAttribute('data-language') ||
+				code.getAttribute('data-language') ||
+				code.className.match(/language-([\w-]+)/)?.[1] ||
+				'';
+			const rawCode = normalizeNewlines(getCodeText(code)).replace(/\n$/, '');
 			const fence = getFence(rawCode);
 			const openingFence = language ? `${fence}${language}` : fence;
 
@@ -154,6 +158,17 @@ function normalizeWhitespace(text: string): string {
 
 function normalizeNewlines(text: string): string {
 	return text.replace(/\r\n?/g, '\n');
+}
+
+function getCodeText(code: Element): string {
+	const expressiveCodeLines = Array.from(code.querySelectorAll<HTMLElement>('.ec-line'));
+	if (expressiveCodeLines.length === 0) {
+		return code.textContent || '';
+	}
+
+	return expressiveCodeLines
+		.map((line) => line.querySelector<HTMLElement>('.code')?.textContent || '')
+		.join('\n');
 }
 
 async function writeClipboardText(text: string): Promise<void> {
