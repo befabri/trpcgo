@@ -1259,13 +1259,18 @@ func TestHandler_SSEOneNanosecondMaxDurationReturns(t *testing.T) {
 		trpcgo.WithSSEMaxDuration(time.Nanosecond),
 		trpcgo.WithSSEPingInterval(time.Hour),
 	)
+	ctxDone := make(chan struct{})
 	if err := trpcgo.VoidSubscribe(r, "never", func(ctx context.Context) (<-chan string, error) {
+		go func() {
+			<-ctx.Done()
+			close(ctxDone)
+		}()
 		return make(chan string), nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	h := trpc.NewHandler(r, "/trpc")
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	req := httptest.NewRequest(http.MethodGet, "/trpc/never", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
@@ -1277,6 +1282,11 @@ func TestHandler_SSEOneNanosecondMaxDurationReturns(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "event: return\n") {
 		t.Fatalf("SSE body missing max-duration return event: %s", rec.Body.String())
+	}
+	select {
+	case <-ctxDone:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("subscription context was not canceled after max duration")
 	}
 }
 

@@ -78,6 +78,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := h.requestContext(r)
 	defer cancel()
 	ctx = trpcgo.WithResponseMetadata(ctx)
+	streamCancel := context.CancelFunc(func() {})
+	if !isBatch {
+		if proc, ok := h.procedures.Lookup(calls[0].path); ok && proc.Type() == trpcgo.ProcedureSubscription {
+			ctx, streamCancel = context.WithCancel(ctx)
+			defer streamCancel()
+		}
+	}
 
 	if isBatch && r.Header.Get("trpc-accept") == "application/jsonl" {
 		h.writeJSONLStream(ctx, w, r, calls)
@@ -87,7 +94,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	results := h.executeCalls(ctx, r, calls)
 
 	if !isBatch && trpcgo.IsStreamResult(results[0].response) {
-		h.handleStream(ctx, w, results[0].response, calls[0])
+		h.handleStream(ctx, streamCancel, w, results[0].response, calls[0])
 		return
 	}
 	h.writeCallResults(ctx, w, isBatch, results)
@@ -297,7 +304,9 @@ func determineBatchStatus(results []callResult) int {
 }
 
 // handleStream writes SSE for a subscription result using the tRPC SSE format.
-func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, result any, call parsedRequest) {
+func (h *Handler) handleStream(ctx context.Context, cancel context.CancelFunc, w http.ResponseWriter, result any, call parsedRequest) {
+	defer cancel()
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeInternalServerError, "streaming not supported"), "", ctx, "")
@@ -387,6 +396,7 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, resul
 		case <-ctx.Done():
 			return
 		case <-maxTimer:
+			cancel()
 			writeSSENamedEvent(w, "return", nil)
 			flusher.Flush()
 			return
@@ -395,6 +405,7 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, resul
 			flusher.Flush()
 		case item := <-recvCh:
 			if h.writeStreamItem(ctx, w, item, call) {
+				cancel()
 				flusher.Flush()
 				return
 			}
