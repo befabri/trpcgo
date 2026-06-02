@@ -33,7 +33,8 @@ type Result struct {
 func Analyze(patterns []string, dir string) (*Result, error) {
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedTypes | packages.NeedSyntax |
-			packages.NeedTypesInfo | packages.NeedImports | packages.NeedDeps,
+			packages.NeedTypesInfo | packages.NeedImports | packages.NeedDeps |
+			packages.NeedModule,
 		Dir: dir,
 	}
 
@@ -71,7 +72,45 @@ func Analyze(patterns []string, dir string) (*Result, error) {
 		extractTypeInfo(pkg, metas)
 	}
 
+	// Type metadata for types defined in sibling packages (e.g. an API response
+	// field typed repository.VideoStatus) lives outside the matched patterns, so
+	// the loop above never sees it. Walk the same-module import closure and
+	// collect it too; otherwise such fields lose const unions, aliases, and
+	// comments.
+	extractImportedTypeInfo(pkgs, metas)
+
 	return &Result{Procedures: procedures, TypeMetas: metas}, nil
+}
+
+// extractImportedTypeInfo registers metadata for types defined in packages
+// imported by the matched ones. The traversal is gated to the root packages'
+// own module: standard-library and third-party enum types (e.g. time.Duration,
+// whose Nanosecond…Hour are typed constants) are deliberately left alone so
+// dependency internals never leak in as unions. Collection is keyed by type, and
+// registerUnion/registerAlias run lazily during conversion, so only types
+// actually referenced by a procedure's input or output reach the generated
+// output.
+func extractImportedTypeInfo(pkgs []*packages.Package, metas map[string]typemap.TypeMeta) {
+	rootModules := make(map[string]bool)
+	rootPkgs := make(map[*packages.Package]bool)
+	for _, pkg := range pkgs {
+		rootPkgs[pkg] = true
+		if pkg.Module != nil && pkg.Module.Path != "" {
+			rootModules[pkg.Module.Path] = true
+		}
+	}
+
+	packages.Visit(pkgs, func(pkg *packages.Package) bool {
+		if rootPkgs[pkg] {
+			return true
+		}
+		if pkg.Module == nil || pkg.Module.Path == "" || !rootModules[pkg.Module.Path] {
+			return false
+		}
+		extractConstGroups(pkg, metas)
+		extractTypeInfo(pkg, metas)
+		return true
+	}, nil)
 }
 
 // extractConstGroups scans const declarations and groups constants by their named type.

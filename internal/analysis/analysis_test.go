@@ -292,6 +292,72 @@ func TestAnalyzeEnhanced(t *testing.T) {
 	})
 }
 
+func TestAnalyzeCrossPackageEnums(t *testing.T) {
+	// Scanning "." matches only the root crosspkg package, not crosspkg/domain.
+	// The Status enum lives in domain and is reachable only through the import
+	// closure, exercising cross-package const discovery.
+	dir := testdataDir("crosspkg")
+	result, err := analysis.Analyze([]string{"."}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("imported enum becomes a const group in declaration order", func(t *testing.T) {
+		meta, ok := result.TypeMetas["example.com/crosspkg/domain.Status"]
+		if !ok {
+			t.Fatal("no metadata for domain.Status — cross-package const group not discovered")
+		}
+		want := []string{`"PENDING"`, `"RUNNING"`, `"DONE"`, `"FAILED"`}
+		if len(meta.ConstValues) != len(want) {
+			t.Fatalf("Status const values = %v, want %v", meta.ConstValues, want)
+		}
+		for i := range want {
+			if meta.ConstValues[i] != want[i] {
+				t.Errorf("const[%d] = %s, want %s (source order must be preserved)", i, meta.ConstValues[i], want[i])
+			}
+		}
+		if !strings.Contains(meta.Comment, "Status is a recording status.") {
+			t.Errorf("Status comment = %q, want imported type comment", meta.Comment)
+		}
+	})
+
+	t.Run("transitive imported enum becomes a const group", func(t *testing.T) {
+		meta, ok := result.TypeMetas["example.com/crosspkg/workflow.Phase"]
+		if !ok {
+			t.Fatal("no metadata for workflow.Phase — transitive const group not discovered")
+		}
+		want := []string{`"queued"`, `"processing"`, `"completed"`}
+		if len(meta.ConstValues) != len(want) {
+			t.Fatalf("Phase const values = %v, want %v", meta.ConstValues, want)
+		}
+		for i := range want {
+			if meta.ConstValues[i] != want[i] {
+				t.Errorf("const[%d] = %s, want %s", i, meta.ConstValues[i], want[i])
+			}
+		}
+	})
+
+	t.Run("same-package enum still works", func(t *testing.T) {
+		meta, ok := findMeta(result.TypeMetas, "Role")
+		if !ok {
+			t.Fatal("no metadata for Role")
+		}
+		if len(meta.ConstValues) != 3 {
+			t.Errorf("Role const values = %v, want 3", meta.ConstValues)
+		}
+	})
+
+	t.Run("stdlib enum is not pulled in", func(t *testing.T) {
+		// time.Duration's Nanosecond…Hour are typed constants. The same-module
+		// gate must keep it out, so a time.Duration field stays a number rather
+		// than collapsing into a giant numeric union.
+		meta, ok := findMeta(result.TypeMetas, "Duration")
+		if ok && len(meta.ConstValues) > 0 {
+			t.Errorf("time.Duration leaked a const group: %v", meta.ConstValues)
+		}
+	})
+}
+
 func TestAnalyzeOutputParser(t *testing.T) {
 	dir := testdataDir("outputparser")
 	result, err := analysis.Analyze([]string{"."}, dir)

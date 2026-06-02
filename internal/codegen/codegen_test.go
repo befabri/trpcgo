@@ -62,6 +62,59 @@ func TestGenerateFromBasicFixture(t *testing.T) {
 	}
 }
 
+// TestGenerateCrossPackageEnum is the end-to-end guard for cross-package const
+// discovery. The crosspkg fixture's response references an enum declared in an
+// imported, non-scanned package (domain.Status). Before the fix that field
+// generated as `status: string` with no Status union; this asserts the fixed
+// behavior at the generated-output layer, where the bug actually surfaced.
+func TestGenerateCrossPackageEnum(t *testing.T) {
+	output := generateFromFixture(t, "crosspkg")
+
+	t.Run("imported enum emits a union referenced by the field", func(t *testing.T) {
+		if !strings.Contains(output, `export type Status = "PENDING" | "RUNNING" | "DONE" | "FAILED";`) {
+			t.Errorf("missing cross-package Status union\n%s", output)
+		}
+		if !containsLine(output, "status: Status;") {
+			t.Errorf("status field should reference the Status union\n%s", output)
+		}
+		if containsLine(output, "status: string;") {
+			t.Errorf("status field collapsed to string — cross-package enum not discovered\n%s", output)
+		}
+	})
+
+	t.Run("same-package enum still emits a union", func(t *testing.T) {
+		if !strings.Contains(output, `export type Role = "viewer" | "admin" | "owner";`) {
+			t.Errorf("missing same-package Role union\n%s", output)
+		}
+		if !containsLine(output, "role: Role;") {
+			t.Errorf("role field should reference the Role union\n%s", output)
+		}
+	})
+
+	t.Run("transitive imported enum emits a union", func(t *testing.T) {
+		if !strings.Contains(output, `export type Phase = "queued" | "processing" | "completed";`) {
+			t.Errorf("missing transitive Phase union\n%s", output)
+		}
+		if !containsLine(output, "phase: Phase;") {
+			t.Errorf("phase field should reference the Phase union\n%s", output)
+		}
+		if containsLine(output, "phase: string;") {
+			t.Errorf("phase field collapsed to string — transitive enum not discovered\n%s", output)
+		}
+	})
+
+	t.Run("stdlib enum stays a primitive", func(t *testing.T) {
+		// time.Duration must not become a numeric union; the same-module gate
+		// keeps dependency enums out.
+		if !containsLine(output, "timeout: number;") {
+			t.Errorf("time.Duration field should stay number\n%s", output)
+		}
+		if strings.Contains(output, "export type Duration =") {
+			t.Errorf("time.Duration leaked a union into output\n%s", output)
+		}
+	})
+}
+
 func TestGenerateEnhanced(t *testing.T) {
 	output := generateFromFixture(t, "enhanced")
 
