@@ -91,6 +91,8 @@ trpcgo.WithWatchPackages("./cmd/api", "./internal/...")
 | aliases and defined basic types | Yes | Limited |
 | source-level typed output parser discovery | Yes | Registered typed parsers only |
 
+Const groups generate unions for reachable named types declared in the analyzed packages or other packages in the same Go module. Standard-library and third-party constants are ignored, so types like `time.Duration` still generate as their normal primitive TypeScript shape.
+
 Use the CLI for generated files committed or built in CI. Use dev watch for a fast local feedback loop.
 
 ## Generated TypeScript Shape
