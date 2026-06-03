@@ -18,6 +18,7 @@ If no package patterns are supplied, the CLI analyzes `.`.
 | `-w`, `-watch` | Watch Go files and regenerate on changes. |
 | `-zod` | Write generated Zod 4 schemas to a file. |
 | `-zod-mini` | Generate schemas using `zod/mini` functional syntax. |
+| `-enums` | Write runtime enum value objects to a file. |
 
 ## Examples
 
@@ -31,6 +32,12 @@ Generate TypeScript router types and Zod schemas:
 
 ```bash
 go tool trpcgo generate -o web/gen/trpc.ts --zod web/gen/zod.ts ./...
+```
+
+Generate runtime enum value objects:
+
+```bash
+go tool trpcgo generate -o web/gen/trpc.ts --enums web/gen/enums.ts ./...
 ```
 
 Generate from another working directory:
@@ -68,7 +75,7 @@ The CLI creates output files with `os.Create`. Create parent directories first:
 
 ```bash
 mkdir -p web/gen
-go tool trpcgo generate -o web/gen/trpc.ts --zod web/gen/zod.ts ./...
+go tool trpcgo generate -o web/gen/trpc.ts --zod web/gen/zod.ts --enums web/gen/enums.ts ./...
 ```
 
 Runtime dev generation creates missing parent directories automatically.

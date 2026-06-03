@@ -127,6 +127,7 @@ The returned context still cancels when the original request context cancels.
 | `WithTypeOutput(path)` | Writes generated TypeScript in dev mode. |
 | `WithZodOutput(path)` | Writes generated Zod schemas in dev mode. |
 | `WithZodMini(bool)` | Uses `zod/mini` functional syntax. |
+| `WithEnumsOutput(path)` | Writes runtime enum value objects in dev mode. |
 | `WithWatchPackages(patterns...)` | Restricts dev watcher analysis to package patterns like `./cmd/api` or `./internal/...`. |
 
 Dev generation starts when `trpc.NewHandler` is constructed and `WithDev(true)` plus `WithTypeOutput(...)` are set.

@@ -6,6 +6,30 @@ import (
 	"testing"
 )
 
+func TestIsStringUnion(t *testing.T) {
+	cases := []struct {
+		name string
+		def  TypeDef
+		want bool
+	}{
+		{"string union", TypeDef{Kind: TypeDefUnion, UnionMembers: []string{`"a"`, `"b"`}}, true},
+		{"single string union", TypeDef{Kind: TypeDefUnion, UnionMembers: []string{`"only"`}}, true},
+		{"numeric union", TypeDef{Kind: TypeDefUnion, UnionMembers: []string{"1", "2"}}, false},
+		{"negative numeric union", TypeDef{Kind: TypeDefUnion, UnionMembers: []string{"-1", "0"}}, false},
+		{"empty union", TypeDef{Kind: TypeDefUnion, UnionMembers: nil}, false},
+		{"interface", TypeDef{Kind: TypeDefInterface}, false},
+		{"alias", TypeDef{Kind: TypeDefAlias, AliasOf: "string"}, false},
+		{"non-union with stray members", TypeDef{Kind: TypeDefInterface, UnionMembers: []string{`"a"`}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.def.IsStringUnion(); got != tc.want {
+				t.Errorf("IsStringUnion() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCollectFieldsEmbeddedExtendsAndFlattening(t *testing.T) {
 	m := NewMapper(nil)
 	pkg := types.NewPackage("example.com/app", "app")

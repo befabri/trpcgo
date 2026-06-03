@@ -268,11 +268,8 @@ func writeZodMeta(w io.Writer, def typemap.TypeDef, style typemap.ZodStyle) {
 func writeZodEnum(w io.Writer, def typemap.TypeDef, style typemap.ZodStyle) {
 	schemaName := def.Name + "Schema"
 
-	// z.enum() only accepts string literals. For non-string unions (integers),
-	// emit z.union([z.literal(1), z.literal(2), ...]) instead.
-	// We check the first member: Go const groups are homogeneous, so all
-	// members share the same underlying type (all strings or all ints).
-	if len(def.UnionMembers) > 0 && !strings.HasPrefix(def.UnionMembers[0], `"`) {
+	// z.enum() only accepts string literals.
+	if len(def.UnionMembers) > 0 && !def.IsStringUnion() {
 		literals := make([]string, len(def.UnionMembers))
 		for i, m := range def.UnionMembers {
 			literals[i] = "z.literal(" + m + ")"

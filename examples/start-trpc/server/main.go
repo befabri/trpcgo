@@ -1,4 +1,4 @@
-//go:generate go tool trpcgo generate -o ../web/gen/trpc.ts --zod ../web/gen/zod.ts
+//go:generate go tool trpcgo generate -o ../web/gen/trpc.ts --zod ../web/gen/zod.ts --enums ../web/gen/enums.ts
 
 package main
 
@@ -365,6 +365,7 @@ func main() {
 		trpcgo.WithValidator(validate.Struct),
 		trpcgo.WithTypeOutput("../web/gen/trpc.ts"),
 		trpcgo.WithZodOutput("../web/gen/zod.ts"),
+		trpcgo.WithEnumsOutput("../web/gen/enums.ts"),
 		trpcgo.WithSSEPingInterval(5*time.Second),
 		trpcgo.WithSSEMaxDuration(10*time.Minute),
 		trpcgo.WithSSEReconnectAfterInactivity(30*time.Second),

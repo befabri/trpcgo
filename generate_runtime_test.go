@@ -1,13 +1,17 @@
 package trpcgo_test
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/befabri/trpcgo"
+	"github.com/befabri/trpcgo/internal/codegen"
+	"github.com/befabri/trpcgo/internal/typemap"
 )
 
 func TestGenerateTSTsc(t *testing.T) {
@@ -82,6 +86,66 @@ func TestGenerateTSTsc(t *testing.T) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("tsc compilation failed:\n%s", string(output))
+	}
+}
+
+func TestGenerateEnumsTsc(t *testing.T) {
+	tscPath := filepath.Join("examples", "start-trpc", "web", "node_modules", ".bin", "tsc")
+	if _, err := os.Stat(tscPath); err != nil {
+		var lookupErr error
+		tscPath, lookupErr = exec.LookPath("tsc")
+		if lookupErr != nil {
+			t.Skip("tsc not available, skipping TypeScript compilation check")
+		}
+	}
+
+	// Covers awkward enum values that still need to compile as TypeScript.
+	defs := []typemap.TypeDef{
+		{Name: "Role", Kind: typemap.TypeDefUnion, UnionMembers: []string{`"viewer"`, `"admin"`}},
+		{Name: "Word", Kind: typemap.TypeDefUnion, UnionMembers: []string{`"default"`, `"in"`, `"class"`}},
+		{Name: "Weird", Kind: typemap.TypeDefUnion, UnionMembers: []string{`"3d"`, `"a.b"`, `"a-b"`, `""`, `"__proto__"`}},
+		{Name: "Escaped", Kind: typemap.TypeDefUnion, UnionMembers: []string{`"a\"b"`, `"c\\d"`, `"e\tf"`}},
+		{Name: "Dup", Kind: typemap.TypeDefUnion, UnionMembers: []string{`"x"`, `"x"`, `"y"`}},
+		{Name: "Priority", Kind: typemap.TypeDefUnion, UnionMembers: []string{"1", "2"}},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteEnums(&buf, defs); err != nil {
+		t.Fatal(err)
+	}
+	enumsTS := buf.String()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "enums.ts"), []byte(enumsTS), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	symlinkNodeModules(t, dir)
+	tsconfig := `{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true
+  },
+  "include": ["enums.ts"]
+}`
+	if err := os.WriteFile(filepath.Join(dir, "tsconfig.json"), []byte(tsconfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(tscPath, "--noEmit", "--project", dir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tsc compilation failed:\n%s\n\nGenerated enums.ts:\n%s", string(output), enumsTS)
+	}
+
+	if strings.Contains(enumsTS, "PriorityEnum") {
+		t.Errorf("numeric union should be skipped:\n%s", enumsTS)
+	}
+	if n := strings.Count(enumsTS, `x: "x"`); n != 1 {
+		t.Errorf("duplicate value should dedup to one key, found %d:\n%s", n, enumsTS)
 	}
 }
 

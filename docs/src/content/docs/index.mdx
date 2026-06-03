@@ -5,7 +5,7 @@ description: Build Go (Golang) APIs that work with @trpc/client, React Query, an
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-trpcgo lets you keep your API server in Go while giving frontend teams the TypeScript tRPC workflow: typed procedure calls, generated `AppRouter` contracts, and Zod schemas from Go structs.
+trpcgo keeps your API server in Go and gives frontend teams typed tRPC calls, generated `AppRouter` contracts, Zod schemas, and runtime enum values.
 Your Go handlers and structs are the source of truth. trpcgo serves them over the tRPC HTTP protocol so `@trpc/client`, `@trpc/react-query`, and `@trpc/tanstack-react-query` can consume them without a TypeScript API server.
 
 ## Why Use It
@@ -24,7 +24,7 @@ Your Go handlers and structs are the source of truth. trpcgo serves them over th
 		Serve procedures from a `net/http` handler with batching, SSE, middleware, and error formatting.
 	</Card>
 	<Card title="Source analysis" icon="open-book">
-		Use `trpcgo generate` to preserve comments, const unions, aliases, generics, and validation metadata.
+		Use `trpcgo generate` to preserve comments, const unions, runtime enum values, aliases, generics, and validation metadata.
 	</Card>
 	<Card title="Dev watch" icon="rocket">
 		In dev mode, regenerate frontend files on Go file changes without restarting the server.
@@ -40,6 +40,7 @@ router := trpcgo.NewRouter(
     trpcgo.WithValidator(validate.Struct),
     trpcgo.WithTypeOutput("../web/gen/trpc.ts"),
     trpcgo.WithZodOutput("../web/gen/zod.ts"),
+    trpcgo.WithEnumsOutput("../web/gen/enums.ts"),
 )
 defer router.Close()
 

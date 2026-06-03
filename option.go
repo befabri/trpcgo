@@ -30,6 +30,7 @@ type routerOptions struct {
 	sseReconnectAfterInactivityMs int
 	typeOutput                    string
 	zodOutput                     string
+	enumsOutput                   string
 	zodMini                       bool
 	watchPackages                 []string
 }
@@ -224,6 +225,14 @@ func WithZodOutput(path string) Option {
 func WithZodMini(enabled bool) Option {
 	return func(o *routerOptions) {
 		o.zodMini = enabled
+	}
+}
+
+// WithEnumsOutput writes runtime `as const` objects for named string enums in
+// dev mode. Requires WithTypeOutput and static analysis.
+func WithEnumsOutput(path string) Option {
+	return func(o *routerOptions) {
+		o.enumsOutput = path
 	}
 }
 

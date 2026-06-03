@@ -23,8 +23,18 @@ type generateOptions struct {
 	output   string
 	zod      string
 	zodMini  bool
+	enums    string
 	stdout   io.Writer
 	stderr   io.Writer
+}
+
+type outputFile interface {
+	io.Writer
+	Close() error
+}
+
+var createOutputFile = func(path string) (outputFile, error) {
+	return os.Create(path)
 }
 
 var (
@@ -73,6 +83,7 @@ func runGenerate(args []string, stdout, stderr io.Writer) error {
 	fs.BoolVar(watch, "w", false, "watch Go files and regenerate on change")
 	zodOutput := fs.String("zod", "", "output path for Zod 4 validation schemas")
 	zodMini := fs.Bool("zod-mini", false, "generate zod/mini functional syntax")
+	enumsOutput := fs.String("enums", "", "output path for runtime enum value objects")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -91,6 +102,7 @@ func runGenerate(args []string, stdout, stderr io.Writer) error {
 		output:   *output,
 		zod:      *zodOutput,
 		zodMini:  *zodMini,
+		enums:    *enumsOutput,
 		stdout:   stdout,
 		stderr:   stderr,
 	}
@@ -192,9 +204,9 @@ func generate(opts generateOptions) (err error) {
 
 	var w io.Writer
 	if opts.output != "" {
-		f, err := os.Create(opts.output)
-		if err != nil {
-			return fmt.Errorf("creating output file: %w", err)
+		f, openErr := createOutputFile(opts.output)
+		if openErr != nil {
+			return fmt.Errorf("creating output file: %w", openErr)
 		}
 		w = f
 		defer func() {
@@ -218,9 +230,9 @@ func generate(opts generateOptions) (err error) {
 			style = typemap.ZodMini
 		}
 
-		zodFile, err := os.Create(opts.zod)
-		if err != nil {
-			return fmt.Errorf("creating zod output file: %w", err)
+		zodFile, openErr := createOutputFile(opts.zod)
+		if openErr != nil {
+			return fmt.Errorf("creating zod output file: %w", openErr)
 		}
 		defer func() {
 			if cerr := zodFile.Close(); cerr != nil && err == nil {
@@ -230,6 +242,22 @@ func generate(opts generateOptions) (err error) {
 
 		if err := codegen.WriteZodSchemas(zodFile, genResult.Procs, genResult.Defs, style); err != nil {
 			return fmt.Errorf("writing zod schemas: %w", err)
+		}
+	}
+
+	if opts.enums != "" && genResult != nil {
+		enumsFile, openErr := createOutputFile(opts.enums)
+		if openErr != nil {
+			return fmt.Errorf("creating enums output file: %w", openErr)
+		}
+		defer func() {
+			if cerr := enumsFile.Close(); cerr != nil && err == nil {
+				err = fmt.Errorf("closing enums output file: %w", cerr)
+			}
+		}()
+
+		if err := codegen.WriteEnums(enumsFile, genResult.Defs); err != nil {
+			return fmt.Errorf("writing enum values: %w", err)
 		}
 	}
 

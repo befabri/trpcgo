@@ -17,11 +17,12 @@ import (
 
 // watchOpts holds resolved paths for the watcher goroutine.
 type watchOpts struct {
-	dir       string
-	patterns  []string
-	output    string
-	zodOutput string
-	zodStyle  typemap.ZodStyle
+	dir         string
+	patterns    []string
+	output      string
+	zodOutput   string
+	enumsOutput string
+	zodStyle    typemap.ZodStyle
 }
 
 type watcherConfig struct {
@@ -70,11 +71,12 @@ func (r *Router) newWatcherConfig() (watcherConfig, error) {
 		done:            r.done,
 		handleDirCreate: handleDirCreate,
 		opts: watchOpts{
-			dir:       cwd,
-			patterns:  patterns,
-			output:    absPath(r.opts.typeOutput),
-			zodOutput: absPath(r.opts.zodOutput),
-			zodStyle:  r.zodStyle(),
+			dir:         cwd,
+			patterns:    patterns,
+			output:      absPath(r.opts.typeOutput),
+			zodOutput:   absPath(r.opts.zodOutput),
+			enumsOutput: absPath(r.opts.enumsOutput),
+			zodStyle:    r.zodStyle(),
 		},
 	}, nil
 }
@@ -219,6 +221,15 @@ func regenerateFromSource(opts watchOpts) {
 		} else {
 			writeIfChanged(opts.zodOutput, zodBuf.Bytes(), "zod schemas")
 		}
+	}
+
+	if opts.enumsOutput != "" && genResult != nil {
+		var enumsBuf bytes.Buffer
+		if err := codegen.WriteEnums(&enumsBuf, genResult.Defs); err != nil {
+			log.Printf("trpcgo: enums codegen failed: %v", err)
+			return
+		}
+		writeIfChanged(opts.enumsOutput, enumsBuf.Bytes(), "enum values")
 	}
 }
 

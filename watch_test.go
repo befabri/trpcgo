@@ -118,6 +118,7 @@ func TestNewWatcherConfigResolvesOutputsAndZodStyle(t *testing.T) {
 	r := NewRouter(
 		WithTypeOutput(filepath.Join("gen", "router.ts")),
 		WithZodOutput(filepath.Join("gen", "schemas.ts")),
+		WithEnumsOutput(filepath.Join("gen", "enums.ts")),
 		WithZodMini(true),
 	)
 	cfg, err := r.newWatcherConfig()
@@ -125,6 +126,10 @@ func TestNewWatcherConfigResolvesOutputsAndZodStyle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = cfg.watcher.Close() }()
+
+	if want := filepath.Join(dir, "gen", "enums.ts"); cfg.opts.enumsOutput != want {
+		t.Fatalf("enums output = %q, want %q", cfg.opts.enumsOutput, want)
+	}
 
 	if cfg.opts.dir != dir {
 		t.Fatalf("watch dir = %q, want %q", cfg.opts.dir, dir)
@@ -319,6 +324,85 @@ func TestRegenerateFromSourceWritesMiniZodWithTypedInputs(t *testing.T) {
 		if !strings.Contains(string(zodData), want) {
 			t.Fatalf("zod output missing %q:\n%s", want, string(zodData))
 		}
+	}
+}
+
+func TestRegenerateFromSourceWritesEnums(t *testing.T) {
+	dir := t.TempDir()
+	typesOut := filepath.Join(dir, "router.ts")
+	enumsOut := filepath.Join(dir, "enums.ts")
+
+	regenerateFromSource(watchOpts{
+		dir:         watchAnalysisFixtureDir(t, "crosspkg"),
+		patterns:    []string{"."},
+		output:      typesOut,
+		enumsOutput: enumsOut,
+	})
+
+	enumsData, err := os.ReadFile(enumsOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enums := string(enumsData)
+	for _, want := range []string{
+		"export const RoleEnum = {",
+		`viewer: "viewer",`,
+		"export const StatusEnum = {",
+		"} as const;",
+	} {
+		if !strings.Contains(enums, want) {
+			t.Fatalf("enums output missing %q:\n%s", want, enums)
+		}
+	}
+
+	if strings.Contains(enums, "DurationEnum") {
+		t.Fatalf("stdlib Duration leaked an enum object:\n%s", enums)
+	}
+
+	typesData, err := os.ReadFile(typesOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(typesData), "export const") {
+		t.Fatalf("runtime const leaked into the type-only file:\n%s", string(typesData))
+	}
+}
+
+func TestRegenerateFromSourceEnumsHeaderOnlyWhenNoEnums(t *testing.T) {
+	dir := t.TempDir()
+	typesOut := filepath.Join(dir, "router.ts")
+	enumsOut := filepath.Join(dir, "enums.ts")
+
+	regenerateFromSource(watchOpts{
+		dir:         watchAnalysisFixtureDir(t, "basic"),
+		patterns:    []string{"."},
+		output:      typesOut,
+		enumsOutput: enumsOut,
+	})
+
+	data, err := os.ReadFile(enumsOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "export const") {
+		t.Fatalf("basic fixture has no enums; file should be header-only:\n%s", string(data))
+	}
+}
+
+func TestRegenerateFromSourceSkipsEnumsWhenOutputUnset(t *testing.T) {
+	dir := t.TempDir()
+	typesOut := filepath.Join(dir, "router.ts")
+	enumsOut := filepath.Join(dir, "enums.ts")
+
+	regenerateFromSource(watchOpts{
+		dir:      watchAnalysisFixtureDir(t, "crosspkg"),
+		patterns: []string{"."},
+		output:   typesOut,
+		// enumsOutput intentionally unset
+	})
+
+	if _, err := os.Stat(enumsOut); !os.IsNotExist(err) {
+		t.Fatalf("enums file should not be written when output unset, stat err = %v", err)
 	}
 }
 

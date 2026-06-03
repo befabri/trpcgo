@@ -422,6 +422,7 @@ trpcgo generate [flags] [packages]
 | `-w, --watch` | Watch Go files, regenerate on change |
 | `--zod` | Zod schema output file |
 | `--zod-mini` | Use `zod/mini` functional syntax |
+| `--enums` | Runtime enum value object output file |
 
 ### With `go:generate`
 
@@ -441,7 +442,7 @@ go tool trpcgo generate -o ../web/gen/trpc.ts --zod ../web/gen/zod.ts -w
 
 ### Runtime watch (zero config)
 
-When you set `WithDev(true)` with `WithTypeOutput` (and optionally `WithZodOutput`) on the router, `trpc.NewHandler` starts a file watcher automatically. Save a `.go` file anywhere in the project tree and types regenerate instantly, no separate process needed. Call `router.Close()` to stop the watcher on shutdown.
+When you set `WithDev(true)` with `WithTypeOutput` (and optionally `WithZodOutput` or `WithEnumsOutput`) on the router, `trpc.NewHandler` starts a file watcher automatically. Save a `.go` file anywhere in the project tree and types regenerate instantly, no separate process needed. Call `router.Close()` to stop the watcher on shutdown.
 
 Use `WithWatchPackages` to restrict watching to specific packages (go/packages patterns) — useful in monorepos to avoid watching unrelated directories like frontend build output.
 

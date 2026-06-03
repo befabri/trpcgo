@@ -34,6 +34,11 @@ type TypeDef struct {
 	AliasOf      string       // Kind == TypeDefAlias (e.g., "string")
 }
 
+// IsStringUnion reports whether this is a non-empty string-literal union.
+func (d TypeDef) IsStringUnion() bool {
+	return d.Kind == TypeDefUnion && len(d.UnionMembers) > 0 && strings.HasPrefix(d.UnionMembers[0], `"`)
+}
+
 // Refinement represents a cross-field validation constraint emitted as .refine().
 type Refinement struct {
 	Field      string // JSON name of the constrained field
