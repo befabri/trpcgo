@@ -27,7 +27,7 @@ export default defineConfig({
 				{
 					label: 'Start',
 					items: [
-						{ label: 'Overview', link: '/' },
+						{ label: 'Overview', link: '/docs/' },
 						{ label: 'Core Concepts', slug: 'concepts' },
 						{ label: 'Install', slug: 'install' },
 						{ label: 'Quick Start', slug: 'quick-start' },
