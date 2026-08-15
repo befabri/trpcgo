@@ -8,7 +8,9 @@ import enumsTs from "../_snippets/enums.ts?raw";
 import clientTs from "../_snippets/client.ts?raw";
 import routerGo from "../_snippets/router.go?raw";
 
-const themes = { light: "night-owl-light", dark: "night-owl" } as const;
+// Dark entry only: the landing is dark-only, so a light theme would emit
+// --shiki-light custom properties that nothing reads.
+const themes = { dark: "night-owl" } as const;
 const githubUrl = "https://github.com/befabri/trpcgo";
 const installCommand = "go get github.com/befabri/trpcgo@latest";
 const pageTitle = "Go Backend for tRPC TypeScript Clients";
@@ -26,8 +28,7 @@ const ogImageAlt = "trpcgo — Go on the server. tRPC on the client.";
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width" />
         <meta name="description" content={description} />
-        <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
-        <meta name="theme-color" content="#17181c" media="(prefers-color-scheme: dark)" />
+        <meta name="theme-color" content="#17181c" />
         <meta property="og:title" content={pageTitle} />
         <meta property="og:description" content={description} />
         <meta property="og:type" content="website" />
@@ -43,16 +44,6 @@ const ogImageAlt = "trpcgo — Go on the server. tRPC on the client.";
         <link rel="canonical" href={Astro.site} />
         <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
         <title>{pageTitle} | {siteTitle}</title>
-        <script is:inline>
-            const storedTheme = localStorage.getItem("starlight-theme");
-            const theme =
-                storedTheme === "light" || storedTheme === "dark"
-                    ? storedTheme
-                    : matchMedia("(prefers-color-scheme: light)").matches
-                      ? "light"
-                      : "dark";
-            document.documentElement.dataset.theme = theme;
-        </script>
     </head>
     <body>
         <header class="site-header">
@@ -331,6 +322,8 @@ const ogImageAlt = "trpcgo — Go on the server. tRPC on the client.";
             sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
         color: hsl(224, 6%, 77%);
         background: hsl(224, 10%, 10%);
+        /* The landing is dark-only; the docs keep Starlight's theme switcher. */
+        color-scheme: dark;
         font-synthesis: none;
         --background: hsl(224, 10%, 10%);
         --heading: hsl(0, 0%, 100%);
@@ -714,11 +707,6 @@ const ogImageAlt = "trpcgo — Go on the server. tRPC on the client.";
         color: var(--shiki-dark);
     }
 
-    :root[data-theme="light"] .astro-code,
-    :root[data-theme="light"] .astro-code span {
-        color: var(--shiki-light);
-    }
-
     /* Capabilities */
 
     .capabilities {
@@ -878,25 +866,4 @@ const ogImageAlt = "trpcgo — Go on the server. tRPC on the client.";
         }
     }
 
-    :root[data-theme="light"] {
-        color: hsl(224, 10%, 23%);
-        background: hsl(0, 0%, 100%);
-        --background: hsl(0, 0%, 100%);
-        --heading: hsl(224, 10%, 10%);
-        --text: hsl(224, 10%, 23%);
-        --muted: hsl(224, 7%, 36%);
-        --line: hsl(224, 20%, 94%);
-        --line-light: hsl(224, 6%, 77%);
-        --accent: hsl(234, 90%, 60%);
-        --accent-text: hsl(0, 0%, 100%);
-        --inline-code: hsl(224, 20%, 94%);
-        --code: #f6f7f9;
-        --code-border: hsl(224, 6%, 77%);
-        --code-text: #403f53;
-        --success: hsl(150, 60%, 30%);
-    }
-
-    :root[data-theme="light"] .button.primary:hover {
-        background: hsl(234, 90%, 52%);
-    }
 </style>
