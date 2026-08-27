@@ -9,17 +9,34 @@ on:
 permissions:
   contents: read
 
+env:
+  # Never auto-download a different toolchain: each job must run on exactly
+  # the Go version it set up, or fail loudly.
+  GOTOOLCHAIN: local
+
 jobs:
   test:
-    name: Test
+    name: Test (${{ matrix.go }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # go.mod: the minimum version the module promises to support. Only a
+        #         go.mod bump can change what this leg runs.
+        # stable: the newest Go release, so a toolchain change that breaks the
+        #         library (e.g. a stdlib type becoming an alias) surfaces here
+        #         first instead of in a user's build.
+        go: ['go.mod', 'stable']
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
+          go-version: ${{ matrix.go == 'stable' && 'stable' || '' }}
+          go-version-file: ${{ matrix.go == 'go.mod' && 'go.mod' || '' }}
+
+      - run: go version
 
       - uses: actions/setup-node@v5
         with:
@@ -41,9 +58,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Lint on the go.mod floor so a new Go release cannot break this job;
+      # bumping go.mod is the moment to check staticcheck compatibility.
       - uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
+          go-version-file: go.mod
 
       - run: go vet ./...
       - run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.1 && staticcheck ./...
