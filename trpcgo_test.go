@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -154,9 +156,5 @@ func errorData(t *testing.T, envelope map[string]any) map[string]any {
 }
 
 func keys(m map[string]any) []string {
-	ks := make([]string, 0, len(m))
-	for k := range m {
-		ks = append(ks, k)
-	}
-	return ks
+	return slices.Collect(maps.Keys(m))
 }

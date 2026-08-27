@@ -88,7 +88,7 @@ func TestExprTypeFallbacks(t *testing.T) {
 	info := &types.Info{
 		Types: map[ast.Expr]types.TypeAndValue{fromTypes: {Type: basic}},
 		Uses: map[*ast.Ident]types.Object{
-			fromIdent:       types.NewVar(token.NoPos, nil, "fromIdent", types.Typ[types.Int]),
+			fromIdent:        types.NewVar(token.NoPos, nil, "fromIdent", types.Typ[types.Int]),
 			fromSelector.Sel: types.NewVar(token.NoPos, nil, "Value", types.Typ[types.Bool]),
 		},
 	}

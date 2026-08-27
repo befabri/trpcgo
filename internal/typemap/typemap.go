@@ -1,10 +1,11 @@
 package typemap
 
 import (
+	"cmp"
 	"fmt"
 	"go/types"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -134,27 +135,26 @@ func ResolveTokens(s string, display map[string]string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for {
-		start := strings.Index(s, TokenDelim)
-		if start < 0 {
+		before, rest, ok := strings.Cut(s, TokenDelim)
+		if !ok {
 			b.WriteString(s)
 			break
 		}
-		b.WriteString(s[:start])
-		s = s[start+len(TokenDelim):]
-		end := strings.Index(s, TokenDelim)
-		if end < 0 {
+		b.WriteString(before)
+		id, after, ok := strings.Cut(rest, TokenDelim)
+		if !ok {
 			// Malformed token — write delimiter and continue.
 			b.WriteString(TokenDelim)
+			s = rest
 			continue
 		}
-		id := s[:end]
 		if name, ok := display[id]; ok {
 			b.WriteString(name)
 		} else {
 			// Unknown token — keep as-is for debugging.
 			b.WriteString(id)
 		}
-		s = s[end+len(TokenDelim):]
+		s = after
 	}
 	return b.String()
 }
@@ -234,8 +234,8 @@ func (m *Mapper) Defs() []TypeDef {
 		}
 		result = append(result, d)
 	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Name < result[j].Name
+	slices.SortFunc(result, func(a, b TypeDef) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 	return result
 }
@@ -467,7 +467,7 @@ func pkgName(obj types.Object) string {
 }
 
 func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, extends *[]string, fieldComments map[int]string) {
-	for i := 0; i < st.NumFields(); i++ {
+	for i := range st.NumFields() {
 		field := st.Field(i)
 		tag := st.Tag(i)
 		jsonName, omitempty, skip := ParseJSONTag(tag)
@@ -602,7 +602,7 @@ func fieldComment(tag string, comments map[int]string, index int) string {
 func extractStructRefinements(st *types.Struct, fields []Field) []Refinement {
 	// Build Go field name → JSON name map.
 	goToJSON := map[string]string{}
-	for i := 0; i < st.NumFields(); i++ {
+	for i := range st.NumFields() {
 		field := st.Field(i)
 		tag := st.Tag(i)
 		jsonName, _, skip := ParseJSONTag(tag)
@@ -659,7 +659,7 @@ func (m *Mapper) inlineStruct(st *types.Struct) string {
 		return "Record<string, never>"
 	}
 	var parts []string
-	for i := 0; i < st.NumFields(); i++ {
+	for i := range st.NumFields() {
 		field := st.Field(i)
 		if !field.Exported() {
 			continue
@@ -708,9 +708,8 @@ func ParseJSONTag(rawTag string) (name string, omitempty bool, skip bool) {
 	if jsonTag == "-" {
 		return "", false, true
 	}
-	parts := strings.Split(jsonTag, ",")
-	name = parts[0]
-	for _, p := range parts[1:] {
+	name, options, _ := strings.Cut(jsonTag, ",")
+	for p := range strings.SplitSeq(options, ",") {
 		if p == "omitempty" || p == "omitzero" {
 			omitempty = true
 		}

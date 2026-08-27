@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log"
@@ -198,23 +199,14 @@ func (s *userService) ListUsers(ctx context.Context, input ListUsersInput) (Pagi
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	total := len(s.users)
-	page := input.Page
+	page := max(input.Page, 1)
 	perPage := input.PerPage
-	if page < 1 {
-		page = 1
-	}
 	if perPage < 1 {
 		perPage = 20
 	}
 
-	start := (page - 1) * perPage
-	if start > total {
-		start = total
-	}
-	end := start + perPage
-	if end > total {
-		end = total
-	}
+	start := min((page-1)*perPage, total)
+	end := min(start+perPage, total)
 
 	return PaginatedList[User]{
 		Items:   s.users[start:end],
@@ -239,10 +231,7 @@ func (s *userService) insertUser(input CreateUserInput) User {
 	s.nextID++
 	now := time.Now()
 
-	role := input.Role
-	if role == "" {
-		role = RoleViewer
-	}
+	role := cmp.Or(input.Role, RoleViewer)
 
 	user := User{
 		ID:        fmt.Sprintf("%d", s.nextID),
@@ -318,11 +307,10 @@ func (s *userService) OnUserCreated(ctx context.Context) (<-chan User, error) {
 	ch := make(chan User, 8)
 	s.addSubscriber(ch)
 
-	go func() {
-		<-ctx.Done()
+	context.AfterFunc(ctx, func() {
 		s.removeSubscriber(ch)
 		close(ch)
-	}()
+	})
 
 	return ch, nil
 }

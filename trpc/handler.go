@@ -4,6 +4,7 @@
 package trpc
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -344,10 +345,7 @@ func (h *Handler) handleStream(ctx context.Context, cancel context.CancelFunc, w
 	writeSSENamedEvent(w, "connected", connData)
 	flusher.Flush()
 
-	pingInterval := h.router.SSEPingInterval()
-	if pingInterval == 0 {
-		pingInterval = 10 * time.Second
-	}
+	pingInterval := cmp.Or(h.router.SSEPingInterval(), 10*time.Second)
 	pingTicker := time.NewTicker(pingInterval)
 	defer pingTicker.Stop()
 
@@ -435,6 +433,9 @@ func (h *Handler) writeStreamItem(ctx context.Context, w http.ResponseWriter, it
 	retry int
 	err   error
 }, call parsedRequest) bool {
+	// Recv returns bare io.EOF as the end-of-stream sentinel. errors.Is would
+	// also match a user output-hook error that wraps io.EOF and silently turn
+	// that failure into a clean return.
 	if item.err == io.EOF {
 		writeStreamReturn(w, item.data)
 		return true

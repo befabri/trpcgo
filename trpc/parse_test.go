@@ -18,8 +18,8 @@ func requireErrorCode(t *testing.T, err error, want trpcgo.ErrorCode) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	var trpcErr *trpcgo.Error
-	if !errors.As(err, &trpcErr) {
+	trpcErr, ok := errors.AsType[*trpcgo.Error](err)
+	if !ok {
 		t.Fatalf("expected *trpcgo.Error, got %T: %v", err, err)
 	}
 	if trpcErr.Code != want {

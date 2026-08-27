@@ -1,10 +1,12 @@
 package trpc
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/befabri/trpcgo"
@@ -18,7 +20,7 @@ type parsedRequest struct {
 
 // containsTraversal rejects paths that contain directory traversal segments.
 func containsTraversal(path string) bool {
-	for _, segment := range strings.Split(path, "/") {
+	for segment := range strings.SplitSeq(path, "/") {
 		if segment == "." || segment == ".." {
 			return true
 		}
@@ -46,10 +48,8 @@ func parseRequest(r *http.Request, basePath string, isBatch bool, maxBodySize in
 
 	// Batch: paths are comma-separated.
 	paths := strings.Split(rawPath, ",")
-	for _, p := range paths {
-		if containsTraversal(p) {
-			return nil, trpcgo.NewError(trpcgo.CodeBadRequest, "invalid procedure path")
-		}
+	if slices.ContainsFunc(paths, containsTraversal) {
+		return nil, trpcgo.NewError(trpcgo.CodeBadRequest, "invalid procedure path")
 	}
 	var indexedInputs map[string]json.RawMessage
 	if r.Method == http.MethodGet {
@@ -151,8 +151,8 @@ func stripBasePath(path, basePath string) (string, bool) {
 		return "", true
 	}
 	prefix := basePath + "/"
-	if strings.HasPrefix(path, prefix) {
-		return strings.TrimPrefix(path, prefix), true
+	if after, ok := strings.CutPrefix(path, prefix); ok {
+		return after, true
 	}
 	return "", false
 }
@@ -161,10 +161,8 @@ func stripBasePath(path, basePath string) (string, bool) {
 func mergeLastEventId(r *http.Request, input json.RawMessage) json.RawMessage {
 	lastEventId := r.Header.Get("Last-Event-Id")
 	if lastEventId == "" {
-		lastEventId = r.URL.Query().Get("lastEventId")
-	}
-	if lastEventId == "" {
-		lastEventId = r.URL.Query().Get("Last-Event-Id")
+		query := r.URL.Query()
+		lastEventId = cmp.Or(query.Get("lastEventId"), query.Get("Last-Event-Id"))
 	}
 	if lastEventId == "" {
 		return input

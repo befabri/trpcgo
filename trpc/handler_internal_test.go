@@ -36,8 +36,8 @@ func TestDetermineBatchStatus(t *testing.T) {
 func TestMergeContextsCarriesValuesAndCancellation(t *testing.T) {
 	type ctxKey string
 
-	cancelCtx, cancelParent := context.WithCancel(context.Background())
-	valuesCtx := context.WithValue(context.Background(), ctxKey("user"), "alice")
+	cancelCtx, cancelParent := context.WithCancel(t.Context())
+	valuesCtx := context.WithValue(t.Context(), ctxKey("user"), "alice")
 	merged, stop := mergeContexts(cancelCtx, valuesCtx)
 	defer stop()
 
@@ -54,7 +54,7 @@ func TestMergeContextsCarriesValuesAndCancellation(t *testing.T) {
 }
 
 func TestMergeContextsCancelFuncCancelsMergedContext(t *testing.T) {
-	merged, stop := mergeContexts(context.Background(), context.Background())
+	merged, stop := mergeContexts(t.Context(), t.Context())
 	stop()
 
 	select {
@@ -120,7 +120,7 @@ func TestWriteSingleResultMarshalErrorWrites500(t *testing.T) {
 	h := NewHandler(trpcgo.NewRouter(), "/trpc")
 	rec := httptest.NewRecorder()
 
-	h.writeSingleResult(context.Background(), rec, callResult{
+	h.writeSingleResult(t.Context(), rec, callResult{
 		response: trpcgo.NewResultEnvelope(func() {}),
 		status:   http.StatusOK,
 	})
@@ -137,7 +137,7 @@ func TestWriteBatchResultsMarshalErrorWrites500(t *testing.T) {
 	h := NewHandler(trpcgo.NewRouter(), "/trpc")
 	rec := httptest.NewRecorder()
 
-	h.writeBatchResults(context.Background(), rec, []callResult{
+	h.writeBatchResults(t.Context(), rec, []callResult{
 		{response: trpcgo.NewResultEnvelope("ok"), status: http.StatusOK},
 		{response: trpcgo.NewResultEnvelope(func() {}), status: http.StatusOK},
 	})
@@ -171,7 +171,7 @@ func TestWriteStreamItemReceiveErrorCallsCallbackAndFormatsSSE(t *testing.T) {
 	rec := httptest.NewRecorder()
 	cause := errors.New("backend stream failed")
 
-	closed := h.writeStreamItem(context.Background(), rec, struct {
+	closed := h.writeStreamItem(t.Context(), rec, struct {
 		data  any
 		id    string
 		retry int
@@ -211,7 +211,7 @@ func TestWriteStreamItemSerializationErrorCallsCallbackAndFormatsSSE(t *testing.
 	h := NewHandler(r, "/trpc")
 	rec := httptest.NewRecorder()
 
-	closed := h.writeStreamItem(context.Background(), rec, struct {
+	closed := h.writeStreamItem(t.Context(), rec, struct {
 		data  any
 		id    string
 		retry int
@@ -241,7 +241,7 @@ func TestTrackSSEConnectionRejectsWhenLimitAlreadyReached(t *testing.T) {
 	defer r.TrackSSEConnection(-1)
 
 	rec := httptest.NewRecorder()
-	tracked, ok := h.trackSSEConnection(rec, context.Background(), "events")
+	tracked, ok := h.trackSSEConnection(rec, t.Context(), "events")
 	if tracked || ok {
 		t.Fatalf("trackSSEConnection = (%v, %v), want rejected", tracked, ok)
 	}
@@ -257,7 +257,7 @@ func TestTrackSSEConnectionUnlimitedDoesNotTrack(t *testing.T) {
 	r := trpcgo.NewRouter()
 	h := NewHandler(r, "/trpc")
 
-	tracked, ok := h.trackSSEConnection(httptest.NewRecorder(), context.Background(), "events")
+	tracked, ok := h.trackSSEConnection(httptest.NewRecorder(), t.Context(), "events")
 	if !ok || tracked {
 		t.Fatalf("trackSSEConnection = (%v, %v), want untracked success", tracked, ok)
 	}
@@ -270,7 +270,7 @@ func TestTrackSSEConnectionAllowsAtLimit(t *testing.T) {
 	r := trpcgo.NewRouter(trpcgo.WithSSEMaxConnections(1))
 	h := NewHandler(r, "/trpc")
 
-	tracked, ok := h.trackSSEConnection(httptest.NewRecorder(), context.Background(), "events")
+	tracked, ok := h.trackSSEConnection(httptest.NewRecorder(), t.Context(), "events")
 	if !tracked || !ok {
 		t.Fatalf("trackSSEConnection = (%v, %v), want tracked success", tracked, ok)
 	}
@@ -290,7 +290,7 @@ func TestWriteErrorResponseUsesFormatterWithContext(t *testing.T) {
 	}))
 	h := NewHandler(r, "/trpc")
 	rec := httptest.NewRecorder()
-	ctx := context.WithValue(context.Background(), ctxKey{}, "from-context")
+	ctx := context.WithValue(t.Context(), ctxKey{}, "from-context")
 
 	h.writeErrorResponse(rec, trpcgo.NewError(trpcgo.CodeBadRequest, "bad"), "events", ctx, trpcgo.ProcedureQuery)
 
@@ -305,7 +305,7 @@ func TestWriteErrorResponseUsesFormatterWithContext(t *testing.T) {
 
 func TestRequestContextReturningSameContextKeepsOriginal(t *testing.T) {
 	type ctxKey struct{}
-	baseCtx := context.WithValue(context.Background(), ctxKey{}, "request")
+	baseCtx := context.WithValue(t.Context(), ctxKey{}, "request")
 	r := trpcgo.NewRouter(trpcgo.WithContextCreator(func(ctx context.Context, r *http.Request) context.Context {
 		return ctx
 	}))

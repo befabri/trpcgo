@@ -444,7 +444,7 @@ func TestSetCookieInSubscription(t *testing.T) {
 
 func TestSetCookieNoopOutsideHandler(t *testing.T) {
 	// SetCookie with a plain context should be a no-op, not panic.
-	ctx := context.Background()
+	ctx := t.Context()
 	trpcgo.SetCookie(ctx, &http.Cookie{Name: "test", Value: "value"})
 	trpcgo.SetResponseHeader(ctx, "X-Test", "value")
 	// If we got here without panicking, the test passes.
@@ -452,7 +452,7 @@ func TestSetCookieNoopOutsideHandler(t *testing.T) {
 
 func TestSetCookieNilDoesNotPanic(t *testing.T) {
 	// SetCookie with nil cookie should be a no-op, not panic.
-	ctx := context.Background()
+	ctx := t.Context()
 	trpcgo.SetCookie(ctx, nil)
 	// If we got here without panicking, the test passes.
 }
@@ -470,7 +470,7 @@ func TestRawCallSetCookie(t *testing.T) {
 	})
 
 	// Pre-inject response metadata so we can read cookies/headers after RawCall.
-	ctx := trpcgo.WithResponseMetadata(context.Background())
+	ctx := trpcgo.WithResponseMetadata(t.Context())
 	result, err := router.RawCall(ctx, "auth.login", nil)
 	if err != nil {
 		t.Fatalf("RawCall error: %v", err)
@@ -503,7 +503,7 @@ func TestRawCallWithoutMetadataIsNoop(t *testing.T) {
 
 	// Without pre-injecting metadata, RawCall injects its own context.
 	// The caller can't access it, but SetCookie must not panic.
-	ctx := context.Background()
+	ctx := t.Context()
 	result, err := router.RawCall(ctx, "auth.login", nil)
 	if err != nil {
 		t.Fatalf("RawCall error: %v", err)

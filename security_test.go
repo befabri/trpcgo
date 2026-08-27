@@ -122,8 +122,8 @@ func TestSSEEventIDNewlineSanitized(t *testing.T) {
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, "id: ") {
-			ids = append(ids, strings.TrimPrefix(line, "id: "))
+		if after, ok := strings.CutPrefix(line, "id: "); ok {
+			ids = append(ids, after)
 		}
 		// A "data: injected" line would indicate successful injection.
 		if line == "data: injected" {
@@ -601,7 +601,7 @@ func TestContextCancellationStopsHandler(t *testing.T) {
 
 	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	req, _ := http.NewRequestWithContext(ctx, "GET", server.URL+"/trpc/slow", nil)
 
 	go func() {
@@ -673,7 +673,7 @@ func TestSSEMaxDurationDefault(t *testing.T) {
 	r := trpcgo.NewRouter()
 	trpcgo.VoidSubscribe(r, "test", func(ctx context.Context) (<-chan string, error) {
 		ch := make(chan string)
-		go func() { <-ctx.Done(); close(ch) }()
+		context.AfterFunc(ctx, func() { close(ch) })
 		return ch, nil
 	})
 
@@ -712,7 +712,7 @@ func TestSSEMaxDurationOptionConventions(t *testing.T) {
 		r := trpcgo.NewRouter(trpcgo.WithSSEMaxDuration(5 * time.Minute))
 		trpcgo.VoidSubscribe(r, "forever", func(ctx context.Context) (<-chan string, error) {
 			ch := make(chan string)
-			go func() { <-ctx.Done(); close(ch) }()
+			context.AfterFunc(ctx, func() { close(ch) })
 			return ch, nil
 		})
 		server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
@@ -732,7 +732,7 @@ func TestSSEMaxDurationOptionConventions(t *testing.T) {
 		r := trpcgo.NewRouter(trpcgo.WithSSEMaxDuration(-1))
 		trpcgo.VoidSubscribe(r, "forever", func(ctx context.Context) (<-chan string, error) {
 			ch := make(chan string)
-			go func() { <-ctx.Done(); close(ch) }()
+			context.AfterFunc(ctx, func() { close(ch) })
 			return ch, nil
 		})
 		server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
@@ -755,7 +755,7 @@ func TestSSEMaxDurationOptionConventions(t *testing.T) {
 		)
 		trpcgo.VoidSubscribe(r, "forever", func(ctx context.Context) (<-chan string, error) {
 			ch := make(chan string)
-			go func() { <-ctx.Done(); close(ch) }()
+			context.AfterFunc(ctx, func() { close(ch) })
 			return ch, nil
 		})
 		server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
@@ -789,7 +789,7 @@ func TestSSEMaxConnectionsEnforced(t *testing.T) {
 	)
 	trpcgo.VoidSubscribe(r, "stream", func(ctx context.Context) (<-chan string, error) {
 		ch := make(chan string)
-		go func() { <-ctx.Done(); close(ch) }()
+		context.AfterFunc(ctx, func() { close(ch) })
 		return ch, nil
 	})
 
@@ -863,7 +863,7 @@ func TestSSEMaxConnectionsConcurrentRace(t *testing.T) {
 	)
 	trpcgo.VoidSubscribe(r, "stream", func(ctx context.Context) (<-chan string, error) {
 		ch := make(chan string)
-		go func() { <-ctx.Done(); close(ch) }()
+		context.AfterFunc(ctx, func() { close(ch) })
 		return ch, nil
 	})
 
@@ -1025,9 +1025,9 @@ func TestErrorFormatterReceivesWrappedInternalError(t *testing.T) {
 
 // TestSetCookieNilContextIsNoop verifies SetCookie doesn't panic without context.
 func TestSetCookieNilContextIsNoop(t *testing.T) {
-	// context.Background() has no response metadata.
-	trpcgo.SetCookie(context.Background(), &http.Cookie{Name: "test", Value: "val"})
-	trpcgo.SetResponseHeader(context.Background(), "X-Test", "val")
+	// The test context has no response metadata.
+	trpcgo.SetCookie(t.Context(), &http.Cookie{Name: "test", Value: "val"})
+	trpcgo.SetResponseHeader(t.Context(), "X-Test", "val")
 	// If we get here without panic, the test passes.
 }
 
@@ -1185,7 +1185,7 @@ func TestRawCallDoesNotBypassValidation(t *testing.T) {
 		return User{ID: in.ID}, nil
 	})
 
-	_, err := r.RawCall(context.Background(), "user", json.RawMessage(`{"id":"1"}`))
+	_, err := r.RawCall(t.Context(), "user", json.RawMessage(`{"id":"1"}`))
 	if err == nil {
 		t.Fatal("expected validation error from RawCall")
 	}

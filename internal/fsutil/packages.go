@@ -2,9 +2,10 @@ package fsutil
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/fsnotify/fsnotify"
@@ -46,7 +47,7 @@ func ResolvePackageDirs(patterns []string, dir string) ([]string, error) {
 	for d := range set {
 		out = append(out, filepath.Clean(d))
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out, nil
 }
 
@@ -72,11 +73,7 @@ func WatchDirsAndAncestors(watcher WatchAdder, root string, dirs []string) error
 		addAncestors(watchSet, d, root)
 	}
 
-	paths := make([]string, 0, len(watchSet))
-	for p := range watchSet {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
+	paths := slices.Sorted(maps.Keys(watchSet))
 	for _, p := range paths {
 		if err := watcher.Add(p); err != nil {
 			return err

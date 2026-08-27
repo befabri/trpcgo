@@ -46,4 +46,3 @@ func sanitizeErrorForClient(err *Error) *Error {
 	}
 	return err
 }
-

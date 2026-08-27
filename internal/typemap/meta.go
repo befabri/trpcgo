@@ -31,9 +31,8 @@ func ParseValidateTag(rawTag string) []ValidateRule {
 	if !ok || v == "" {
 		return nil
 	}
-	parts := strings.Split(v, ",")
-	rules := make([]ValidateRule, 0, len(parts))
-	for _, p := range parts {
+	var rules []ValidateRule
+	for p := range strings.SplitSeq(v, ",") {
 		p = strings.TrimSpace(p)
 		if p == "" || p == "-" {
 			continue
@@ -83,10 +82,9 @@ func ParseTSTypeTag(rawTag string) (TSTypeTag, bool) {
 	}
 	// Split on commas, but reassemble non-option parts back into the type.
 	// This handles TS types with commas like "Record<string, unknown>".
-	parts := strings.Split(tstype, ",")
 	var result TSTypeTag
 	var typeParts []string
-	for _, p := range parts {
+	for p := range strings.SplitSeq(tstype, ",") {
 		switch strings.TrimSpace(p) {
 		case "readonly":
 			result.Readonly = true

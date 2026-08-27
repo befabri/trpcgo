@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 )
 
 // ProcedureType distinguishes queries, mutations, and subscriptions.
@@ -210,26 +211,20 @@ type ProcedureBuilder struct {
 // Procedure creates a new [ProcedureBuilder], optionally pre-seeded with
 // existing options or other builders.
 func Procedure(base ...ProcedureOption) *ProcedureBuilder {
-	opts := make([]ProcedureOption, len(base))
-	copy(opts, base)
-	return &ProcedureBuilder{opts: opts}
+	return &ProcedureBuilder{opts: slices.Clone(base)}
 }
 
 // Use returns a new [ProcedureBuilder] with the given middleware appended.
 // The receiver is not modified.
 func (b *ProcedureBuilder) Use(mw ...Middleware) *ProcedureBuilder {
-	next := make([]ProcedureOption, len(b.opts)+1)
-	copy(next, b.opts)
-	next[len(b.opts)] = Use(mw...)
+	next := append(slices.Clone(b.opts), Use(mw...))
 	return &ProcedureBuilder{opts: next}
 }
 
 // WithMeta returns a new [ProcedureBuilder] with the metadata set.
 // The receiver is not modified.
 func (b *ProcedureBuilder) WithMeta(meta any) *ProcedureBuilder {
-	next := make([]ProcedureOption, len(b.opts)+1)
-	copy(next, b.opts)
-	next[len(b.opts)] = WithMeta(meta)
+	next := append(slices.Clone(b.opts), WithMeta(meta))
 	return &ProcedureBuilder{opts: next}
 }
 
@@ -241,18 +236,13 @@ func (b *ProcedureBuilder) WithMeta(meta any) *ProcedureBuilder {
 // [WithOutputParser] (untyped) degrades codegen to unknown — use a typed
 // [OutputParser] when the output type changes.
 func (b *ProcedureBuilder) With(opts ...ProcedureOption) *ProcedureBuilder {
-	next := make([]ProcedureOption, len(b.opts)+len(opts))
-	copy(next, b.opts)
-	copy(next[len(b.opts):], opts)
-	return &ProcedureBuilder{opts: next}
+	return &ProcedureBuilder{opts: slices.Concat(b.opts, opts)}
 }
 
 // WithOutputValidator returns a new [ProcedureBuilder] with an untyped output
 // validator set. The receiver is not modified.
 func (b *ProcedureBuilder) WithOutputValidator(fn func(any) error) *ProcedureBuilder {
-	next := make([]ProcedureOption, len(b.opts)+1)
-	copy(next, b.opts)
-	next[len(b.opts)] = WithOutputValidator(fn)
+	next := append(slices.Clone(b.opts), WithOutputValidator(fn))
 	return &ProcedureBuilder{opts: next}
 }
 
@@ -260,9 +250,7 @@ func (b *ProcedureBuilder) WithOutputValidator(fn func(any) error) *ProcedureBui
 // parser set. The receiver is not modified. Generated output types fall back to
 // unknown unless a typed [OutputParser] is also present.
 func (b *ProcedureBuilder) WithOutputParser(fn func(any) (any, error)) *ProcedureBuilder {
-	next := make([]ProcedureOption, len(b.opts)+1)
-	copy(next, b.opts)
-	next[len(b.opts)] = WithOutputParser(fn)
+	next := append(slices.Clone(b.opts), WithOutputParser(fn))
 	return &ProcedureBuilder{opts: next}
 }
 

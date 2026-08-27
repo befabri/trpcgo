@@ -202,13 +202,10 @@ func extractTypeInfo(pkg *packages.Package, metas map[string]typemap.TypeMeta) {
 					fieldComments := make(map[int]string)
 					idx := 0
 					for _, field := range st.Fields.List {
-						n := len(field.Names)
-						if n == 0 {
-							n = 1 // embedded field
-						}
+						n := max(len(field.Names), 1) // embedded fields have no names
 						if field.Doc != nil {
 							comment := strings.TrimSpace(field.Doc.Text())
-							for j := 0; j < n; j++ {
+							for j := range n {
 								fieldComments[idx+j] = comment
 							}
 						}

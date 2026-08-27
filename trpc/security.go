@@ -491,7 +491,7 @@ func addVary(header http.Header, values ...string) {
 	existing := header.Get("Vary")
 	seen := map[string]bool{}
 	if existing != "" {
-		for _, value := range strings.Split(existing, ",") {
+		for value := range strings.SplitSeq(existing, ",") {
 			value = strings.TrimSpace(value)
 			if value == "" {
 				continue
@@ -504,7 +504,7 @@ func addVary(header http.Header, values ...string) {
 	}
 	parts := make([]string, 0, len(seen)+len(values))
 	if existing != "" {
-		for _, value := range strings.Split(existing, ",") {
+		for value := range strings.SplitSeq(existing, ",") {
 			value = strings.TrimSpace(value)
 			if value != "" {
 				parts = append(parts, value)

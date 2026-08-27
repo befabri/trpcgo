@@ -1239,7 +1239,7 @@ func TestHandler_SSEUnlimitedMaxDurationWaitsForData(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := trpc.NewHandler(r, "/trpc")
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 	req := httptest.NewRequest(http.MethodGet, "/trpc/late", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
@@ -1261,16 +1261,13 @@ func TestHandler_SSEOneNanosecondMaxDurationReturns(t *testing.T) {
 	)
 	ctxDone := make(chan struct{})
 	if err := trpcgo.VoidSubscribe(r, "never", func(ctx context.Context) (<-chan string, error) {
-		go func() {
-			<-ctx.Done()
-			close(ctxDone)
-		}()
+		context.AfterFunc(ctx, func() { close(ctxDone) })
 		return make(chan string), nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	h := trpc.NewHandler(r, "/trpc")
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	req := httptest.NewRequest(http.MethodGet, "/trpc/never", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()

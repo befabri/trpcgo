@@ -3,9 +3,10 @@ package fsutil
 
 import (
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -86,11 +87,7 @@ func WatchGoRecursive(watcher *fsnotify.Watcher, root string) error {
 		addAncestors(watchSet, dir, root)
 	}
 
-	paths := make([]string, 0, len(watchSet))
-	for p := range watchSet {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
+	paths := slices.Sorted(maps.Keys(watchSet))
 	for _, p := range paths {
 		if err := watcher.Add(p); err != nil {
 			return err

@@ -650,7 +650,7 @@ func TestErrorFormatterInputNilForSSEConnectionLimit(t *testing.T) {
 
 	trpcgo.VoidSubscribe(router, "stream", func(ctx context.Context) (<-chan string, error) {
 		ch := make(chan string)
-		go func() { <-ctx.Done(); close(ch) }()
+		context.AfterFunc(ctx, func() { close(ch) })
 		return ch, nil
 	})
 

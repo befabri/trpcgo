@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"testing"
 
 	"github.com/fsnotify/fsnotify"
@@ -36,9 +35,9 @@ func TestPatternRoots(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := PatternRoots(tc.patterns, dir)
-			sort.Strings(got)
+			slices.Sort(got)
 			want := append([]string(nil), tc.want...)
-			sort.Strings(want)
+			slices.Sort(want)
 			if len(got) != len(want) {
 				t.Fatalf("got %v, want %v", got, want)
 			}

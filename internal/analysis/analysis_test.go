@@ -4,7 +4,7 @@ import (
 	"go/types"
 	"path/filepath"
 	"runtime"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -192,9 +192,7 @@ func TestAnalyzeEnhanced(t *testing.T) {
 		if !ok {
 			t.Fatal("no metadata for Status")
 		}
-		vals := make([]string, len(meta.ConstValues))
-		copy(vals, meta.ConstValues)
-		sort.Strings(vals)
+		vals := slices.Sorted(slices.Values(meta.ConstValues))
 
 		want := []string{`"active"`, `"banned"`, `"pending"`}
 		if len(vals) != len(want) {
@@ -212,9 +210,7 @@ func TestAnalyzeEnhanced(t *testing.T) {
 		if !ok {
 			t.Fatal("no metadata for Priority")
 		}
-		vals := make([]string, len(meta.ConstValues))
-		copy(vals, meta.ConstValues)
-		sort.Strings(vals)
+		vals := slices.Sorted(slices.Values(meta.ConstValues))
 
 		want := []string{"1", "2", "3"}
 		if len(vals) != len(want) {

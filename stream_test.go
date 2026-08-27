@@ -2,6 +2,7 @@ package trpcgo_test
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -39,10 +40,7 @@ func parseSSEEvents(t *testing.T, resp *http.Response, maxEvents int) []sseEvent
 			currentID = strings.TrimPrefix(line, "id: ")
 		case line == "":
 			if hasData || currentEvent != "" {
-				evt := currentEvent
-				if evt == "" {
-					evt = "message" // SSE default event type
-				}
+				evt := cmp.Or(currentEvent, "message") // SSE default event type
 				events = append(events, sseEvent{event: evt, data: currentData, id: currentID})
 				currentEvent = ""
 				currentData = ""
@@ -372,7 +370,9 @@ func TestStreamConsumerRecvReturnsFinalValueOnEOF(t *testing.T) {
 	})
 
 	consumer := streamConsumerFor(t, router, "done")
-	data, id, retry, err := consumer.Recv(context.Background())
+	data, id, retry, err := consumer.Recv(t.Context())
+	// Recv's end-of-stream contract is the bare io.EOF sentinel, which is what
+	// trpc.Handler compares against; assert exactly that rather than errors.Is.
 	if err != io.EOF {
 		t.Fatalf("Recv error = %v, want io.EOF", err)
 	}
@@ -398,7 +398,7 @@ func TestStreamConsumerRecvReturnsItemWithZeroRetry(t *testing.T) {
 	})
 
 	consumer := streamConsumerFor(t, router, "ticks")
-	data, id, retry, err := consumer.Recv(context.Background())
+	data, id, retry, err := consumer.Recv(t.Context())
 	if err != nil {
 		t.Fatalf("Recv error = %v, want nil", err)
 	}
@@ -423,7 +423,7 @@ func TestStreamConsumerRecvReturnsEOFWithZeroRetry(t *testing.T) {
 	})
 
 	consumer := streamConsumerFor(t, router, "empty")
-	data, id, retry, err := consumer.Recv(context.Background())
+	data, id, retry, err := consumer.Recv(t.Context())
 	if err != io.EOF {
 		t.Fatalf("Recv error = %v, want io.EOF", err)
 	}
@@ -453,7 +453,7 @@ func TestStreamConsumerRecvNilItemSkipsOutputHooks(t *testing.T) {
 	}))
 
 	consumer := streamConsumerFor(t, router, "nil-item")
-	data, id, retry, err := consumer.Recv(context.Background())
+	data, id, retry, err := consumer.Recv(t.Context())
 	if err != nil {
 		t.Fatalf("Recv error = %v, want nil", err)
 	}
@@ -485,7 +485,7 @@ func TestStreamConsumerRecvOutputHookErrorHasZeroRetry(t *testing.T) {
 	}))
 
 	consumer := streamConsumerFor(t, router, "bad-item")
-	data, id, retry, err := consumer.Recv(context.Background())
+	data, id, retry, err := consumer.Recv(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "hook failed") {
 		t.Fatalf("Recv error = %v, want hook failure", err)
 	}
@@ -509,7 +509,7 @@ func streamConsumerFor(t *testing.T, router *trpcgo.Router, path string) *trpcgo
 		t.Fatal("expected registered procedure")
 	}
 
-	result, err := router.ExecuteEntry(context.Background(), entry, nil)
+	result, err := router.ExecuteEntry(t.Context(), entry, nil)
 	if err != nil {
 		t.Fatalf("ExecuteEntry: %v", err)
 	}

@@ -173,7 +173,7 @@ func decodeStrictInput(ptr reflect.Value, raw json.RawMessage) error {
 		return strictInputError(err)
 	}
 	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		if err != nil {
 			return strictInputError(err)
 		}
@@ -183,18 +183,16 @@ func decodeStrictInput(ptr reflect.Value, raw json.RawMessage) error {
 }
 
 func strictInputError(err error) error {
-	var syntaxErr *json.SyntaxError
-	var typeErr *json.UnmarshalTypeError
-	switch {
-	case errors.As(err, &syntaxErr):
+	if _, ok := errors.AsType[*json.SyntaxError](err); ok {
 		return NewError(CodeParseError, "failed to parse input")
-	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-		return NewError(CodeParseError, "failed to parse input")
-	case errors.As(err, &typeErr):
-		return NewError(CodeBadRequest, "invalid input type")
-	default:
-		return NewError(CodeBadRequest, "unknown field in input")
 	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return NewError(CodeParseError, "failed to parse input")
+	}
+	if _, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
+		return NewError(CodeBadRequest, "invalid input type")
+	}
+	return NewError(CodeBadRequest, "unknown field in input")
 }
 
 func (r *Router) validateInput(inputType reflect.Type, input any) error {

@@ -26,7 +26,7 @@ func TestRawCallInputProcedureAllowsEmptyRawInput(t *testing.T) {
 		return input.Name, nil
 	})
 
-	got, err := router.RawCall(context.Background(), "optional", nil)
+	got, err := router.RawCall(t.Context(), "optional", nil)
 	if err != nil {
 		t.Fatalf("RawCall: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestRawCallDecodesOneByteInput(t *testing.T) {
 		return input, nil
 	})
 
-	got, err := router.RawCall(context.Background(), "number", json.RawMessage("1"))
+	got, err := router.RawCall(t.Context(), "number", json.RawMessage("1"))
 	if err != nil {
 		t.Fatalf("RawCall: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestRawCall(t *testing.T) {
 		return User{ID: input.ID, Name: "Alice"}, nil
 	})
 
-	result, err := router.RawCall(context.Background(), "user.get", json.RawMessage(`{"id":"42"}`))
+	result, err := router.RawCall(t.Context(), "user.get", json.RawMessage(`{"id":"42"}`))
 	if err != nil {
 		t.Fatalf("RawCall error: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestTypedCall(t *testing.T) {
 		return User{ID: input.ID, Name: "Bob"}, nil
 	})
 
-	user, err := trpcgo.Call[GetUserInput, User](router, context.Background(), "user.get", GetUserInput{ID: "99"})
+	user, err := trpcgo.Call[GetUserInput, User](router, t.Context(), "user.get", GetUserInput{ID: "99"})
 	if err != nil {
 		t.Fatalf("Call error: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestTypedCallInputMarshalError(t *testing.T) {
 		Fn func()
 	}
 
-	_, err := trpcgo.Call[badInput, string](router, context.Background(), "unused", badInput{Fn: func() {}})
+	_, err := trpcgo.Call[badInput, string](router, t.Context(), "unused", badInput{Fn: func() {}})
 	if err == nil {
 		t.Fatal("expected marshal error")
 	}
@@ -165,7 +165,7 @@ func TestTypedCallJSONFallbackSuccess(t *testing.T) {
 		return map[string]any{"id": "7", "name": "Ada"}, nil
 	})
 
-	user, err := trpcgo.Call[struct{}, publicUser](router, context.Background(), "user.map", struct{}{})
+	user, err := trpcgo.Call[struct{}, publicUser](router, t.Context(), "user.map", struct{}{})
 	if err != nil {
 		t.Fatalf("Call error: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestTypedCallSerializeResultError(t *testing.T) {
 		return func() {}, nil
 	})
 
-	_, err := trpcgo.Call[struct{}, string](router, context.Background(), "bad.result", struct{}{})
+	_, err := trpcgo.Call[struct{}, string](router, t.Context(), "bad.result", struct{}{})
 	if err == nil {
 		t.Fatal("expected serialization error")
 	}
@@ -202,7 +202,7 @@ func TestTypedCallDeserializeResultError(t *testing.T) {
 		return "not-a-number", nil
 	})
 
-	_, err := trpcgo.Call[struct{}, int](router, context.Background(), "wrong.type", struct{}{})
+	_, err := trpcgo.Call[struct{}, int](router, t.Context(), "wrong.type", struct{}{})
 	if err == nil {
 		t.Fatal("expected deserialization error")
 	}
@@ -221,7 +221,7 @@ func TestTypedCallDeserializeResultError(t *testing.T) {
 func TestRawCallNotFound(t *testing.T) {
 	router := trpcgo.NewRouter()
 
-	_, err := router.RawCall(context.Background(), "nonexistent", nil)
+	_, err := router.RawCall(t.Context(), "nonexistent", nil)
 	if err == nil {
 		t.Fatal("expected error for nonexistent procedure")
 	}
@@ -243,7 +243,7 @@ func TestRawCallSubscriptionRejected(t *testing.T) {
 		return ch, nil
 	})
 
-	_, err := router.RawCall(context.Background(), "events", nil)
+	_, err := router.RawCall(t.Context(), "events", nil)
 	if err == nil {
 		t.Fatal("expected error for subscription via RawCall")
 	}
@@ -264,7 +264,7 @@ func TestRawCallRunsMiddleware(t *testing.T) {
 		return gotUser, nil
 	})
 
-	result, err := router.RawCall(context.Background(), "whoami", nil)
+	result, err := router.RawCall(t.Context(), "whoami", nil)
 	if err != nil {
 		t.Fatalf("RawCall error: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestRawCallWithProcedureMeta(t *testing.T) {
 		return "ok", nil
 	}, trpcgo.WithMeta("test-meta"))
 
-	_, err := router.RawCall(context.Background(), "test", nil)
+	_, err := router.RawCall(t.Context(), "test", nil)
 	if err != nil {
 		t.Fatalf("RawCall error: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestCallBeforeHandler(t *testing.T) {
 	})
 
 	// RawCall before Handler() is called — should still work.
-	result, err := router.RawCall(context.Background(), "ping", nil)
+	result, err := router.RawCall(t.Context(), "ping", nil)
 	if err != nil {
 		t.Fatalf("RawCall error: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestCallHandlerError(t *testing.T) {
 		return "", trpcgo.NewError(trpcgo.CodeForbidden, "denied")
 	})
 
-	_, err := trpcgo.Call[struct{}, string](router, context.Background(), "fail", struct{}{})
+	_, err := trpcgo.Call[struct{}, string](router, t.Context(), "fail", struct{}{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -346,7 +346,7 @@ func TestRawCallVoidQuery(t *testing.T) {
 	})
 
 	// nil input for void query
-	result, err := router.RawCall(context.Background(), "ping", nil)
+	result, err := router.RawCall(t.Context(), "ping", nil)
 	if err != nil {
 		t.Fatalf("RawCall error: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestRawCallAfterHandler(t *testing.T) {
 	_ = trpc.NewHandler(router, "/trpc")
 
 	// RawCall should use the pre-computed chain
-	result, err := router.RawCall(context.Background(), "test", nil)
+	result, err := router.RawCall(t.Context(), "test", nil)
 	if err != nil {
 		t.Fatalf("RawCall error: %v", err)
 	}
@@ -385,24 +385,22 @@ func TestRawCallConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, 100)
 	for i := range 100 {
-		wg.Add(1)
-		go func(v int) {
-			defer wg.Done()
-			input, _ := json.Marshal(struct{ V int }{V: v})
-			result, err := router.RawCall(context.Background(), "echo", input)
+		wg.Go(func() {
+			input, _ := json.Marshal(struct{ V int }{V: i})
+			result, err := router.RawCall(t.Context(), "echo", input)
 			if err != nil {
-				errs <- fmt.Errorf("RawCall(%d): %w", v, err)
+				errs <- fmt.Errorf("RawCall(%d): %w", i, err)
 				return
 			}
 			got, ok := result.(int)
 			if !ok {
-				errs <- fmt.Errorf("RawCall(%d): result type %T, want int", v, result)
+				errs <- fmt.Errorf("RawCall(%d): result type %T, want int", i, result)
 				return
 			}
-			if got != v {
-				errs <- fmt.Errorf("RawCall(%d): got %d, want %d", v, got, v)
+			if got != i {
+				errs <- fmt.Errorf("RawCall(%d): got %d, want %d", i, got, i)
 			}
-		}(i)
+		})
 	}
 
 	wg.Wait()

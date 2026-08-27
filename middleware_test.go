@@ -196,7 +196,7 @@ func TestContextCreatorCancellationPropagation(t *testing.T) {
 
 	router := trpcgo.NewRouter(trpcgo.WithContextCreator(func(ctx context.Context, r *http.Request) context.Context {
 		// Deliberately not derived from ctx — tests mergeContexts safety net.
-		return context.WithValue(context.Background(), ctxKey("user"), "alice")
+		return context.WithValue(t.Context(), ctxKey("user"), "alice")
 	}))
 
 	trpcgo.VoidSubscribe(router, "hang", func(ctx context.Context) (<-chan string, error) {

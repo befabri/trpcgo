@@ -20,31 +20,30 @@ import (
 func testValidator(v any) error {
 	val := reflect.ValueOf(v)
 	typ := val.Type()
-	for i := 0; i < typ.NumField(); i++ {
+	for i := range typ.NumField() {
 		field := typ.Field(i)
 		tag := field.Tag.Get("validate")
 		if tag == "" {
 			continue
 		}
-		rules := strings.Split(tag, ",")
 		fieldVal := val.Field(i)
-		for _, rule := range rules {
-			parts := strings.SplitN(rule, "=", 2)
-			switch parts[0] {
+		for rule := range strings.SplitSeq(tag, ",") {
+			name, param, hasParam := strings.Cut(rule, "=")
+			switch name {
 			case "required":
 				if fieldVal.IsZero() {
 					return fmt.Errorf("field %s is required", field.Name)
 				}
 			case "min":
-				if len(parts) > 1 {
-					n, _ := strconv.Atoi(parts[1])
+				if hasParam {
+					n, _ := strconv.Atoi(param)
 					if fieldVal.Kind() == reflect.String && len(fieldVal.String()) < n {
 						return fmt.Errorf("field %s must be at least %d characters", field.Name, n)
 					}
 				}
 			case "max":
-				if len(parts) > 1 {
-					n, _ := strconv.Atoi(parts[1])
+				if hasParam {
+					n, _ := strconv.Atoi(param)
 					if fieldVal.Kind() == reflect.String && len(fieldVal.String()) > n {
 						return fmt.Errorf("field %s must be at most %d characters", field.Name, n)
 					}
@@ -248,7 +247,7 @@ func TestValidatorSkipsVoidProcedure(t *testing.T) {
 		return "pong", nil
 	})
 
-	got, err := router.RawCall(context.Background(), "ping", nil)
+	got, err := router.RawCall(t.Context(), "ping", nil)
 	if err != nil {
 		t.Fatalf("RawCall: %v", err)
 	}
@@ -270,7 +269,7 @@ func TestValidatorWithRawCall(t *testing.T) {
 	// Valid input via Call should succeed.
 	t.Run("valid input", func(t *testing.T) {
 		result, err := trpcgo.Call[ValidatedInput, ValidatedOutput](
-			router, context.Background(), "greet", ValidatedInput{Name: "Bob"},
+			router, t.Context(), "greet", ValidatedInput{Name: "Bob"},
 		)
 		if err != nil {
 			t.Fatalf("Call error: %v", err)
@@ -283,7 +282,7 @@ func TestValidatorWithRawCall(t *testing.T) {
 	// Invalid input via Call should return validation error.
 	t.Run("invalid input", func(t *testing.T) {
 		_, err := trpcgo.Call[ValidatedInput, ValidatedOutput](
-			router, context.Background(), "greet", ValidatedInput{Name: ""},
+			router, t.Context(), "greet", ValidatedInput{Name: ""},
 		)
 		if err == nil {
 			t.Fatal("expected validation error, got nil")
@@ -760,7 +759,7 @@ func TestRawCallOutputValidatorErrorSanitized(t *testing.T) {
 		return fmt.Errorf("validator failed: %s", secret)
 	}))
 
-	_, err := r.RawCall(context.Background(), "bad", nil)
+	_, err := r.RawCall(t.Context(), "bad", nil)
 	if err == nil {
 		t.Fatal("expected RawCall error")
 	}
@@ -1282,7 +1281,7 @@ func TestRawCallOutputParserErrorSanitized(t *testing.T) {
 		return User{}, fmt.Errorf("parser failed: %s", secret)
 	}))
 
-	_, err := r.RawCall(context.Background(), "bad", nil)
+	_, err := r.RawCall(t.Context(), "bad", nil)
 	if err == nil {
 		t.Fatal("expected RawCall error")
 	}

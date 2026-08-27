@@ -422,7 +422,7 @@ func TestChain(t *testing.T) {
 			return trace, nil
 		})
 
-		result, err := handler(context.Background(), nil)
+		result, err := handler(t.Context(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -446,7 +446,7 @@ func TestChain(t *testing.T) {
 			return trace, nil
 		})
 
-		result, err := handler(context.Background(), nil)
+		result, err := handler(t.Context(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -463,7 +463,7 @@ func TestChain(t *testing.T) {
 			return "reached", nil
 		})
 
-		result, err := handler(context.Background(), nil)
+		result, err := handler(t.Context(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -486,7 +486,7 @@ func TestChain(t *testing.T) {
 			return nil, nil
 		})
 
-		_, err := handler(context.Background(), nil)
+		_, err := handler(t.Context(), nil)
 		if err == nil {
 			t.Fatal("expected error from short circuit")
 		}
@@ -510,7 +510,7 @@ func TestChain(t *testing.T) {
 			return ctx.Value(ctxKey("role")), nil
 		})
 
-		result, err := handler(context.Background(), nil)
+		result, err := handler(t.Context(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -786,7 +786,7 @@ func TestHandlerSnapshotIsolation(t *testing.T) {
 	_ = resp.Body.Close()
 
 	// But "after" should still be reachable via Call on the router directly.
-	result, err := trpcgo.Call[any, string](router, context.Background(), "after", nil)
+	result, err := trpcgo.Call[any, string](router, t.Context(), "after", nil)
 	if err != nil {
 		t.Fatalf("Call(after): %v", err)
 	}
