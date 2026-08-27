@@ -94,15 +94,20 @@ var basicKindNames = map[types.BasicKind]string{
 	types.Float64: "float64",
 }
 
+// Since Go 1.27 json.RawMessage is an alias of encoding/json/jsontext.Value,
+// so alias resolution lands on the jsontext entry; the json entry still
+// matches the alias by its own name and older toolchains' defined type.
 var wellKnownGoKinds = map[string]string{
-	"time.Time":                "time.Time",
-	"encoding/json.RawMessage": "json.RawMessage",
+	"time.Time":                    "time.Time",
+	"encoding/json.RawMessage":     "json.RawMessage",
+	"encoding/json/jsontext.Value": "json.RawMessage",
 }
 
 var wellKnownTSTypes = map[string]string{
-	"time.Time":                "string",
-	"encoding/json.RawMessage": "unknown",
-	"encoding/json.Number":     "number",
+	"time.Time":                    "string",
+	"encoding/json.RawMessage":     "unknown",
+	"encoding/json/jsontext.Value": "unknown",
+	"encoding/json.Number":         "number",
 }
 
 // TypeID returns a fully-qualified identifier for a types.Object.
@@ -355,6 +360,9 @@ func (m *Mapper) convertAlias(t *types.Alias) string {
 	obj := t.Obj()
 	name := obj.Name()
 	id := TypeID(obj)
+	if ts := wellKnownTSTypes[id]; ts != "" {
+		return ts
+	}
 	if meta, ok := m.metas[id]; ok && meta.IsAlias {
 		m.registerAlias(id, name, t.Rhs(), meta, obj)
 		return m.typeToken(id, name)
@@ -734,7 +742,14 @@ func goKind(t types.Type) string {
 		}
 	}
 
-	// Check for well-known types first.
+	// Check for well-known types first, by the alias's own name when t is an
+	// alias and by the defined type it resolves to otherwise.
+	if alias, ok := t.(*types.Alias); ok {
+		if kind := wellKnownGoKinds[TypeID(alias.Obj())]; kind != "" {
+			return kind
+		}
+		t = types.Unalias(t)
+	}
 	if named, ok := t.(*types.Named); ok {
 		if obj := named.Obj(); obj.Pkg() != nil {
 			fullPath := obj.Pkg().Path() + "." + obj.Name()

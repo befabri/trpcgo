@@ -2,6 +2,7 @@ package enhanced
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/befabri/trpcgo"
 )
@@ -49,6 +50,9 @@ type User struct {
 	Debug string `json:"debug" tstype:"-"`
 	// Required pointer: normally optional, forced required.
 	Avatar *string `json:"avatar" tstype:",required"`
+	// Raw JSON must map to unknown, on toolchains where RawMessage is a
+	// defined type and on those where it is an alias of jsontext.Value.
+	Payload json.RawMessage `json:"payload"`
 }
 
 // Paginated wraps a list with pagination info.

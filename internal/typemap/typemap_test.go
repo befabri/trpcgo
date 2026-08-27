@@ -202,3 +202,36 @@ func TestSliceElementGoKindStruct(t *testing.T) {
 		t.Errorf("sliceElementGoKind([]Item) = %q, want %q", got, "struct")
 	}
 }
+
+// TestJSONRawMessageShapes covers every shape json.RawMessage takes across
+// toolchains: a defined type in encoding/json (Go <= 1.26), an alias of
+// encoding/json/jsontext.Value (Go >= 1.27), and jsontext.Value used directly.
+func TestJSONRawMessageShapes(t *testing.T) {
+	jsonPkg := types.NewPackage("encoding/json", "json")
+	jsontextPkg := types.NewPackage("encoding/json/jsontext", "jsontext")
+	bytesType := types.NewSlice(types.Typ[types.Byte])
+
+	defined := types.NewNamed(types.NewTypeName(0, jsonPkg, "RawMessage", nil), bytesType, nil)
+	jsontextValue := types.NewNamed(types.NewTypeName(0, jsontextPkg, "Value", nil), bytesType, nil)
+	alias := types.NewAlias(types.NewTypeName(0, jsonPkg, "RawMessage", nil), jsontextValue)
+
+	tests := []struct {
+		name string
+		typ  types.Type
+	}{
+		{"defined type", defined},
+		{"alias of jsontext.Value", alias},
+		{"jsontext.Value", jsontextValue},
+		{"pointer to alias", types.NewPointer(alias)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := goKind(tt.typ); got != "json.RawMessage" {
+				t.Errorf("goKind = %q, want %q", got, "json.RawMessage")
+			}
+			if got := NewMapper(nil).Convert(tt.typ); got != "unknown" {
+				t.Errorf("Convert = %q, want %q", got, "unknown")
+			}
+		})
+	}
+}

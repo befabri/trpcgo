@@ -3,6 +3,7 @@ package trpcgo
 import (
 	"bytes"
 	"cmp"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -271,11 +272,20 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Ty
 	}
 }
 
+// Well-known reflect types are compared by identity rather than by package
+// path and name: since Go 1.27 json.RawMessage is an alias of jsontext.Value,
+// so its reflect.Type reports the jsontext package. Identity comparison is
+// correct on every toolchain and also covers direct jsontext.Value usage.
+var (
+	rawMessageType = reflect.TypeFor[json.RawMessage]()
+	jsonNumberType = reflect.TypeFor[json.Number]()
+)
+
 func reflectWellKnownTS(t reflect.Type, defs map[string]*reflectDef, subs map[reflect.Type]string) string {
-	if t.PkgPath() == "encoding/json" && t.Name() == "RawMessage" {
+	if t == rawMessageType {
 		return "unknown"
 	}
-	if t.PkgPath() == "encoding/json" && t.Name() == "Number" {
+	if t == jsonNumberType {
 		return "number"
 	}
 	if t.PkgPath() == "github.com/befabri/trpcgo" && strings.HasPrefix(t.Name(), "TrackedEvent[") {
@@ -608,7 +618,7 @@ func reflectGoKind(t reflect.Type) string {
 	if t.PkgPath() == "time" && t.Name() == "Time" {
 		return "time.Time"
 	}
-	if t.PkgPath() == "encoding/json" && t.Name() == "RawMessage" {
+	if t == rawMessageType {
 		return "json.RawMessage"
 	}
 

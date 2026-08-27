@@ -290,6 +290,11 @@ func TestGenerateEnhancedDiveArray(t *testing.T) {
 		t.Errorf("missing tags field in CreateUserInput.\nOutput:\n%s", output)
 	}
 
+	// json.RawMessage is opaque JSON, never a base64 string.
+	if !containsLine(output, "payload: unknown;") {
+		t.Errorf("json.RawMessage field should be unknown.\nOutput:\n%s", output)
+	}
+
 	// The TS interface output is type-level only — dive doesn't affect it.
 	// Verify that validate tags don't leak into the interface output.
 	if strings.Contains(output, "dive") {
