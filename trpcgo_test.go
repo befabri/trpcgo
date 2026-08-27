@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/befabri/trpcgo"
 )
@@ -157,4 +158,22 @@ func errorData(t *testing.T, envelope map[string]any) map[string]any {
 
 func keys(m map[string]any) []string {
 	return slices.Collect(maps.Keys(m))
+}
+
+// eventually polls cond every 10ms until it returns true or timeout elapses,
+// and reports whether it did. Use it instead of a fixed sleep when waiting for
+// the server to observe something asynchronous, such as a client disconnect;
+// fixed sleeps are the classic source of flakes on slow CI runners.
+func eventually(t *testing.T, timeout time.Duration, cond func() bool) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

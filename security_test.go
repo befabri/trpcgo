@@ -820,18 +820,27 @@ func TestSSEMaxConnectionsEnforced(t *testing.T) {
 		t.Errorf("over-limit connection: expected 429, got %d. Body: %s", resp.StatusCode, raw)
 	}
 
-	// Close one existing connection — counter should decrement.
+	// Close one existing connection. The slot is released only after the
+	// server observes the disconnect, so poll until a new connection is
+	// accepted rather than sleeping a fixed time.
 	_ = conns[0].Body.Close()
-	// Give the server a moment to process the disconnect.
-	time.Sleep(50 * time.Millisecond)
 
-	// Now a new connection should succeed.
-	resp2, err := http.Get(server.URL + "/trpc/stream")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp2.StatusCode != http.StatusOK {
-		t.Errorf("after freeing slot: expected 200, got %d", resp2.StatusCode)
+	var resp2 *http.Response
+	freed := eventually(t, 5*time.Second, func() bool {
+		r, err := http.Get(server.URL + "/trpc/stream")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.StatusCode == http.StatusOK {
+			resp2 = r
+			return true
+		}
+		_, _ = io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		return false
+	})
+	if !freed {
+		t.Fatal("after freeing slot: expected 200, still rejected after 5s")
 	}
 
 	// Cleanup.
