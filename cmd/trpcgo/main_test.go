@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -152,22 +154,24 @@ func TestRunGenerateEnumsWithoutStringEnumsWritesHeaderOnly(t *testing.T) {
 	}
 }
 
-type closeErrorFile struct {
-	bytes.Buffer
+type errorWriter struct {
 	err error
 }
 
-func (f *closeErrorFile) Close() error {
-	return f.err
+func (w errorWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }
 
-func TestGenerateReturnsOutputCloseErrors(t *testing.T) {
-	origCreateOutputFile := createOutputFile
+func TestGenerateReturnsAtomicOutputErrors(t *testing.T) {
+	origWriteOutputFile := writeOutputFile
 	t.Cleanup(func() {
-		createOutputFile = origCreateOutputFile
+		writeOutputFile = origWriteOutputFile
 	})
 
-	closeErr := errors.New("close failed")
+	writeErr := errors.New("atomic output failed")
+	writeOutputFile = func(_ string, _ fs.FileMode, write func(io.Writer) error) error {
+		return write(errorWriter{err: writeErr})
+	}
 	tests := []struct {
 		name    string
 		opts    generateOptions
@@ -180,7 +184,7 @@ func TestGenerateReturnsOutputCloseErrors(t *testing.T) {
 				dir:      analysisFixtureDir(t, "basic"),
 				output:   "router.ts",
 			},
-			wantMsg: "closing output file",
+			wantMsg: "writing output file",
 		},
 		{
 			name: "zod",
@@ -189,7 +193,7 @@ func TestGenerateReturnsOutputCloseErrors(t *testing.T) {
 				dir:      analysisFixtureDir(t, "basic"),
 				zod:      "schemas.ts",
 			},
-			wantMsg: "closing zod output file",
+			wantMsg: "writing zod schemas",
 		},
 		{
 			name: "enums",
@@ -198,21 +202,18 @@ func TestGenerateReturnsOutputCloseErrors(t *testing.T) {
 				dir:      analysisFixtureDir(t, "crosspkg"),
 				enums:    "enums.ts",
 			},
-			wantMsg: "closing enums output file",
+			wantMsg: "writing enum values",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			createOutputFile = func(string) (outputFile, error) {
-				return &closeErrorFile{err: closeErr}, nil
-			}
 			tt.opts.stdout = new(bytes.Buffer)
 			tt.opts.stderr = new(bytes.Buffer)
 
 			err := generate(tt.opts)
-			if !errors.Is(err, closeErr) {
-				t.Fatalf("generate error = %v, want wrapping %v", err, closeErr)
+			if !errors.Is(err, writeErr) {
+				t.Fatalf("generate error = %v, want wrapping %v", err, writeErr)
 			}
 			if !strings.Contains(err.Error(), tt.wantMsg) {
 				t.Fatalf("generate error = %q, want %q", err.Error(), tt.wantMsg)

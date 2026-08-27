@@ -2,14 +2,17 @@ package trpcgo
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/befabri/trpcgo/internal/codegen"
+	"github.com/befabri/trpcgo/internal/fsutil"
 	"github.com/befabri/trpcgo/internal/typemap"
 )
 
@@ -28,13 +31,12 @@ func (r *Router) GenerateTS(outputPath string) error {
 	// Convert registered procedures (reflect types) to codegen entries.
 	procs, defs := r.convertProcedures()
 
-	// Write to buffer first — only write file on success.
-	var buf bytes.Buffer
-	if err := codegen.WriteAppRouter(&buf, procs, defs); err != nil {
-		return fmt.Errorf("generating TypeScript: %w", err)
+	if err := fsutil.AtomicWriteFile(outputPath, 0o644, func(w io.Writer) error {
+		return codegen.WriteAppRouter(w, procs, defs)
+	}); err != nil {
+		return fmt.Errorf("writing TypeScript output: %w", err)
 	}
-
-	return os.WriteFile(outputPath, buf.Bytes(), 0o644)
+	return nil
 }
 
 // GenerateZod writes Zod validation schemas for all registered procedure
@@ -72,7 +74,13 @@ func (r *Router) GenerateZod(outputPath string) error {
 		return nil
 	}
 
-	return os.WriteFile(outputPath, buf.Bytes(), 0o644)
+	if err := fsutil.AtomicWriteFile(outputPath, 0o644, func(w io.Writer) error {
+		_, err := buf.WriteTo(w)
+		return err
+	}); err != nil {
+		return fmt.Errorf("writing Zod output: %w", err)
+	}
+	return nil
 }
 
 // convertProcedures converts reflect-based procedure registrations to
@@ -91,7 +99,7 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 		}
 		procs = append(procs, procInfo{path, proc.typ, proc.inputType, proc.outputType})
 	}
-	sort.Slice(procs, func(i, j int) bool { return procs[i].path < procs[j].path })
+	slices.SortFunc(procs, func(a, b procInfo) int { return cmp.Compare(a.path, b.path) })
 
 	defs := map[string]*reflectDef{}
 
@@ -137,17 +145,14 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 	for key, d := range defs {
 		sortedDefs = append(sortedDefs, defWithKey{key, d})
 	}
-	sort.Slice(sortedDefs, func(i, j int) bool {
-		return display[sortedDefs[i].key] < display[sortedDefs[j].key]
+	slices.SortFunc(sortedDefs, func(a, b defWithKey) int {
+		return cmp.Compare(display[a.key], display[b.key])
 	})
 
 	typeDefs := make([]typemap.TypeDef, len(sortedDefs))
 	for i, dk := range sortedDefs {
 		d := dk.def
-		resolvedName := display[dk.key]
-		if resolvedName == "" {
-			resolvedName = d.name
-		}
+		resolvedName := cmp.Or(display[dk.key], d.name)
 		typeDefs[i] = typemap.TypeDef{
 			Name:        resolvedName,
 			Kind:        typemap.TypeDefInterface,

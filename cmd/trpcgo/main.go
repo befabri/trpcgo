@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,14 +29,7 @@ type generateOptions struct {
 	stderr   io.Writer
 }
 
-type outputFile interface {
-	io.Writer
-	Close() error
-}
-
-var createOutputFile = func(path string) (outputFile, error) {
-	return os.Create(path)
-}
+var writeOutputFile = fsutil.AtomicWriteFile
 
 var (
 	errUsage = errors.New("usage")
@@ -185,13 +179,9 @@ func watchGenerateLoop(opts generateOptions, watcher *fsnotify.Watcher, done <-c
 	}
 }
 
-func generate(opts generateOptions) (err error) {
-	if opts.stdout == nil {
-		opts.stdout = os.Stdout
-	}
-	if opts.stderr == nil {
-		opts.stderr = os.Stderr
-	}
+func generate(opts generateOptions) error {
+	opts.stdout = cmp.Or(opts.stdout, io.Writer(os.Stdout))
+	opts.stderr = cmp.Or(opts.stderr, io.Writer(os.Stderr))
 
 	result, err := analysis.Analyze(opts.patterns, opts.dir)
 	if err != nil {
@@ -202,61 +192,38 @@ func generate(opts generateOptions) (err error) {
 		fmt.Fprintln(opts.stderr, "Warning: no tRPC procedure registrations found")
 	}
 
-	var w io.Writer
-	if opts.output != "" {
-		f, openErr := createOutputFile(opts.output)
-		if openErr != nil {
-			return fmt.Errorf("creating output file: %w", openErr)
-		}
-		w = f
-		defer func() {
-			if cerr := f.Close(); cerr != nil && err == nil {
-				err = fmt.Errorf("closing output file: %w", cerr)
-			}
-		}()
-	} else {
-		w = opts.stdout
+	gen := codegen.Prepare(result, result.TypeMetas)
+	writeTypes := func(w io.Writer) error {
+		return codegen.WriteAppRouter(w, gen.Procs, gen.Defs)
 	}
-
-	genResult, err := codegen.Generate(w, result, result.TypeMetas)
-	if err != nil {
-		return err
+	if opts.output != "" {
+		if err := writeOutputFile(opts.output, 0o644, writeTypes); err != nil {
+			return fmt.Errorf("writing output file: %w", err)
+		}
+	} else {
+		if err := writeTypes(opts.stdout); err != nil {
+			return fmt.Errorf("writing TypeScript output: %w", err)
+		}
 	}
 
 	// Generate Zod schemas if requested.
-	if opts.zod != "" && genResult != nil {
+	if opts.zod != "" {
 		style := typemap.ZodStandard
 		if opts.zodMini {
 			style = typemap.ZodMini
 		}
 
-		zodFile, openErr := createOutputFile(opts.zod)
-		if openErr != nil {
-			return fmt.Errorf("creating zod output file: %w", openErr)
-		}
-		defer func() {
-			if cerr := zodFile.Close(); cerr != nil && err == nil {
-				err = fmt.Errorf("closing zod output file: %w", cerr)
-			}
-		}()
-
-		if err := codegen.WriteZodSchemas(zodFile, genResult.Procs, genResult.Defs, style); err != nil {
+		if err := writeOutputFile(opts.zod, 0o644, func(w io.Writer) error {
+			return codegen.WriteZodSchemas(w, gen.Procs, gen.Defs, style)
+		}); err != nil {
 			return fmt.Errorf("writing zod schemas: %w", err)
 		}
 	}
 
-	if opts.enums != "" && genResult != nil {
-		enumsFile, openErr := createOutputFile(opts.enums)
-		if openErr != nil {
-			return fmt.Errorf("creating enums output file: %w", openErr)
-		}
-		defer func() {
-			if cerr := enumsFile.Close(); cerr != nil && err == nil {
-				err = fmt.Errorf("closing enums output file: %w", cerr)
-			}
-		}()
-
-		if err := codegen.WriteEnums(enumsFile, genResult.Defs); err != nil {
+	if opts.enums != "" {
+		if err := writeOutputFile(opts.enums, 0o644, func(w io.Writer) error {
+			return codegen.WriteEnums(w, gen.Defs)
+		}); err != nil {
 			return fmt.Errorf("writing enum values: %w", err)
 		}
 	}

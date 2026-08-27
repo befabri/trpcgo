@@ -2,6 +2,7 @@ package trpcgo
 
 import (
 	"bytes"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -246,7 +247,10 @@ func writeIfChanged(path string, data []byte, label string) {
 		return
 	}
 
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := fsutil.AtomicWriteFile(path, 0o644, func(w io.Writer) error {
+		_, err := w.Write(data)
+		return err
+	}); err != nil {
 		log.Printf("trpcgo: failed to write %s: %v", label, err)
 		return
 	}
