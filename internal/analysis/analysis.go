@@ -67,29 +67,23 @@ func Analyze(patterns []string, dir string) (*Result, error) {
 			})
 		}
 
-		// Extract type metadata from AST.
 		extractConstGroups(pkg, metas)
 		extractTypeInfo(pkg, metas)
 	}
 
-	// Type metadata for types defined in sibling packages (e.g. an API response
-	// field typed repository.VideoStatus) lives outside the matched patterns, so
-	// the loop above never sees it. Walk the same-module import closure and
-	// collect it too; otherwise such fields lose const unions, aliases, and
-	// comments.
+	// Types declared in sibling packages of the same module fall outside the
+	// matched patterns; without their metadata such fields lose const unions,
+	// aliases, and comments.
 	extractImportedTypeInfo(pkgs, metas)
 
 	return &Result{Procedures: procedures, TypeMetas: metas}, nil
 }
 
-// extractImportedTypeInfo registers metadata for types defined in packages
-// imported by the matched ones. The traversal is gated to the root packages'
-// own module: standard-library and third-party enum types (e.g. time.Duration,
-// whose Nanosecond…Hour are typed constants) are deliberately left alone so
-// dependency internals never leak in as unions. Collection is keyed by type, and
-// registerUnion/registerAlias run lazily during conversion, so only types
-// actually referenced by a procedure's input or output reach the generated
-// output.
+// extractImportedTypeInfo registers metadata for types in packages the matched
+// ones import, limited to the root packages' module so third-party enum types
+// such as time.Duration never leak in as unions. Only types a procedure
+// references reach the output, because registerUnion and registerAlias run
+// lazily during conversion.
 func extractImportedTypeInfo(pkgs []*packages.Package, metas map[string]typemap.TypeMeta) {
 	rootModules := make(map[string]bool)
 	rootPkgs := make(map[*packages.Package]bool)
@@ -136,12 +130,10 @@ func extractConstGroups(pkg *packages.Package, metas map[string]typemap.TypeMeta
 					if !ok {
 						continue
 					}
-					// Only group constants with named types.
 					named, ok := c.Type().(*types.Named)
 					if !ok {
 						continue
 					}
-					// Only basic underlying types (string, int, etc.).
 					if _, ok := named.Underlying().(*types.Basic); !ok {
 						continue
 					}
@@ -175,7 +167,6 @@ func extractTypeInfo(pkg *packages.Package, metas map[string]typemap.TypeMeta) {
 				key := typemap.TypeID(obj)
 				meta := metas[key]
 
-				// Detect type aliases and defined basic types.
 				if ts.Assign.IsValid() {
 					// `type X = string` (alias syntax)
 					meta.IsAlias = true
@@ -188,7 +179,6 @@ func extractTypeInfo(pkg *packages.Package, metas map[string]typemap.TypeMeta) {
 					}
 				}
 
-				// Extract doc comment.
 				doc := ts.Doc
 				if doc == nil && len(genDecl.Specs) == 1 {
 					doc = genDecl.Doc
@@ -197,7 +187,6 @@ func extractTypeInfo(pkg *packages.Package, metas map[string]typemap.TypeMeta) {
 					meta.Comment = strings.TrimSpace(doc.Text())
 				}
 
-				// Extract field comments for struct types.
 				if st, ok := ts.Type.(*ast.StructType); ok && st.Fields != nil {
 					fieldComments := make(map[int]string)
 					idx := 0

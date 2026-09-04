@@ -8,8 +8,8 @@ import (
 
 // effectiveOutputType returns the output type to use for codegen. When an
 // OutputParser[O, P] option was provided, it overrides the handler's O with P.
-// When only an untyped WithOutputParser is present, the exact post-parse shape
-// is unknown, so codegen falls back to any/unknown rather than lying.
+// When only an untyped WithOutputParser is present the post-parse shape is
+// unknown, so codegen falls back to any.
 func effectiveOutputType(handlerOut reflect.Type, cfg procedureConfig) reflect.Type {
 	if cfg.parsedOutputType != nil {
 		return cfg.parsedOutputType

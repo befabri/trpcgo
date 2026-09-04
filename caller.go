@@ -22,14 +22,13 @@ func (r *Router) RawCall(ctx context.Context, path string, input json.RawMessage
 		return nil, NewError(CodeBadRequest, "subscriptions are not supported via RawCall")
 	}
 
-	// Inject procedure metadata and response metadata into context.
-	// Response metadata allows handlers to call SetCookie/SetResponseHeader
-	// even via RawCall (callers can retrieve it with GetResponseMetadata).
 	ctx = WithProcedureMeta(ctx, ProcedureMeta{
 		Path: path,
 		Type: proc.typ,
 		Meta: proc.meta,
 	})
+	// Response metadata is injected so handlers can still SetCookie and
+	// SetResponseHeader under RawCall.
 	if getResponseMetadata(ctx) == nil {
 		ctx = WithResponseMetadata(ctx)
 	}
@@ -56,12 +55,12 @@ func Call[I any, O any](r *Router, ctx context.Context, path string, input I) (O
 		return zero, err
 	}
 
-	// Try direct type assertion first (avoids JSON round-trip).
+	// A direct assertion skips the JSON round-trip when the handler already
+	// returned an O.
 	if typed, ok := result.(O); ok {
 		return typed, nil
 	}
 
-	// Fallback: JSON round-trip for type conversion.
 	data, err := json.Marshal(result)
 	if err != nil {
 		return zero, NewError(CodeInternalServerError, "failed to serialize result")

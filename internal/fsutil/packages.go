@@ -29,10 +29,8 @@ func ResolvePackageDirs(patterns []string, dir string) ([]string, error) {
 		return nil, fmt.Errorf("loading packages: %w", err)
 	}
 
-	// Don't abort on package-level errors (type errors, parse errors, etc.) —
-	// NeedFiles populates GoFiles even for broken packages, so we can still
-	// determine which directories to watch. The caller has fallback logic for
-	// an empty result.
+	// Package errors are ignored on purpose: NeedFiles still lists GoFiles for
+	// broken packages, and the caller falls back when nothing comes back.
 	set := map[string]bool{}
 	for _, pkg := range pkgs {
 		for _, f := range pkg.GoFiles {
@@ -82,6 +80,8 @@ func WatchDirsAndAncestors(watcher WatchAdder, root string, dirs []string) error
 	return nil
 }
 
+// WatchAdder is the subset of fsnotify.Watcher that WatchDirsAndAncestors
+// needs.
 type WatchAdder interface {
 	Add(name string) error
 }
@@ -172,13 +172,11 @@ func WatchGoInScope(patternRoots []string) func(*fsnotify.Watcher, string) error
 				return WatchRecursive(watcher, dir)
 			}
 			if isWithinRoot(dir, root) {
-				// dir is a strict ancestor of root — watch it so we detect
-				// the next intermediate directory being created toward root.
 				_ = watcher.Add(dir)
 				return nil
 			}
 		}
-		return nil // outside all pattern roots — ignore
+		return nil
 	}
 }
 

@@ -48,9 +48,8 @@ func SetCookie(ctx context.Context, c *http.Cookie) {
 	}
 }
 
-// GetResponseCookies returns the cookies collected in the context by SetCookie.
-// This is useful for RawCall callers that need to inspect cookies set by handlers.
-// Returns nil if the context does not carry response metadata.
+// GetResponseCookies returns a copy of the cookies collected by SetCookie, or
+// nil if the context does not carry response metadata.
 func GetResponseCookies(ctx context.Context) []*http.Cookie {
 	rm := getResponseMetadata(ctx)
 	if rm == nil {
@@ -63,9 +62,8 @@ func GetResponseCookies(ctx context.Context) []*http.Cookie {
 	return out
 }
 
-// GetResponseHeaders returns the headers collected in the context by SetResponseHeader.
-// This is useful for RawCall callers that need to inspect headers set by handlers.
-// Returns nil if the context does not carry response metadata.
+// GetResponseHeaders returns a copy of the headers collected by
+// SetResponseHeader, or nil if the context does not carry response metadata.
 func GetResponseHeaders(ctx context.Context) http.Header {
 	rm := getResponseMetadata(ctx)
 	if rm == nil {

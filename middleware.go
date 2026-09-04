@@ -1,7 +1,6 @@
 package trpcgo
 
-// Middleware wraps a procedure handler, enabling cross-cutting concerns
-// like logging, authentication, and error handling.
+// Middleware wraps a procedure handler.
 type Middleware func(next HandlerFunc) HandlerFunc
 
 // Chain composes multiple middleware into one, applied left-to-right.

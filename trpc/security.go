@@ -124,8 +124,7 @@ func WithCSRFRequireOrigin(enabled bool) HandlerOption {
 // for CSRF and subscription origin checks. This is useful behind
 // TLS-terminating reverse proxies where the Go server receives internal http
 // requests while browsers use a public https origin. Origins must be exact
-// scheme+host values such as
-// "https://api.example.com".
+// scheme+host values such as "https://api.example.com".
 func WithPublicOrigin(origin string) HandlerOption {
 	return WithPublicOrigins(origin)
 }
@@ -228,9 +227,8 @@ func (h *Handler) handleCORS(w http.ResponseWriter, r *http.Request) bool {
 	w.Header().Set("Access-Control-Allow-Methods", strings.Join(h.opts.cors.allowedMethods, ", "))
 	w.Header().Set("Access-Control-Allow-Headers", strings.Join(h.opts.cors.allowedHeaders, ", "))
 	if h.opts.cors.maxAge > 0 {
-		// Round up to whole seconds: a positive MaxAge means the caller wants
-		// preflight caching, so a sub-second value must not truncate to 0 ("do
-		// not cache"). int64 avoids overflow on 32-bit builds.
+		// A sub-second MaxAge must round up rather than truncate to 0, which
+		// browsers read as "do not cache". int64 avoids overflow on 32-bit builds.
 		seconds := int64(h.opts.cors.maxAge / time.Second)
 		if h.opts.cors.maxAge%time.Second != 0 {
 			seconds++
@@ -357,10 +355,9 @@ func (h *Handler) allowedSubscriptionOrigin(r *http.Request, value string, allow
 	if h.opts.csrf.publicOrigins[origin] {
 		return true
 	}
-	// Trusted origins are explicitly allowed to send cross-origin POSTs, a
-	// stronger trust signal than CORS read access, so they may subscribe too.
-	// This also lets users with external CORS middleware (no trpc.WithCORS)
-	// enable the check via WithTrustedOrigins.
+	// An origin trusted for cross-origin POSTs may subscribe too. This also
+	// lets setups with external CORS middleware enable the check through
+	// WithTrustedOrigins.
 	if h.opts.csrf.trustedOrigins[origin] {
 		return true
 	}
@@ -374,10 +371,9 @@ func (h *Handler) corsAllowsOrigin(origin string, hasCookie bool) bool {
 	if h.opts.cors.allowedOrigins[origin] {
 		return true
 	}
-	// Wildcard CORS only means "any origin may read non-credentialed
-	// responses". It must not let a cookie-bearing cross-site request reach a
-	// subscription resolver, since the side effect would run before the browser
-	// blocks the response read.
+	// A wildcard only grants non-credentialed reads. A cookie-bearing cross-site
+	// request must not reach a subscription resolver, whose side effects run
+	// before the browser blocks the read.
 	if hasCookie {
 		return false
 	}

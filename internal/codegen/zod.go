@@ -14,11 +14,9 @@ import (
 // WriteZodSchemas writes Zod 4 validation schemas for all procedure input types
 // and their transitive dependencies.
 func WriteZodSchemas(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef, style typemap.ZodStyle) error {
-	// Collect all input type names from procedures.
 	inputTypeNames := make(map[string]bool)
 	for _, p := range procs {
 		if p.InputTS != "void" {
-			// Extract the top-level type name (strip generic args).
 			name := stripGenericArgs(p.InputTS)
 			inputTypeNames[name] = true
 		}
@@ -28,7 +26,6 @@ func WriteZodSchemas(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef, sty
 		return nil
 	}
 
-	// Build dependency graph and find reachable types.
 	defsByName := make(map[string]typemap.TypeDef)
 	for _, d := range defs {
 		defsByName[d.Name] = d
@@ -36,7 +33,6 @@ func WriteZodSchemas(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef, sty
 
 	reachable := transitiveReachable(inputTypeNames, defsByName)
 
-	// Topological sort for correct emit order (dependencies before dependents).
 	plan := topologicalSort(reachable, defsByName)
 
 	ew := newErrWriter(w)
@@ -50,7 +46,6 @@ func WriteZodSchemas(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef, sty
 	}
 	ew.println("")
 
-	// Emit schemas in dependency order.
 	for _, name := range plan.Order {
 		def, ok := defsByName[name]
 		if !ok {
@@ -80,18 +75,13 @@ func writeZodObject(ew *errWriter, def typemap.TypeDef, cycles map[string]map[st
 	isCyclic := len(cycles[def.Name]) > 0
 	hasExtends := len(def.Extends) > 0
 
-	// Build the schema expression opener.
-	// Standard: BaseSchema.extend({...}) or z.object({...})
-	// Mini: z.extend(BaseSchema, {...}) or z.object({...})
 	var objectExpr string
 	if hasExtends {
-		// extendsBaseExpr returns e.g. "BaseSchema.extend(" or "z.extend(BaseSchema, "
 		objectExpr = extendsBaseExpr(def.Extends, style) + "{"
 	} else {
 		objectExpr = "z.object({"
 	}
 
-	// Collect omitted field names to skip refinements that reference them.
 	omitted := map[string]bool{}
 	for _, f := range def.Fields {
 		if f.ZodOmit {
@@ -99,7 +89,7 @@ func writeZodObject(ew *errWriter, def typemap.TypeDef, cycles map[string]map[st
 		}
 	}
 
-	// Count active refinements.
+	// A refinement that references an omitted field is dropped.
 	var activeRefs []typemap.Refinement
 	for _, ref := range def.Refinements {
 		if !omitted[ref.Field] && !omitted[ref.OtherField] {
@@ -125,16 +115,14 @@ func writeZodObject(ew *errWriter, def typemap.TypeDef, cycles map[string]map[st
 		ew.printf("  %s: %s,%s\n", typemap.QuotePropName(f.Name), zodType, comment)
 	}
 
-	// Close the object expression (without trailing ; — refinements may follow).
+	// No semicolon yet: refinements and meta follow.
 	if isCyclic {
 		ew.print("}))")
 	} else {
 		ew.print("})")
 	}
 
-	// Emit refinements for cross-field validation rules.
-	// Standard: expr.refine(fn, opts)
-	// Mini: expr.check(z.refine(fn, opts))  (.check() accepts $ZodCheck)
+	// zod/mini has no .refine method; it takes z.refine through .check().
 	for _, ref := range activeRefs {
 		if style == typemap.ZodMini {
 			ew.print(".check(z.refine(\n")
@@ -303,34 +291,26 @@ func writeZodAlias(ew *errWriter, def typemap.TypeDef, style typemap.ZodStyle) {
 
 // fieldToZod converts a single field to its Zod representation.
 func fieldToZod(f typemap.Field, cyclicFields map[string]bool, style typemap.ZodStyle) string {
-	// Check if there's a base type directly from validate tags + Go kind.
 	base := typemap.ZodBaseForTSType(f.Type, f.GoKind)
 
 	if base != "" {
-		// Primitive or known type — use ZodType for full constraint chain.
 		return typemap.ZodType(f, style)
 	}
 
-	// Complex types.
 	tsType := f.Type
 
-	// Array: "Foo[]" → z.array(FooSchema)
 	if before, ok := strings.CutSuffix(tsType, "[]"); ok {
 		return arrayFieldToZod(before, f, style)
 	}
 
-	// Record: "Record<K, V>" → z.record(K, V)
 	if strings.HasPrefix(tsType, "Record<") {
 		return recordFieldToZod(tsType, f.Optional, style)
 	}
 
-	// Named type reference: "Foo" → FooSchema
-	// Check for cyclic reference — use getter syntax.
+	// A cyclic reference needs no special form: the parent schema is wrapped
+	// in z.lazy().
 	refName := stripGenericArgs(tsType)
 	ref := refName + "Schema"
-
-	// Cyclic references work because the parent schema uses z.lazy(),
-	// which defers evaluation until runtime. The ref is just the schema name.
 
 	if f.Optional {
 		if style == typemap.ZodMini {
@@ -443,7 +423,6 @@ func tsTypeToZodRef(tsType, goKind string) string {
 	if base != "" {
 		return base
 	}
-	// Named type → Schema reference.
 	return stripGenericArgs(tsType) + "Schema"
 }
 
@@ -480,7 +459,7 @@ func splitTopLevel(s string, sep byte) []string {
 // EmitPlan holds the topological order and cycle information for Zod emission.
 type EmitPlan struct {
 	Order  []string                   // type names in dependency order (leaves first)
-	Cycles map[string]map[string]bool // parentType → set of field type names needing getter syntax
+	Cycles map[string]map[string]bool // parent type → field types that close a cycle; the parent is emitted via z.lazy()
 }
 
 // transitiveReachable finds all types reachable from the given root set.
@@ -498,12 +477,10 @@ func transitiveReachable(roots map[string]bool, defs map[string]typemap.TypeDef)
 		}
 		if def.Kind == typemap.TypeDefInterface {
 			for _, f := range def.Fields {
-				// Extract referenced type names from the TS type string.
 				for _, ref := range extractTypeRefs(f.Type) {
 					visit(ref)
 				}
 			}
-			// Follow extends relationships — base types are dependencies.
 			for _, ext := range def.Extends {
 				for _, ref := range extractTypeRefs(ext) {
 					visit(ref)
@@ -517,12 +494,10 @@ func transitiveReachable(roots map[string]bool, defs map[string]typemap.TypeDef)
 	return reachable
 }
 
-// topologicalSort produces a dependency-ordered list of types to emit.
-// Returns cycle info for types that need getter syntax.
+// topologicalSort orders the reachable types leaves first and reports which
+// references close a cycle.
 func topologicalSort(reachable map[string]bool, defs map[string]typemap.TypeDef) EmitPlan {
-	// Build adjacency: type → types it depends on.
-	// Self-references are tracked separately since they aren't graph edges
-	// but still require z.lazy() wrapping.
+	// A self-reference is not a graph edge but still needs z.lazy().
 	deps := make(map[string][]string)
 	selfRefs := make(map[string]bool)
 	for name := range reachable {
@@ -557,7 +532,6 @@ func topologicalSort(reachable map[string]bool, defs map[string]typemap.TypeDef)
 		}
 	}
 
-	// Detect cycles using DFS coloring.
 	type color int
 	const (
 		white color = iota
@@ -574,13 +548,11 @@ func topologicalSort(reachable map[string]bool, defs map[string]typemap.TypeDef)
 			return
 		}
 		if colors[name] == gray {
-			// Cycle detected — marked by caller.
 			return
 		}
 		colors[name] = gray
 		for _, dep := range deps[name] {
 			if colors[dep] == gray {
-				// Back-edge: name depends on dep which is still being processed → cycle.
 				if cycles[name] == nil {
 					cycles[name] = make(map[string]bool)
 				}
@@ -600,7 +572,6 @@ func topologicalSort(reachable map[string]bool, defs map[string]typemap.TypeDef)
 		dfs(name)
 	}
 
-	// Merge self-references into cycles map.
 	for name := range selfRefs {
 		if cycles[name] == nil {
 			cycles[name] = make(map[string]bool)
@@ -614,13 +585,11 @@ func topologicalSort(reachable map[string]bool, defs map[string]typemap.TypeDef)
 // extractTypeRefs pulls named type references from a TS type string.
 // "Foo[]" → ["Foo"], "Record<string, Bar>" → ["Bar"], "Foo" → ["Foo"]
 func extractTypeRefs(tsType string) []string {
-	// Skip primitive types.
 	switch tsType {
 	case "string", "number", "boolean", "unknown", "void", "null", "undefined", "never":
 		return nil
 	}
 
-	// Array: "Foo[]" → Foo
 	if before, ok := strings.CutSuffix(tsType, "[]"); ok {
 		elem := before
 		elem = strings.TrimPrefix(elem, "(")
@@ -628,7 +597,6 @@ func extractTypeRefs(tsType string) []string {
 		return extractTypeRefs(elem)
 	}
 
-	// Record: "Record<K, V>"
 	if strings.HasPrefix(tsType, "Record<") {
 		inner := tsType[len("Record<") : len(tsType)-1]
 		parts := splitTopLevel(inner, ',')
@@ -639,7 +607,6 @@ func extractTypeRefs(tsType string) []string {
 		return refs
 	}
 
-	// Generic instantiation: "Foo<Bar, Baz>"
 	if idx := strings.IndexByte(tsType, '<'); idx >= 0 {
 		name := tsType[:idx]
 		inner := tsType[idx+1 : len(tsType)-1]
@@ -655,7 +622,6 @@ func extractTypeRefs(tsType string) []string {
 		return nil
 	}
 
-	// Union types: "A | B"
 	if strings.Contains(tsType, " | ") {
 		var refs []string
 		for p := range strings.SplitSeq(tsType, " | ") {
@@ -664,6 +630,5 @@ func extractTypeRefs(tsType string) []string {
 		return refs
 	}
 
-	// Named type.
 	return []string{tsType}
 }

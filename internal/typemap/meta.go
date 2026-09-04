@@ -80,8 +80,8 @@ func ParseTSTypeTag(rawTag string) (TSTypeTag, bool) {
 	if tstype == "-" {
 		return TSTypeTag{Type: "-"}, true
 	}
-	// Split on commas, but reassemble non-option parts back into the type.
-	// This handles TS types with commas like "Record<string, unknown>".
+	// Non-option parts are rejoined so a type such as "Record<string, unknown>"
+	// survives the split on commas.
 	var result TSTypeTag
 	var typeParts []string
 	for p := range strings.SplitSeq(tstype, ",") {
@@ -108,7 +108,7 @@ func ParseTSDocTag(rawTag string) (doc string, ok bool) {
 	return doc, ok
 }
 
-// ParseZodOmitTag returns true if the field has `zod_omit:"true"`.
+// ParseZodOmitTag reports whether the field has `zod_omit:"true"`.
 // Fields with this tag are excluded from Zod schema generation
 // but still appear in the TypeScript interface.
 func ParseZodOmitTag(rawTag string) bool {

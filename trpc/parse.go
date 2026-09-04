@@ -18,7 +18,7 @@ type parsedRequest struct {
 	input json.RawMessage
 }
 
-// containsTraversal rejects paths that contain directory traversal segments.
+// containsTraversal reports whether path has a "." or ".." segment.
 func containsTraversal(path string) bool {
 	for segment := range strings.SplitSeq(path, "/") {
 		if segment == "." || segment == ".." {
@@ -119,7 +119,7 @@ func readBody(r *http.Request, maxSize int64) ([]byte, error) {
 	return body, nil
 }
 
-// isBatchRequest checks if the request is a batch request (?batch=1).
+// isBatchRequest reports whether the request carries ?batch=1.
 func isBatchRequest(r *http.Request) bool {
 	return r.URL.Query().Get("batch") == "1"
 }

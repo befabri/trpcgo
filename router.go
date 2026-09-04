@@ -16,7 +16,7 @@ type Router struct {
 	procedures     map[string]*procedure
 	middleware     []Middleware
 	opts           routerOptions
-	sseConnections atomic.Int64 // active SSE connection count
+	sseConnections atomic.Int64
 	watcherOnce    sync.Once
 	closeOnce      sync.Once
 	done           chan struct{} // closed by Close() to stop the watcher goroutine
@@ -75,9 +75,6 @@ func (r *Router) Merge(sources ...*Router) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Collect all procedures first, checking for duplicates against both
-	// the target router and across sources. This ensures atomicity: either
-	// all procedures are added or none are.
 	type entry struct {
 		path string
 		proc *procedure
@@ -101,7 +98,6 @@ func (r *Router) Merge(sources ...*Router) error {
 		src.mu.RUnlock()
 	}
 
-	// All checks passed — insert.
 	for _, e := range toAdd {
 		r.procedures[e.path] = &procedure{
 			typ:             e.proc.typ,
@@ -153,10 +149,10 @@ func applyOutputHooks(output any, outputValidator func(any) error, outputParser 
 	return output, nil
 }
 
-// executeProcedure decodes the raw JSON input, validates it, and calls the handler.
-// Used by RawCall where the procedure comes from r.procedures (not a snapshot).
+// executeProcedure serves RawCall from the live registry rather than a
+// ProcedureMap snapshot, so the middleware chain is built per call unless one
+// was precomputed.
 func (r *Router) executeProcedure(ctx context.Context, proc *procedure, raw json.RawMessage) (any, error) {
-	// Use pre-computed chain if available, otherwise build on the fly.
 	handler := proc.wrappedHandler
 	if handler == nil {
 		handler = applyMiddleware(proc.handler, r.middleware, proc.middleware)

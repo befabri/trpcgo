@@ -113,9 +113,8 @@ func ZodType(f Field, style ZodStyle) string {
 	base := zodBaseType(f)
 	constraints := zodConstraints(f, base)
 
-	// validate:"omitempty" means "skip validation when zero value".
-	// Zod equivalent: .or(z.literal(<zero>)) to accept the zero value
-	// alongside the constrained type.
+	// validate:"omitempty" skips validation for the zero value, so the schema
+	// must accept the zero literal as well.
 	omitemptyLit := zodOmitemptyLiteral(f, base, constraints)
 
 	if style == ZodMini {
@@ -132,25 +131,24 @@ func ZodType(f Field, style ZodStyle) string {
 	return result
 }
 
-// zodOmitemptyLiteral returns the zero-value literal (e.g. z.literal("")) for
-// .or() wrapping when validate:"omitempty" is set, or "" if no wrapping needed.
-// Note: omitempty and optional are orthogonal — optional handles undefined (nil
-// pointer), .or() handles the Go zero value ("" for strings, 0 for ints).
+// zodOmitemptyLiteral returns the zero-value literal to accept alongside the
+// constrained schema when validate:"omitempty" is set, or "" when the schema
+// already accepts the zero value. Optional covers undefined; this covers the
+// Go zero value.
 func zodOmitemptyLiteral(f Field, base, constraints string) string {
 	if !f.ValidateOmitempty {
 		return ""
 	}
-	// Only needed when constraints reject the zero value.
-	// Plain z.string() already accepts ""; plain z.int() already accepts 0.
-	// Format bases (z.email(), z.url(), etc.) inherently reject empty strings.
+	// Only a constraint or a format base such as z.email() rejects the zero
+	// value.
 	if constraints == "" && !isFormatBase(base) {
 		return ""
 	}
 	return zodZeroLiteral(base)
 }
 
-// isFormatBase returns true if the Zod base type is a format constructor
-// that inherently rejects empty/zero values (e.g. z.email() rejects "").
+// isFormatBase reports whether base is a format constructor that rejects the
+// empty string, as z.email() does.
 func isFormatBase(base string) bool {
 	if isStringBase(base) && base != "z.string()" {
 		return true
@@ -179,15 +177,14 @@ func zodBaseType(f Field) string {
 }
 
 func zodBaseFromKindAndType(tsType, goKind string, rules []ValidateRule) string {
-	// Check format tags FIRST — in Zod 4 they are top-level constructors.
 	for _, rule := range rules {
 		if base := zodFormatBases[rule.Tag]; base != "" {
 			return base
 		}
 	}
 
-	// Check for oneof — becomes z.enum() for strings, z.union([z.literal()]) for numbers.
-	// z.enum() is string-only in Zod 4; numeric oneofs need z.literal() inside z.union().
+	// z.enum only takes strings in Zod 4; a numeric oneof becomes a union of
+	// literals.
 	for _, rule := range rules {
 		if rule.Tag == "oneof" && rule.Param != "" {
 			values := parseOneofValues(rule.Param)
@@ -212,26 +209,20 @@ func zodBaseFromKindAndType(tsType, goKind string, rules []ValidateRule) string 
 		}
 	}
 
-	// Fall back to Go kind / TS type based mapping.
 	if base := zodGoKindBases[goKind]; base != "" {
 		return base
 	}
 
-	// TS type fallback for complex types.
 	if base := zodTSBases[tsType]; base != "" {
 		return base
 	}
 
-	// Array types: "Foo[]" → handled by caller as z.array(FooSchema)
-	// Record types: "Record<K, V>" → handled by caller
-	// Named types: "Foo" → handled by caller as FooSchema reference
-
+	// Arrays, records, and named types are composed by the caller.
 	return ""
 }
 
-// zodConstraints builds the chained constraint methods for a field.
-// The base parameter is needed to determine if we're dealing with a string
-// or number schema (min/max have different Zod methods).
+// zodConstraints builds the chained constraint methods for a field. base
+// decides whether min and max are lengths or numeric bounds.
 func zodConstraints(f Field, base string) string {
 	if len(f.Validate) == 0 {
 		return ""
@@ -540,25 +531,20 @@ func zodMini(base string, constraints string, optional bool, omitemptyLit string
 		return base
 	}
 
-	// Convert method chain constraints to z.check() style.
-	// ".min(3).max(50)" → "z.minLength(3), z.maxLength(50)" for strings
-	// ".gte(1).lte(20)" → "z.gte(1), z.lte(20)" for numbers
+	// Zod Mini takes constraints as z.check arguments instead of a method chain.
 	var checks []string
 	if constraints != "" {
-		// Parse the chained methods.
 		remaining := constraints
 		for remaining != "" {
 			if !strings.HasPrefix(remaining, ".") {
 				break
 			}
 			remaining = remaining[1:]
-			// Find end of method call.
 			parenIdx := strings.IndexByte(remaining, '(')
 			if parenIdx < 0 {
 				break
 			}
 			method := remaining[:parenIdx]
-			// Find matching close paren, respecting quoted string args.
 			closeIdx := zodCallCloseIndex(remaining[parenIdx:])
 			if closeIdx < 0 {
 				break
@@ -755,8 +741,8 @@ func invalidZodRule(rule ValidateRule, goKind string) bool {
 	}
 }
 
-// isStringBase returns true if the Zod base type is string-like
-// (determines whether min/max mean length vs numeric bound).
+// isStringBase reports whether base is string-like, which makes min and max
+// lengths rather than numeric bounds.
 func isStringBase(base string) bool {
 	return strings.HasPrefix(base, "z.string()") || zodStringBases[base]
 }

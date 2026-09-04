@@ -108,7 +108,6 @@ func HandleDirEvent(watcher *fsnotify.Watcher, event fsnotify.Event) {
 // the recursive watch strategy.
 func HandleDirEventWith(watcher *fsnotify.Watcher, event fsnotify.Event, watchFn func(*fsnotify.Watcher, string) error) {
 	if event.Op&fsnotify.Create != 0 && isDir(event.Name) {
-		// New directory — watch it and any subdirectories.
 		_ = watchFn(watcher, event.Name)
 	}
 }

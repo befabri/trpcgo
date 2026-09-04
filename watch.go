@@ -33,13 +33,9 @@ type watcherConfig struct {
 	handleDirCreate func(*fsnotify.Watcher, string) error
 }
 
-// startWatcher watches .go files in the current working directory (recursively)
-// and regenerates TypeScript types and Zod schemas when changes are detected.
-// It uses static analysis (go/packages) to read source files directly, so
-// changes are picked up without a server restart.
-//
-// If the Go code is broken (syntax errors, type errors), the previous
-// generated files are preserved.
+// startWatcher regenerates the TypeScript types and Zod schemas from source
+// whenever a .go file under the working directory changes. Broken source
+// keeps the previous output.
 func (r *Router) startWatcher() {
 	cfg, err := r.newWatcherConfig()
 	if err != nil {
@@ -135,7 +131,8 @@ func (r *Router) runWatcherLoop(cfg watcherConfig, after func(time.Duration) <-c
 		regenerate = regenerateFromSource
 	}
 
-	// Run static analysis immediately to enrich reflect-generated types.
+	// The first pass replaces the reflect-generated types with the richer
+	// static-analysis output.
 	regenerate(cfg.opts)
 
 	var debounce <-chan time.Time
@@ -148,7 +145,6 @@ func (r *Router) runWatcherLoop(cfg watcherConfig, after func(time.Duration) <-c
 			if !ok {
 				return
 			}
-			// Handle directory creation/removal for recursive watching.
 			fsutil.HandleDirEventWith(cfg.watcher, event, cfg.handleDirCreate)
 
 			if !fsutil.IsGoWriteOrCreate(event) {
@@ -183,13 +179,11 @@ func absPath(p string) string {
 	return abs
 }
 
-// regenerateFromSource uses static analysis to read Go source files and
-// regenerate TypeScript types (and optionally Zod schemas). If the source
-// has errors, the previous files are preserved.
+// regenerateFromSource rewrites the generated files from static analysis,
+// keeping the previous files when the source has errors.
 func regenerateFromSource(opts watchOpts) {
 	result, err := analysis.Analyze(opts.patterns, opts.dir)
 	if err != nil {
-		// Source is broken — keep previous types.
 		log.Printf("trpcgo: source has errors, keeping previous types")
 		return
 	}
@@ -207,7 +201,6 @@ func regenerateFromSource(opts watchOpts) {
 
 	writeIfChanged(opts.output, buf.Bytes(), "types")
 
-	// Generate Zod schemas if configured.
 	if opts.zodOutput != "" && genResult != nil {
 		var zodBuf bytes.Buffer
 		if err := codegen.WriteZodSchemas(&zodBuf, genResult.Procs, genResult.Defs, opts.zodStyle); err != nil {
@@ -215,7 +208,6 @@ func regenerateFromSource(opts watchOpts) {
 			return
 		}
 		if zodBuf.Len() == 0 {
-			// No typed inputs — remove stale file if it exists.
 			if err := os.Remove(opts.zodOutput); err == nil {
 				log.Printf("trpcgo: removed %s (no typed inputs)", opts.zodOutput)
 			}

@@ -101,7 +101,6 @@ func runGenerate(args []string, stdout, stderr io.Writer) error {
 		stderr:   stderr,
 	}
 
-	// Run once.
 	if err := generate(opts); err != nil {
 		return err
 	}
@@ -113,7 +112,6 @@ func runGenerate(args []string, stdout, stderr io.Writer) error {
 }
 
 func watchGenerate(opts generateOptions, dir string) error {
-	// Watch mode.
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
 		return fmt.Errorf("resolving directory: %w", err)
@@ -142,7 +140,6 @@ func watchGenerateLoop(opts generateOptions, watcher *fsnotify.Watcher, done <-c
 		generateFn = generate
 	}
 
-	// Debounce: regenerate at most once per 200ms.
 	var debounce <-chan time.Time
 	for {
 		select {
@@ -153,7 +150,6 @@ func watchGenerateLoop(opts generateOptions, watcher *fsnotify.Watcher, done <-c
 			if !ok {
 				return
 			}
-			// Handle directory creation/removal for recursive watching.
 			fsutil.HandleDirEventWith(watcher, event, fsutil.WatchRecursive)
 
 			if !fsutil.IsGoWriteOrCreate(event) {
@@ -206,7 +202,6 @@ func generate(opts generateOptions) error {
 		}
 	}
 
-	// Generate Zod schemas if requested.
 	if opts.zod != "" {
 		style := typemap.ZodStandard
 		if opts.zodMini {
