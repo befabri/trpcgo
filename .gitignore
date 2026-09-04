@@ -10,6 +10,7 @@ examples/start-trpc/server/example-start-trpc
 
 # Node
 node_modules/
+examples/start-trpc/web/dist/
 
 # Generated (TanStack Router)
 routeTree.gen.ts
