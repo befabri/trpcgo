@@ -1,0 +1,5 @@
+# Starlight reads the i18n collection on every build, and Astro warns when a
+# collection has no entries. This file keeps the collection non-empty for this
+# single-language site. Add keys here to override Starlight's UI strings:
+# https://starlight.astro.build/guides/i18n/#translate-starlights-ui
+{}

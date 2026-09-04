@@ -10,9 +10,9 @@
     "astro": "astro"
   },
   "dependencies": {
-    "@astrojs/starlight": "^0.39.2",
-    "astro": "^6.2.2",
-    "sharp": "^0.34.5",
+    "@astrojs/starlight": "^0.42.0",
+    "astro": "^7.3.1",
+    "sharp": "^0.35.4",
     "turndown": "^7.2.4",
     "turndown-plugin-gfm": "^1.0.2"
   },
