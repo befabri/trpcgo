@@ -6,6 +6,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"strconv"
 	"strings"
 
 	"github.com/befabri/trpcgo/internal/typemap"
@@ -213,8 +214,20 @@ func extractTypeInfo(pkg *packages.Package, metas map[string]typemap.TypeMeta) {
 
 func constToTSLiteral(c *types.Const) string {
 	val := c.Val()
-	if val.Kind() == constant.String {
+	switch val.Kind() {
+	case constant.String:
 		return fmt.Sprintf("%q", constant.StringVal(val))
+	case constant.Float:
+		// ExactString renders fractions as rationals such as 1/2, which is not
+		// a TypeScript numeric literal.
+		if basic, ok := c.Type().Underlying().(*types.Basic); ok && basic.Kind() == types.Float32 {
+			// Float32Val rounds the exact value once; converting through
+			// float64 first can double-round near a float32 midpoint.
+			f, _ := constant.Float32Val(val)
+			return strconv.FormatFloat(float64(f), 'g', -1, 32)
+		}
+		f, _ := constant.Float64Val(val)
+		return strconv.FormatFloat(f, 'g', -1, 64)
 	}
 	return val.ExactString()
 }
