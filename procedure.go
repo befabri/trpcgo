@@ -269,8 +269,18 @@ func (b *ProcedureBuilder) applyProcedureOption(c *procedureConfig) {
 
 func makeHandler[I any, O any](fn func(ctx context.Context, input I) (O, error)) HandlerFunc {
 	return func(ctx context.Context, input any) (any, error) {
-		return fn(ctx, input.(I))
+		return fn(ctx, typedInput[I](input))
 	}
+}
+
+// typedInput converts decoded input to I. JSON null decodes into an interface
+// as nil, on which input.(I) would panic.
+func typedInput[I any](input any) I {
+	if input == nil {
+		var zero I
+		return zero
+	}
+	return input.(I)
 }
 
 func makeVoidHandler[O any](fn func(ctx context.Context) (O, error)) HandlerFunc {

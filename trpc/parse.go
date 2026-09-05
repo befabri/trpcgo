@@ -167,13 +167,14 @@ func mergeLastEventId(r *http.Request, input json.RawMessage) json.RawMessage {
 	if lastEventId == "" {
 		return input
 	}
-	if len(input) == 0 || string(input) == "null" {
-		merged, _ := json.Marshal(map[string]string{"lastEventId": lastEventId})
-		return merged
-	}
 	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(input, &obj); err != nil {
-		return input
+	if len(input) > 0 {
+		if err := json.Unmarshal(input, &obj); err != nil {
+			return input
+		}
+	}
+	if obj == nil {
+		obj = make(map[string]json.RawMessage)
 	}
 	idVal, _ := json.Marshal(lastEventId)
 	obj["lastEventId"] = idVal

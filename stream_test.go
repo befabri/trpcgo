@@ -438,7 +438,7 @@ func TestStreamConsumerRecvReturnsEOFWithZeroRetry(t *testing.T) {
 	}
 }
 
-func TestStreamConsumerRecvNilItemSkipsOutputHooks(t *testing.T) {
+func TestStreamConsumerRecvNilItemRunsOutputHooks(t *testing.T) {
 	router := trpcgo.NewRouter()
 	called := false
 
@@ -457,17 +457,41 @@ func TestStreamConsumerRecvNilItemSkipsOutputHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Recv error = %v, want nil", err)
 	}
-	if called {
-		t.Fatal("output parser was called for nil stream item")
+	if !called {
+		t.Fatal("output parser was not called for nil stream item")
 	}
-	if data != nil {
-		t.Fatalf("Recv data = %v, want nil", data)
+	if data != "parsed" {
+		t.Fatalf("Recv data = %v, want parsed", data)
 	}
 	if id != "" {
 		t.Fatalf("Recv id = %q, want empty", id)
 	}
 	if retry != 0 {
 		t.Fatalf("Recv retry = %d, want 0", retry)
+	}
+}
+
+func TestStreamConsumerCompletionSkipsOutputHooks(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceled=%t", canceled), func(t *testing.T) {
+			r := trpcgo.NewRouter()
+			ch := make(chan any)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if canceled {
+				cancel()
+			} else {
+				close(ch)
+			}
+			trpcgo.MustVoidSubscribe(r, "empty", func(context.Context) (<-chan any, error) { return ch, nil },
+				trpcgo.OutputValidator(func(any) error { t.Error("validator ran on completion"); return nil }),
+				trpcgo.OutputParser(func(any) (any, error) { t.Error("parser ran on completion"); return "unexpected", nil }),
+			)
+			data, _, _, err := streamConsumerFor(t, r, "empty").Recv(ctx)
+			if err != io.EOF || data != nil {
+				t.Fatalf("Recv=(%v,%v), want (nil,EOF)", data, err)
+			}
+		})
 	}
 }
 

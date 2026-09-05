@@ -64,20 +64,18 @@ func TestMergeContextsCancelFuncCancelsMergedContext(t *testing.T) {
 	}
 }
 
-func TestWriteSSEDataSanitizesIDAndWritesRetry(t *testing.T) {
+func TestWriteSSEDataPreservesIDAndWritesRetry(t *testing.T) {
 	rec := httptest.NewRecorder()
-	writeSSEData(rec, []byte(`{"ok":true}`), "safe\ninjected\r-id", 2500)
+	writeSSEData(rec, []byte(`{"ok":true}`), "safe-id", 2500)
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "data: {\"ok\":true}\n") {
 		t.Fatalf("body missing data line: %q", body)
 	}
-	if !strings.Contains(body, "id: safeinjected-id\n") {
-		t.Fatalf("body did not sanitize event id: %q", body)
+	if !strings.Contains(body, "id: safe-id\n") {
+		t.Fatalf("body did not preserve event id: %q", body)
 	}
-	if strings.Contains(body, "id: safe\n") || strings.Contains(body, "injected\r") {
-		t.Fatalf("body contains unsanitized id injection: %q", body)
-	}
+
 	if !strings.Contains(body, "retry: 2500\n") {
 		t.Fatalf("body missing retry line: %q", body)
 	}

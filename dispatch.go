@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -277,8 +278,11 @@ func ConsumeStream(result any) *StreamConsumer {
 // may be non-nil on EOF if the stream has a final return value.
 func (sc *StreamConsumer) Recv(ctx context.Context) (data any, id string, retry int, err error) {
 	item, ok := sc.recv(ctx)
+	if !ok && item == nil {
+		return nil, "", 0, io.EOF
+	}
 
-	processed, err := sc.applyOutputHooks(item)
+	processed, err := applyOutputHooks(item, sc.outputValidator, sc.outputParser)
 	if err != nil {
 		return nil, "", 0, err
 	}
@@ -288,20 +292,17 @@ func (sc *StreamConsumer) Recv(ctx context.Context) (data any, id string, retry 
 		return item, "", 0, io.EOF
 	}
 
-	// Extract TrackedEvent metadata if present.
 	if te, isTracked := item.(tracked); isTracked {
-		return te.trackData(), te.trackID(), te.trackRetry(), nil
+		id := te.trackID()
+		// Reject rather than sanitize: a rewritten ID is a different resume
+		// token, and an SSE id field cannot carry CR, LF, or NUL.
+		if id == "" || strings.ContainsAny(id, "\r\n\x00") {
+			return nil, "", 0, NewError(CodeInternalServerError, "invalid tracked event ID")
+		}
+		return te.trackData(), id, te.trackRetry(), nil
 	}
 
 	return item, "", 0, nil
-}
-
-func (sc *StreamConsumer) applyOutputHooks(item any) (any, error) {
-	// Apply output hooks to both normal items and final values.
-	if item == nil || (sc.outputValidator == nil && sc.outputParser == nil) {
-		return item, nil
-	}
-	return applyOutputHooks(item, sc.outputValidator, sc.outputParser)
 }
 
 // streamConsumable is implemented by streaming results to provide a

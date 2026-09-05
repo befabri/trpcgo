@@ -7,6 +7,11 @@ import "context"
 // back in the input (as lastEventId), allowing the handler to resume from
 // where it left off. Retry tells the client how many milliseconds to wait
 // before reconnecting (0 means not set).
+//
+// IDs must be nonempty and must not contain CR, LF, or NUL. Invalid IDs fail
+// the stream; valid IDs are sent unchanged. With httpSubscriptionLink, onData
+// receives { id, data }. A TrackedEvent nested inside another value encodes
+// as an ordinary struct with ID, Retry, and Data fields.
 type TrackedEvent[T any] struct {
 	ID    string
 	Retry int // milliseconds; 0 means not set
@@ -33,7 +38,7 @@ func (e TrackedEvent[T]) trackData() any  { return e.Data }
 
 func makeStreamHandler[I any, O any](fn func(ctx context.Context, input I) (<-chan O, error)) HandlerFunc {
 	return func(ctx context.Context, input any) (any, error) {
-		ch, err := fn(ctx, input.(I))
+		ch, err := fn(ctx, typedInput[I](input))
 		if err != nil {
 			return nil, err
 		}
@@ -53,7 +58,7 @@ func makeVoidStreamHandler[O any](fn func(ctx context.Context) (<-chan O, error)
 
 func makeStreamHandlerWithFinal[I any, O any](fn func(ctx context.Context, input I) (<-chan O, func() any, error)) HandlerFunc {
 	return func(ctx context.Context, input any) (any, error) {
-		ch, final, err := fn(ctx, input.(I))
+		ch, final, err := fn(ctx, typedInput[I](input))
 		if err != nil {
 			return nil, err
 		}

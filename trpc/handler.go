@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/befabri/trpcgo"
@@ -263,7 +262,18 @@ func (h *Handler) executeCall(ctx context.Context, r *http.Request, call parsedR
 
 // fmtError formats an error using the router's error formatter.
 func (h *Handler) fmtError(err *trpcgo.Error, path string, input json.RawMessage, ctx context.Context, typ trpcgo.ProcedureType) any {
+	ctx = h.procedureContext(ctx, path)
 	return h.router.FormatError(err, path, input, ctx, typ)
+}
+
+func (h *Handler) procedureContext(ctx context.Context, path string) context.Context {
+	if proc, ok := h.procedures.Lookup(path); ok {
+		if meta, present := trpcgo.GetProcedureMeta(ctx); present && meta.Path == path {
+			return ctx
+		}
+		return trpcgo.WithProcedureMeta(ctx, trpcgo.ProcedureMeta{Path: path, Type: proc.Type(), Meta: proc.Meta()})
+	}
+	return ctx
 }
 
 func validateMethod(method string, typ trpcgo.ProcedureType, allowOverride bool) *trpcgo.Error {
@@ -307,6 +317,7 @@ func determineBatchStatus(results []callResult) int {
 // handleStream writes SSE for a subscription result using the tRPC SSE format.
 func (h *Handler) handleStream(ctx context.Context, cancel context.CancelFunc, w http.ResponseWriter, result any, call parsedRequest) {
 	defer cancel()
+	ctx = h.procedureContext(ctx, call.path)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -457,9 +468,7 @@ func (h *Handler) writeStreamReceiveError(ctx context.Context, w http.ResponseWr
 	if cb := h.router.ErrorCallback(); cb != nil {
 		cb(ctx, trpcgo.WrapError(trpcgo.CodeInternalServerError, "internal server error", err), call.path)
 	}
-	formatted := h.fmtError(trpcgo.SanitizeError(err), call.path, call.input, ctx, trpcgo.ProcedureSubscription)
-	errData, _ := json.Marshal(formatted)
-	writeSSENamedEvent(w, "serialized-error", errData)
+	h.writeFormattedStreamError(ctx, w, trpcgo.SanitizeError(err), call)
 }
 
 func writeStreamReturn(w http.ResponseWriter, data any) {
@@ -475,8 +484,26 @@ func (h *Handler) writeStreamError(ctx context.Context, w http.ResponseWriter, e
 	if cb := h.router.ErrorCallback(); cb != nil {
 		cb(ctx, err, call.path)
 	}
+	h.writeFormattedStreamError(ctx, w, err, call)
+}
+
+func (h *Handler) writeFormattedStreamError(ctx context.Context, w http.ResponseWriter, err *trpcgo.Error, call parsedRequest) {
 	formatted := h.fmtError(err, call.path, call.input, ctx, trpcgo.ProcedureSubscription)
-	errData, _ := json.Marshal(formatted)
+	// Only ErrorEnvelope is unwrapped; a custom value with an "error"
+	// property is sent as-is.
+	switch envelope := formatted.(type) {
+	case trpcgo.ErrorEnvelope:
+		formatted = envelope.Error
+	case *trpcgo.ErrorEnvelope:
+		if envelope != nil {
+			formatted = envelope.Error
+		}
+	}
+	errData, marshalErr := json.Marshal(formatted)
+	if marshalErr != nil {
+		fallback := trpcgo.DefaultErrorEnvelope(trpcgo.NewError(trpcgo.CodeInternalServerError, "internal server error"), call.path, false)
+		errData, _ = json.Marshal(fallback.Error)
+	}
 	writeSSENamedEvent(w, "serialized-error", errData)
 }
 
@@ -532,12 +559,40 @@ func (h *Handler) writeJSONLStream(ctx context.Context, w http.ResponseWriter, r
 
 	for range n {
 		res := <-ch
-		chunk := []any{res.index, 0, []any{[]any{res.response}}}
-		chunkData, _ := json.Marshal(chunk)
+		chunkData := h.marshalJSONLResult(ctx, res.index, res.response, calls[res.index])
 		_, _ = w.Write(chunkData)
 		_, _ = w.Write([]byte("\n"))
 		flusher.Flush()
 	}
+}
+
+// marshalJSONLResult encodes one JSONL result chunk. The head has already
+// promised the client a result at this index, so a value that cannot be
+// encoded is replaced by an error envelope rather than dropped.
+func (h *Handler) marshalJSONLResult(ctx context.Context, index int, response any, call parsedRequest) []byte {
+	marshal := func(value any) ([]byte, error) {
+		return json.Marshal([]any{index, 0, []any{[]any{value}}})
+	}
+	data, err := marshal(response)
+	if err == nil {
+		return data
+	}
+	ctx = h.procedureContext(ctx, call.path)
+	serializationErr := trpcgo.WrapError(trpcgo.CodeInternalServerError, "internal server error", err)
+	if cb := h.router.ErrorCallback(); cb != nil {
+		cb(ctx, serializationErr, call.path)
+	}
+	var typ trpcgo.ProcedureType
+	if proc, ok := h.procedures.Lookup(call.path); ok {
+		typ = proc.Type()
+	}
+	data, err = marshal(h.fmtError(serializationErr, call.path, call.input, ctx, typ))
+	if err != nil {
+		// DefaultErrorEnvelope holds only strings and integers, so bypassing
+		// the formatter guarantees this marshal succeeds.
+		data, _ = marshal(trpcgo.DefaultErrorEnvelope(trpcgo.NewError(trpcgo.CodeInternalServerError, "internal server error"), call.path, false))
+	}
+	return data
 }
 
 func (h *Handler) writeErrorResponse(w http.ResponseWriter, err *trpcgo.Error, path string, ctx context.Context, typ trpcgo.ProcedureType) {
@@ -575,7 +630,7 @@ func writeSSENamedEvent(w http.ResponseWriter, event string, data []byte) {
 func writeSSEData(w http.ResponseWriter, data []byte, id string, retry int) {
 	_, _ = fmt.Fprintf(w, "data: %s\n", data)
 	if id != "" {
-		id = strings.NewReplacer("\n", "", "\r", "").Replace(id)
+		// The ID was validated in StreamConsumer.Recv; do not rewrite it here.
 		_, _ = fmt.Fprintf(w, "id: %s\n", id)
 	}
 	if retry > 0 {

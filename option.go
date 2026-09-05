@@ -92,7 +92,8 @@ func WithSSEPingInterval(d time.Duration) Option {
 
 // WithSSEMaxDuration sets the maximum duration for SSE subscriptions.
 // After this duration the server sends a "return" event and closes the
-// connection; the tRPC client will automatically reconnect.
+// connection. httpSubscriptionLink treats this as completion; start a new
+// subscription to continue listening.
 // Default is 30 minutes. Set to -1 for unlimited. Passing 0 keeps the default.
 func WithSSEMaxDuration(d time.Duration) Option {
 	return func(o *routerOptions) {
@@ -182,6 +183,10 @@ func WithStrictInput(enabled bool) Option {
 // WithErrorFormatter sets a custom error formatter that transforms error
 // responses. The function receives the default error shape and can return
 // a modified or entirely different shape. This matches tRPC's errorFormatter.
+//
+// For SSE, an ErrorEnvelope or *ErrorEnvelope result is unwrapped to its Error
+// field; any other value is sent as-is and needs numeric code, message, and
+// data fields for tRPC clients.
 func WithErrorFormatter(fn func(ErrorFormatterInput) any) Option {
 	return func(o *routerOptions) {
 		o.errorFormatter = fn
