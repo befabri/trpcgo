@@ -1,8 +1,6 @@
 package trpcgo
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"sync"
@@ -15,6 +13,8 @@ type Router struct {
 	mu             sync.RWMutex
 	procedures     map[string]*procedure
 	middleware     []Middleware
+	generation     uint64
+	procedureMap   *ProcedureMap
 	opts           routerOptions
 	sseConnections atomic.Int64
 	watcherOnce    sync.Once
@@ -46,6 +46,9 @@ func (r *Router) Use(mw ...Middleware) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.middleware = append(r.middleware, mw...)
+	if len(mw) > 0 {
+		r.generation++
+	}
 }
 
 func (r *Router) register(path string, typ ProcedureType, handler HandlerFunc, mw []Middleware, meta any, inputType, outputType reflect.Type, outputValidator func(any) error, outputParser func(any) (any, error)) error {
@@ -64,6 +67,7 @@ func (r *Router) register(path string, typ ProcedureType, handler HandlerFunc, m
 		outputValidator: outputValidator,
 		outputParser:    outputParser,
 	}
+	r.generation++
 	return nil
 }
 
@@ -110,6 +114,9 @@ func (r *Router) Merge(sources ...*Router) error {
 			outputParser:    e.proc.outputParser,
 		}
 	}
+	if len(toAdd) > 0 {
+		r.generation++
+	}
 	return nil
 }
 
@@ -147,15 +154,4 @@ func applyOutputHooks(output any, outputValidator func(any) error, outputParser 
 		output = parsed
 	}
 	return output, nil
-}
-
-// executeProcedure serves RawCall from the live registry rather than a
-// ProcedureMap snapshot, so the middleware chain is built per call unless one
-// was precomputed.
-func (r *Router) executeProcedure(ctx context.Context, proc *procedure, raw json.RawMessage) (any, error) {
-	handler := proc.wrappedHandler
-	if handler == nil {
-		handler = applyMiddleware(proc.handler, r.middleware, proc.middleware)
-	}
-	return r.executeCommon(ctx, handler, proc.inputType, raw, proc.outputValidator, proc.outputParser)
 }

@@ -25,7 +25,6 @@ type HandlerFunc func(ctx context.Context, input any) (any, error)
 type procedure struct {
 	typ             ProcedureType
 	handler         HandlerFunc
-	wrappedHandler  HandlerFunc // pre-computed: middleware chain around handler
 	middleware      []Middleware
 	meta            any
 	inputType       reflect.Type

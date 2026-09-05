@@ -10,9 +10,7 @@ import (
 //
 // Subscriptions are not supported via RawCall; use the subscription handler directly.
 func (r *Router) RawCall(ctx context.Context, path string, input json.RawMessage) (any, error) {
-	r.mu.RLock()
-	proc, ok := r.procedures[path]
-	r.mu.RUnlock()
+	proc, ok := r.BuildProcedureMap().Lookup(path)
 
 	if !ok {
 		return nil, NewError(CodeNotFound, "procedure not found")
@@ -33,7 +31,7 @@ func (r *Router) RawCall(ctx context.Context, path string, input json.RawMessage
 		ctx = WithResponseMetadata(ctx)
 	}
 
-	result, err := r.executeProcedure(ctx, proc, input)
+	result, err := r.ExecuteEntry(ctx, proc, input)
 	if err != nil {
 		return nil, SanitizeError(err)
 	}

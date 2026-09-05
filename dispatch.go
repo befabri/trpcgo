@@ -7,8 +7,10 @@ import (
 	"errors"
 	"io"
 	"iter"
+	"maps"
 	"net/http"
 	"reflect"
+	"slices"
 	"time"
 )
 
@@ -43,7 +45,8 @@ func (e *ProcedureEntry) OutputType() reflect.Type { return e.outputType }
 // Protocol handler packages use this to build HTTP handlers that serve
 // procedures over the tRPC wire format.
 type ProcedureMap struct {
-	entries map[string]*ProcedureEntry
+	entries    map[string]*ProcedureEntry
+	generation uint64
 }
 
 // Lookup returns the procedure entry for the given path.
@@ -77,21 +80,39 @@ func (pm *ProcedureMap) Len() int {
 // middleware additions do not affect it.
 func (r *Router) BuildProcedureMap() *ProcedureMap {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	if cached := r.procedureMap; cached != nil && cached.generation == r.generation {
+		r.mu.RUnlock()
+		return cached
+	}
+	generation := r.generation
+	procedures, middleware := maps.Clone(r.procedures), slices.Clone(r.middleware)
+	r.mu.RUnlock()
 
-	entries := make(map[string]*ProcedureEntry, len(r.procedures))
-	for path, proc := range r.procedures {
+	// applyMiddleware runs application code that may call Use, so it must
+	// run outside the router lock.
+	entries := make(map[string]*ProcedureEntry, len(procedures))
+	for path, proc := range procedures {
 		entries[path] = &ProcedureEntry{
 			typ:             proc.typ,
 			meta:            proc.meta,
 			inputType:       proc.inputType,
 			outputType:      proc.outputType,
-			handler:         applyMiddleware(proc.handler, r.middleware, proc.middleware),
+			handler:         applyMiddleware(proc.handler, middleware, proc.middleware),
 			outputValidator: proc.outputValidator,
 			outputParser:    proc.outputParser,
 		}
 	}
-	return &ProcedureMap{entries: entries}
+	result := &ProcedureMap{entries: entries, generation: generation}
+	r.mu.Lock()
+	if r.generation == generation {
+		if cached := r.procedureMap; cached != nil && cached.generation == generation {
+			result = cached
+		} else {
+			r.procedureMap = result
+		}
+	}
+	r.mu.Unlock()
+	return result
 }
 
 // ExecuteEntry decodes raw JSON input, validates it, and runs the procedure's
@@ -104,9 +125,6 @@ func (r *Router) ExecuteEntry(ctx context.Context, entry *ProcedureEntry, raw js
 	return r.executeCommon(ctx, entry.handler, entry.inputType, raw, entry.outputValidator, entry.outputParser)
 }
 
-// executeCommon is the shared execution path for both the internal
-// executeProcedure (used by RawCall) and the exported ExecuteEntry
-// (used by protocol handler packages).
 func (r *Router) executeCommon(ctx context.Context, handler HandlerFunc, inputType reflect.Type, raw json.RawMessage, outputValidator func(any) error, outputParser func(any) (any, error)) (any, error) {
 	input, err := r.decodeInput(inputType, raw)
 	if err != nil {
