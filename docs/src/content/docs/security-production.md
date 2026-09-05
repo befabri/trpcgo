@@ -3,13 +3,19 @@ title: Security & Production
 description: Configure validation, input strictness, request limits, CORS, errors, and subscriptions for production.
 ---
 
-trpcgo provides protocol-level safety checks, but application security still belongs in your middleware, validators, and deployment configuration.
+trpcgo checks request formats and enforces configurable limits. Use your own middleware and validators for authentication, authorization, and application rules.
 
 ## Enable Runtime Validation
 
-`validate` tags generate Zod schemas, but they do not run on the server unless you configure a validator.
+The generator reads `validate` tags to produce Zod schemas. To enforce those rules on the server, install a validator and pass it to the router:
+
+```bash
+go get github.com/go-playground/validator/v10
+```
 
 ```go
+import "github.com/go-playground/validator/v10"
+
 validate := validator.New()
 
 router := trpcgo.NewRouter(
@@ -33,7 +39,7 @@ Strict input also applies to `RawCall`. Set `trpcgo.WithStrictInput(false)` only
 
 ## Keep Request Limits
 
-Defaults are conservative:
+The default limits are:
 
 | Limit | Default |
 | --- | --- |
@@ -61,31 +67,19 @@ Use `-1` only when you intentionally want an unlimited setting.
 
 ```go
 router := trpcgo.NewRouter(
-    trpcgo.WithDev(os.Getenv("APP_ENV") != "production"),
+    trpcgo.WithDev(os.Getenv("APP_ENV") == "development"),
 )
 ```
 
-Internal error messages are still masked, but stack traces can reveal implementation details.
+Plain Go errors are still masked, but stack traces can reveal implementation details. See [Errors](/errors/#sanitization) for which typed error messages are sent to clients.
+
+Development mode is off by default. Checking explicitly for `development` keeps it off when `APP_ENV` is unset.
 
 ## Sanitize Error Formatting
 
 Custom error formatters receive request context and raw JSON input. Do not echo secrets, auth tokens, cookies, or arbitrary context values into client responses.
 
-Good formatter pattern:
-
-```go
-trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
-    return map[string]any{
-        "error": map[string]any{
-            "code":    input.Shape.Error.Code,
-            "message": input.Shape.Error.Message,
-            "data":    input.Shape.Error.Data,
-        },
-    }
-})
-```
-
-Use `WithOnError` for detailed server-side logs instead.
+Start with the sanitized fields in `input.Shape` and return an `ErrorEnvelope` to keep HTTP and SSE formatting intact. [Custom Error Formatter](/errors/#custom-error-formatter) shows an example. Use `WithOnError` for detailed server-side logs.
 
 ## Configure CORS
 
@@ -120,9 +114,9 @@ When both `Origin` and `Referer` are missing, non-cookie API clients are allowed
 
 If the Go server runs behind TLS termination and receives internal `http` requests, add the public API origin with `WithPublicOrigin("https://api.example.com")`. Disable the built-in check with `trpc.WithCSRFProtection(false)` only when another layer enforces it.
 
-CSRF protection covers `POST` only. Queries and subscriptions use `GET`, which gets no Origin/Referer check — CORS, not CSRF, decides who may read their responses. But the resolver runs before that CORS check does, so keep query and subscription resolvers free of side effects and move any state change into a mutation. Setting `SameSite=Lax` (or `Strict`) on session cookies adds a second layer: browsers then omit them from cross-site subscription requests.
+By default, CSRF protection covers `POST` only. Queries and subscriptions normally use `GET`, so they can reach your handler even when the browser will block JavaScript from reading the response under CORS. Keep state changes in mutations, and check authentication and authorization in every protected procedure. `SameSite=Lax` or `Strict` session cookies also help by keeping cookies out of cross-site subscription requests.
 
-For defense in depth on side-effectful subscriptions, enable `trpc.WithSubscriptionOriginCheck(true)`. It extends the Origin/Referer check to GET/SSE subscriptions, accepting same-origin requests and origins allowed by `WithTrustedOrigins`, `WithPublicOrigin`, or `WithCORS`. A request with neither header is rejected only when it carries a cookie, so non-browser clients are unaffected. POST subscriptions go through the CSRF check first.
+To check browser origins before a subscription handler runs, enable `trpc.WithSubscriptionOriginCheck(true)`. It extends the Origin/Referer check to GET/SSE subscriptions, accepting same-origin requests and origins allowed by `WithTrustedOrigins`, `WithPublicOrigin`, or `WithCORS`. Wildcard CORS does not allow cookie-bearing cross-origin subscriptions through this check. A request with neither header is rejected only when it carries a cookie, so non-cookie API clients can still connect. POST subscriptions go through the CSRF check first.
 
 ## Treat Reconnect IDs As Untrusted
 
@@ -143,7 +137,10 @@ Because `trpc.NewHandler` snapshots procedures, construct the handler after all 
 For production builds, run static generation before building the frontend:
 
 ```bash
+# From your Go module directory:
 go generate ./...
+
+# From your frontend directory:
 npm run build
 ```
 

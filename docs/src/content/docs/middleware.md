@@ -9,11 +9,11 @@ Middleware has this shape:
 type Middleware func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc
 ```
 
-`HandlerFunc` receives already-decoded input. Middleware does not receive raw JSON.
+`HandlerFunc` receives the decoded Go input, or `nil` for a void procedure. Input decoding and any configured validation happen before middleware, so invalid requests never enter the middleware chain.
 
 ## Global Middleware
 
-Global middleware applies to every procedure on a router.
+Global middleware applies to every procedure on a router. Add it before creating the HTTP handler, which captures the current middleware chain.
 
 ```go
 router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
@@ -39,7 +39,11 @@ trpcgo.MustMutation(router, "user.create", createUser,
 )
 ```
 
-Global middleware wraps per-procedure middleware, so the call order is global middleware first, then per-procedure middleware, then the handler.
+Global middleware runs first, followed by per-procedure middleware in the order you pass it, then the handler. Code after `next(ctx, input)` runs in reverse order as each call returns. Return an error without calling `next` to stop the call before it reaches the handler.
+
+## Server-Side Calls
+
+`Call` and `RawCall` run the same middleware as HTTP calls. They use the current router configuration; an HTTP handler keeps the configuration from when it was created. See [Handler Snapshot](/http-protocol/#handler-snapshot).
 
 ## Procedure Metadata
 
@@ -82,6 +86,8 @@ func requireAuth(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
 | `Type` | `query`, `mutation`, or `subscription`. |
 | `Meta` | The value passed to `WithMeta`. |
 
+`GetMeta[T]` returns the zero value and `false` when metadata is missing or has a different Go type. Check the boolean when your middleware requires metadata to be present.
+
 ## Request Context
 
 Use `WithContextCreator` to derive the context passed to procedures from the incoming HTTP request.
@@ -98,7 +104,7 @@ router := trpcgo.NewRouter(
 )
 ```
 
-Cancellation still follows the original request context. If either the original request context or the returned context is canceled, procedure execution sees cancellation.
+Derive the returned context from `ctx` to keep existing request values. Cancellation follows both contexts: if either the original request context or the returned context is canceled, procedure execution sees cancellation. The context creator runs once per HTTP request, so calls in a batch share its values.
 
 ## Response Headers And Cookies
 

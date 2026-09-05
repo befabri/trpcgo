@@ -3,7 +3,7 @@ title: Struct Tags
 description: Control generated TypeScript fields, names, optionality, docs, and embedded struct behavior from Go tags.
 ---
 
-Go struct tags are the contract between your Go runtime and generated frontend code. They control how fields are named, whether they are optional, and how TypeScript output is customized.
+Use struct tags to set generated field names, mark fields optional, and customize TypeScript types. `json` tags also control Go's JSON encoding; trpcgo-specific tags only affect generated code.
 
 ## JSON Tags
 
@@ -32,8 +32,12 @@ Rules:
 - `json:"name"` sets the TypeScript property name.
 - `json:"-"` excludes the field.
 - `omitempty` and `omitzero` make the field optional.
-- No tag uses the Go field name.
+- Fields without a JSON name use the Go field name.
 - Unexported fields are ignored.
+
+Pointer fields are optional even without `omitempty`. For named structs, `validate:"required"` or `tstype:",required"` overrides that optionality, including optionality from `omitempty` and `omitzero`.
+
+Optional fields allow omission; they do not automatically include `null`. A nil pointer without `omitempty` can still encode as JSON `null`. Use `omitempty` when nil means “leave this field out,” or explicitly model a nullable TypeScript field when `null` is part of your API.
 
 ## TypeScript Overrides
 
@@ -52,11 +56,13 @@ type User struct {
 | --- | --- |
 | `tstype:"SomeType"` | Replaces the generated TypeScript type. |
 | `tstype:",readonly"` | Emits a readonly property. |
-| `tstype:",required"` | Forces a pointer or `omitempty` field to be required. |
+| `tstype:",required"` | Makes a pointer, `omitempty`, or `omitzero` field required. |
 | `tstype:"-"` | Excludes the field from generated TypeScript and Zod metadata. |
 | `tstype:",extends"` | For embedded structs, emits TypeScript `extends` instead of flattening. |
 
 Type overrides may include commas, such as `Record<string, unknown>`.
+
+Type overrides only change TypeScript; JSON encoding and Zod validation still follow the Go type. To exclude a field from the JSON payload, use `json:"-"`.
 
 ## Field Documentation
 
@@ -78,11 +84,11 @@ type CreateUserInput struct {
 }
 ```
 
-Standard Zod output also uses `ts_doc` in `.describe(...)`.
+Standard Zod output adds field documentation with `.describe(...)`. In static generation, a Go field doc comment takes precedence over `ts_doc`; reflection generation uses the tag.
 
 ## Embedded Structs
 
-Embedded structs are flattened by default.
+Embedded structs without a JSON name are flattened by default. Adding a name, such as ``Base `json:"base"` ``, generates a nested `base` field instead.
 
 ```go
 type Base struct {
@@ -95,6 +101,8 @@ type User struct {
 }
 ```
 
+Embedded fields follow Go's JSON field selection rules. A field declared on the outer struct takes precedence over an embedded field with the same JSON name. Fields from an optional embedded pointer are optional too.
+
 Use `tstype:",extends"` to preserve inheritance in TypeScript:
 
 ```go
@@ -104,8 +112,10 @@ type User struct {
 }
 ```
 
-Pointer embedded extends become `Partial<Base>` unless marked `required`.
+An embedded `*Base` with `tstype:",extends"` generates `extends Partial<Base>`. Add `required` to the tag to generate `extends Base`.
+
+If embedded fields conflict or inheritance is recursive, the generator flattens the fields. Zod schemas include embedded fields and their validation rules in the object schema.
 
 ## Related Tags
 
-`validate` and `zod_omit` affect generated Zod schemas rather than the main TypeScript field contract. See [Zod Schemas](/zod-schemas/) for those rules.
+`validate` supplies constraints for generated Zod schemas; `required` also makes fields required in TypeScript interfaces. `zod_omit:"true"` excludes a field from Zod while keeping it in TypeScript. See [Zod Schemas](/zod-schemas/) for examples and supported rules.

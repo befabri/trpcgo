@@ -1,3 +1,4 @@
+import { createTRPCClient, httpBatchLink } from "@trpc/client";
 import type { AppRouter } from "./gen/trpc";
 import { RoleEnum } from "./gen/enums";
 import {

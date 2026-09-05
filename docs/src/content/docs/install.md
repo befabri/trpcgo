@@ -3,9 +3,11 @@ title: Install
 description: Add the trpcgo runtime and generator to a Go module.
 ---
 
-trpcgo ships as a Go runtime package and a Go tool command.
+trpcgo includes a Go runtime for serving procedures and a generator for frontend types and schemas. You'll need Go 1.26 or newer.
 
 ## Add The Runtime
+
+Run this in an existing Go module. For a new project, create one first with `go mod init example.com/myapp`.
 
 ```bash
 go get github.com/befabri/trpcgo@latest
@@ -22,7 +24,13 @@ import (
 
 ## Add The Generator
 
-With Go 1.26+, add the generator as a tool in `go.mod`:
+Add the generator to your module's tool dependencies:
+
+```bash
+go get -tool github.com/befabri/trpcgo/cmd/trpcgo@latest
+```
+
+This adds a tool directive to `go.mod`:
 
 ```go
 tool github.com/befabri/trpcgo/cmd/trpcgo
@@ -35,32 +43,36 @@ mkdir -p web/gen
 go tool trpcgo generate -o web/gen/trpc.ts --zod web/gen/zod.ts ./...
 ```
 
-The CLI creates output files directly, so parent directories must already exist.
+Create output directories first; the CLI does not create missing parent directories.
+
+The generator looks for procedure registrations in the selected Go packages. If you haven't written any yet, continue with [Quick Start](/quick-start/).
 
 ## Frontend Packages
 
 Install the tRPC client packages used by your frontend framework. For a vanilla client:
 
 ```bash
-npm install @trpc/client @trpc/server
+npm install @trpc/client@11 @trpc/server@11
 ```
 
 For React Query:
 
 ```bash
-npm install @trpc/client @trpc/server @trpc/react-query @tanstack/react-query
+npm install @trpc/client@11 @trpc/server@11 @trpc/react-query@11 @tanstack/react-query@5
 ```
 
 For the TanStack React Query helper API shown in [Frontend Setup](/frontend-setup/):
 
 ```bash
-npm install @trpc/client @trpc/server @trpc/tanstack-react-query @tanstack/react-query
+npm install @trpc/client@11 @trpc/server@11 @trpc/tanstack-react-query@11 @tanstack/react-query@5
 ```
+
+Keep your `@trpc/*` packages on matching versions. The generated router type imports from `@trpc/server`, so your frontend needs that package even though the API server runs in Go.
 
 Install Zod if you generate schemas:
 
 ```bash
-npm install zod
+npm install zod@4
 ```
 
 ## Requirements
@@ -69,6 +81,8 @@ npm install zod
 - tRPC v11 client packages.
 - Zod 4 when using `--zod` or `WithZodOutput`.
 
-## What trpcgo Does Not Install
+## Add Your Application Dependencies
 
-trpcgo does not add authentication, persistence, or a web framework. The HTTP handler is plain `net/http`, includes optional CORS handling, and can be mounted behind Chi, Echo, Fiber adapters, standard middleware, or a raw `http.ServeMux`.
+Choose the authentication and persistence libraries that fit your app. trpcgo provides a `net/http` handler with optional CORS handling, so you can use `http.ServeMux`, a compatible Go router, or an adapter for your preferred framework.
+
+For server-side validation with `validate` tags, install a validator and pass it to `WithValidator`. [Quick Start](/quick-start/) shows the setup with `go-playground/validator`.

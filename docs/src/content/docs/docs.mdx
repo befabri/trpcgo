@@ -5,7 +5,7 @@ description: Start here for the trpcgo runtime, code generation, and frontend se
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-This is the entry point to the trpcgo documentation. Your Go handlers and structs are the source of truth: trpcgo serves them over the tRPC HTTP protocol so `@trpc/client`, `@trpc/react-query`, and `@trpc/tanstack-react-query` can consume them without a TypeScript API server.
+Build your API in Go and call it from TypeScript with tRPC clients. trpcgo serves your handlers over the tRPC HTTP protocol and generates frontend types from your Go structs, so you can use `@trpc/client`, `@trpc/react-query`, or `@trpc/tanstack-react-query`.
 
 ## Why Use It
 
@@ -14,7 +14,7 @@ This is the entry point to the trpcgo documentation. Your Go handlers and struct
 		Register typed Go queries, mutations, and SSE subscriptions from your handlers and structs.
 	</Card>
 	<Card title="TypeScript tRPC clients" icon="document">
-		Generate an `AppRouter` contract that plugs into the existing tRPC client ecosystem.
+		Generate an `AppRouter` type that works with tRPC clients and React Query integrations.
 	</Card>
 	<Card title="Validation schemas" icon="pencil">
 		Generate Zod input schemas from Go `validate` tags for client-side form validation.
@@ -23,10 +23,10 @@ This is the entry point to the trpcgo documentation. Your Go handlers and struct
 		Serve procedures from a `net/http` handler with batching, SSE, middleware, and error formatting.
 	</Card>
 	<Card title="Source analysis" icon="open-book">
-		Use `trpcgo generate` to preserve comments, const unions, runtime enum values, aliases, generics, and validation metadata.
+		Use `go tool trpcgo generate` to include comments, const unions, enum values, aliases, generics, and validation tags.
 	</Card>
-	<Card title="Dev watch" icon="rocket">
-		In dev mode, regenerate frontend files on Go file changes without restarting the server.
+	<Card title="Automatic regeneration" icon="rocket">
+		In dev mode, update frontend types and schemas when you save Go files.
 	</Card>
 </CardGrid>
 
@@ -36,6 +36,7 @@ Register procedures in Go, generate the TypeScript router type, then call the AP
 
 ```go
 router := trpcgo.NewRouter(
+    trpcgo.WithDev(true),
     trpcgo.WithValidator(validate.Struct),
     trpcgo.WithTypeOutput("../web/gen/trpc.ts"),
     trpcgo.WithZodOutput("../web/gen/zod.ts"),
@@ -50,6 +51,8 @@ mux := http.NewServeMux()
 mux.Handle("/trpc/", trpc.NewHandler(router, "/trpc"))
 ```
 
+With these dev options, creating the HTTP handler generates the frontend files and starts a watcher. Restart the Go server when you change handler behavior. [Quick Start](/quick-start/) includes the imports, validator setup, and server startup code.
+
 ```ts
 import { createTRPCClient, httpBatchLink } from '@trpc/client';
 import type { AppRouter } from './gen/trpc.js';
@@ -63,4 +66,4 @@ const user = await client.user.get.query({ id: '1' });
 
 ## Where To Go Next
 
-Read [Core Concepts](/concepts/) to understand the runtime model, then follow [Quick Start](/quick-start/) to build the first endpoint.
+Follow [Quick Start](/quick-start/) to build your first endpoint, or read [Core Concepts](/concepts/) to see how procedures, routers, and code generation fit together.

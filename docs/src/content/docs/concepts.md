@@ -3,13 +3,13 @@ title: Core Concepts
 description: Understand how trpcgo connects Go handlers, the tRPC HTTP protocol, and generated TypeScript contracts.
 ---
 
-trpcgo has three main pieces: a Go procedure registry, an HTTP protocol handler, and TypeScript/Zod generation.
+trpcgo connects your Go handlers to a typed TypeScript client. You register procedures on a router, serve them over HTTP, and generate TypeScript types and optional Zod schemas from your Go code.
 
 ## Router
 
 `Router` owns registered procedures, global middleware, router options, output hooks, and the optional development file watcher.
 
-Create one router for the API surface you want to serve:
+Create a router for the procedures you want to serve:
 
 ```go
 router := trpcgo.NewRouter(
@@ -52,7 +52,7 @@ mux.Handle("/trpc/", trpc.NewHandler(router, "/trpc"))
 
 If the base path is `/trpc`, a request to `/trpc/user.get` resolves to procedure `user.get`.
 
-The handler implements the important tRPC wire behavior:
+The handler supports:
 
 - `GET` queries with `?input=<json>`.
 - `POST` mutations with a JSON body.
@@ -63,7 +63,7 @@ The handler implements the important tRPC wire behavior:
 
 ## Middleware And Context
 
-Middleware wraps decoded procedure input, not raw JSON. Global middleware runs before per-procedure middleware.
+Middleware receives decoded input after any configured input validation. Global middleware runs before per-procedure middleware.
 
 ```go
 router.Use(requestTimer)
@@ -76,13 +76,13 @@ trpcgo.MustMutation(router, "user.create", createUser,
 
 Inside middleware or handlers, use `GetProcedureMeta(ctx)` to read the active path, procedure type, and custom metadata.
 
-Use `WithContextCreator` to derive a request context from `*http.Request`, for example to attach auth claims or request IDs.
+Use `WithContextCreator` to build the request context from `*http.Request`, for example to attach authentication claims or request IDs.
 
 ## Generation Paths
 
 There are two ways to generate TypeScript:
 
-- Static analysis: `go tool trpcgo generate` reads Go source with `go/packages`. This is the recommended production path because it sees comments, aliases, const unions, validate tags, and typed output parsers.
+- Static analysis: `go tool trpcgo generate` reads Go source with `go/packages`. Use it for production builds to include comments, aliases, constant unions, validation tags, and typed output parsers.
 - Runtime reflection: `router.GenerateTS(...)` and `router.GenerateZod(...)` read registered procedure reflection types. They are useful at startup but cannot see source-only metadata like Go doc comments.
 
 In development, `WithDev(true)` plus `WithTypeOutput(...)` starts a source-analysis watcher when the HTTP handler is constructed. It generates once from source, then updates generated files on Go file changes if the source still type-checks.

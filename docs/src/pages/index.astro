@@ -16,7 +16,7 @@ const installCommand = "go get github.com/befabri/trpcgo@latest";
 const pageTitle = "Go Backend for tRPC TypeScript Clients";
 const siteTitle = "trpcgo";
 const description =
-    "Build Go (Golang) APIs that work with @trpc/client, React Query, and generated TypeScript AppRouter contracts.";
+    "Write your API in Go and call it from TypeScript with tRPC. Generate router types, Zod schemas, and enum values from your Go code.";
 
 const ogImage = new URL("/og.png", Astro.site);
 const ogImageAlt = "trpcgo — Go on the server. tRPC on the client.";
@@ -63,8 +63,8 @@ const ogImageAlt = "trpcgo — Go on the server. tRPC on the client.";
                 <div class="hero-copy">
                     <h1 id="hero-title">Go on the server.<br />tRPC on the client.</h1>
                     <p class="lead">
-                        trpcgo keeps your API server in Go and gives frontend teams typed tRPC calls,
-                        generated AppRouter contracts, Zod schemas, and runtime enum values.
+                        Write your handlers in Go and call them from TypeScript with tRPC.
+                        trpcgo generates the router types, Zod schemas, and enum values from your Go code.
                     </p>
 
                     <div class="actions">
@@ -212,7 +212,7 @@ const ogImageAlt = "trpcgo — Go on the server. tRPC on the client.";
                 <div>
                     <h2 id="capabilities-title">The tRPC backend features you expect, in Go.</h2>
                     <p>
-                        Built on plain Go (Golang) and <code>net/http</code>. No TypeScript server required.
+                        Use <code>net/http</code> with the Go router and middleware you already know.
                     </p>
                 </div>
 
@@ -231,7 +231,8 @@ const ogImageAlt = "trpcgo — Go on the server. tRPC on the client.";
                     <div>
                         <dt>Frontend generation</dt>
                         <dd>
-                            TypeScript <code>AppRouter</code> contracts, Zod schemas, runtime enums, and watch mode.
+                            Generate TypeScript <code>AppRouter</code> types, Zod schemas, and enum values.
+                            Watch mode keeps them up to date as you edit Go files.
                         </dd>
                     </div>
                 </dl>
@@ -241,8 +242,8 @@ const ogImageAlt = "trpcgo — Go on the server. tRPC on the client.";
                 <div>
                     <h2 id="start-title">Start with your Go module.</h2>
                     <p>
-                        Point the router at the files you want, register your Go procedures, and the
-                        TypeScript client code is written for you.
+                        Register your Go procedures and choose where the generated files go.
+                        Create the HTTP handler to start generation in development mode.
                     </p>
                 </div>
 

@@ -5,7 +5,25 @@ description: Build one Go tRPC endpoint, generate TypeScript, and call it from a
 
 This guide creates a `user.create` mutation and calls it with a typed tRPC client.
 
+You'll need Go 1.26 or newer and a TypeScript frontend. If you're starting a new Go project, create a module first:
+
+```bash
+mkdir trpcgo-demo
+cd trpcgo-demo
+go mod init example.com/trpcgo-demo
+```
+
+From the module root, install the runtime, generator, and validator:
+
+```bash
+go get github.com/befabri/trpcgo@latest
+go get -tool github.com/befabri/trpcgo/cmd/trpcgo@latest
+go get github.com/go-playground/validator/v10
+```
+
 ## 1. Define Types And Handler
+
+Save this as `user.go` in the module root:
 
 ```go
 package main
@@ -29,6 +47,8 @@ func createUser(ctx context.Context, input CreateUserInput) (User, error) {
 ```
 
 ## 2. Register And Serve Procedures
+
+Save this as `main.go` alongside `user.go`:
 
 ```go
 package main
@@ -68,20 +88,29 @@ func main() {
     mux := http.NewServeMux()
     mux.Handle("/trpc/", handler)
 
-    log.Fatal(http.ListenAndServe(":8080", mux))
+    if err := http.ListenAndServe(":8080", mux); err != nil {
+        log.Print(err)
+    }
 }
 ```
 
 `WithValidator(validate.Struct)` is what makes `validate` tags run on the server. Without it, the tags still help Zod generation but runtime input validation is disabled.
 
-## 3. Generate Types
+The sample handler returns a user with a fixed ID and does not store it. Replace that return value with your persistence code when you add a database.
+
+## 3. Generate Types And Start The Server
+
+Run these commands from the Go module root:
 
 ```bash
 mkdir -p web/gen
 go generate ./...
+go run .
 ```
 
-The CLI writes output files directly and does not create missing parent directories, so create `web/gen` before the first generation run.
+The CLI does not create missing parent directories, so create `web/gen` before the first generation run.
+
+The server listens on `http://localhost:8080`. Keep it running while you try the frontend call below. In dev mode, saving Go files regenerates the frontend files automatically. Restart the server to apply changes to handler behavior.
 
 The generated `trpc.ts` contains `AppRouter`, `RouterInputs`, `RouterOutputs`, and TypeScript definitions for reachable Go types.
 
@@ -92,11 +121,19 @@ import { z } from 'zod';
 
 export const CreateUserInputSchema = z.object({
   name: z.string().min(1).max(100),
-  email: z.email(),
-});
+  email: z.email().min(1),
+}).meta({ id: 'CreateUserInput' });
 ```
 
 ## 4. Call From TypeScript
+
+In your frontend project, install the client packages and Zod:
+
+```bash
+npm install @trpc/client@11 @trpc/server@11 zod@4
+```
+
+The following example assumes the calling file is `web/client.ts`, next to the `gen` directory. If your frontend lives elsewhere, adjust the Go output paths and these imports to match.
 
 ```ts
 import { createTRPCClient, httpBatchLink } from '@trpc/client';
@@ -117,7 +154,7 @@ const user = await client.user.create.mutate(input);
 
 The handler configuration above trusts a frontend served from `http://localhost:3000`. If your frontend is served from the same origin as the Go handler, you can omit `WithCORS` and `WithTrustedOrigins` and use a relative client URL such as `/trpc`.
 
-If you change `CreateUserInput` or `User` in Go and regenerate, TypeScript call sites update immediately.
+If you change `CreateUserInput` or `User` in Go and regenerate, TypeScript uses the updated definitions and flags incompatible client calls.
 
 ## Full Example
 

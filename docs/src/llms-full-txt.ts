@@ -1,7 +1,7 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
 
 const docOrder = [
-	'index',
+	'docs',
 	'concepts',
 	'install',
 	'quick-start',

@@ -3,7 +3,7 @@ title: Response Metadata
 description: Set response headers and cookies from procedures, middleware, and server-side calls.
 ---
 
-trpcgo injects response metadata into the context before HTTP procedure execution. Handlers and middleware can add response headers or cookies without depending on `http.ResponseWriter`.
+Handlers and middleware can add response headers or cookies through the request context. The HTTP handler collects these values and writes them to the response.
 
 ## Set Headers
 
@@ -14,7 +14,7 @@ func handler(ctx context.Context, input Input) (Output, error) {
 }
 ```
 
-`SetResponseHeader` adds a header value. It is safe to call from JSONL batch handlers concurrently.
+`SetResponseHeader` appends a header value; repeated calls with the same name add values rather than replace them. Metadata collection is safe for concurrent use, but streaming responses have timing limits described below.
 
 ## Set Cookies
 
@@ -33,7 +33,18 @@ func login(ctx context.Context, input LoginInput) (User, error) {
 }
 ```
 
-Headers and cookies are applied before the status line is written.
+## When Metadata Is Sent
+
+Headers and cookies must be collected before the response starts:
+
+| Response type | When to set headers and cookies |
+| --- | --- |
+| Query or mutation | In middleware or the handler. They are included even when the procedure returns an error. |
+| Regular JSON batch | In any procedure in the batch. All calls share one HTTP response, so their metadata is combined. |
+| SSE subscription | Before the subscription handler returns its channel. Changes made while emitting events arrive too late. |
+| JSONL batch stream | Headers and cookies set by procedures are omitted because the response starts before the procedures run. |
+
+Use a single mutation or a regular JSON batch for operations such as login that need to set a cookie.
 
 ## No-Op Outside Metadata Context
 
@@ -41,7 +52,7 @@ If the context does not carry response metadata, `SetResponseHeader` and `SetCoo
 
 ## RawCall
 
-`RawCall` injects response metadata if the context does not already have it, but callers only receive headers and cookies if they keep and inspect the context that carries metadata.
+To read headers or cookies after a server-side call, create the metadata context yourself and pass it to `RawCall` or `Call`:
 
 ```go
 ctx := trpcgo.WithResponseMetadata(context.Background())
@@ -58,4 +69,4 @@ _ = headers
 _ = cookies
 ```
 
-Use this when server-side procedure calls need to observe cookies or custom headers set by handlers.
+Without `WithResponseMetadata`, `RawCall` creates its own metadata context internally, so the collected values are not accessible through your original context. Server-side calls only collect metadata; your code decides how to use it.

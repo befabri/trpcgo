@@ -24,7 +24,7 @@ trpcgo uses Go handlers, structs, and struct tags as the source of truth. It reg
 
 ## Essential Docs
 
-- [Overview](${href('/')}): what trpcgo is for and the basic server/client shape.
+- [Overview](${href('/docs/')}): what trpcgo is for and the basic server/client shape.
 - [Core Concepts](${href('/concepts/')}): router, procedures, HTTP handler, generated contracts, and validation model.
 - [Install](${href('/install/')}): Go module setup, generator setup, frontend packages, and requirements.
 - [Quick Start](${href('/quick-start/')}): build one endpoint, generate TypeScript and Zod, and call it from a client.

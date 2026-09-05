@@ -39,7 +39,9 @@ The base path is stripped before procedure lookup. With base path `/trpc`, `/trp
 | `WithMaxBatchSize(n)` | `10` | Limits procedures in one batch. `-1` disables the limit. |
 | `WithStrictInput(bool)` | `true` | Rejects unknown JSON object fields and trailing JSON tokens. |
 
-Strict input uses Go's `json.Decoder.DisallowUnknownFields` and is enabled by default. Unknown object fields are returned as `BAD_REQUEST`; malformed JSON and trailing JSON tokens are returned as parse errors. Set `WithStrictInput(false)` only when you intentionally want Go's normal `json.Unmarshal` behavior, which ignores unknown object fields.
+Strict input uses Go's `json.Decoder.DisallowUnknownFields` and is enabled by default. Unknown object fields and values that do not match the Go input type return `BAD_REQUEST`; malformed JSON and trailing JSON tokens return `PARSE_ERROR`. Set `WithStrictInput(false)` to ignore unknown object fields using Go's normal `json.Unmarshal` behavior. Malformed JSON and trailing tokens are still rejected.
+
+For `WithMaxBodySize` and `WithMaxBatchSize`, `0` leaves the current setting unchanged. Use `-1` to remove a limit.
 
 ## Handler Options
 
@@ -67,7 +69,7 @@ handler := trpc.NewHandler(router, "/trpc",
 
 Handler options are separate from router options because they depend on HTTP deployment details. `WithCORS` accepts exact origins such as `https://app.example.com`; wildcard CORS (`*`) can emit `Access-Control-Allow-Origin: *` when credentials are disabled, but it is not trusted by the CSRF check. For cross-origin browser mutations, configure both CORS read access with `WithCORS` and POST trust with `WithTrustedOrigins`.
 
-`WithSubscriptionOriginCheck(true)` is opt-in: it gates GET/SSE subscriptions before their resolvers run, accepting same-origin requests and origins from `WithTrustedOrigins`, `WithPublicOrigin`, or `WithCORS`. POST subscriptions go through the normal CSRF check first.
+`WithSubscriptionOriginCheck(true)` checks subscription origins before their handlers run, accepting same-origin requests and origins from `WithTrustedOrigins`, `WithPublicOrigin`, or `WithCORS`. POST subscriptions go through the normal CSRF check first.
 
 `CORSConfig.AllowedHeaders` replaces the default allow-list. The default is `Authorization`, `Content-Type`, `Last-Event-Id`, and `trpc-accept`; include those headers when you add custom headers and still need auth, tRPC JSONL, or subscription resume support.
 
@@ -75,7 +77,7 @@ Configured origins must be exact `http` or `https` scheme+host values with no pa
 
 ## Validation Option
 
-`WithValidator` runs after JSON decoding and only for struct-typed inputs.
+`WithValidator` runs after JSON decoding and before middleware. It validates struct inputs, including pointers to structs; primitive, slice, map, and void inputs are skipped.
 
 ```go
 validate := validator.New()
@@ -85,14 +87,14 @@ router := trpcgo.NewRouter(
 )
 ```
 
-`validate` tags do not run at runtime unless you configure this option.
+`validate` tags do not trigger server-side validation unless you configure this option. A validation failure returns `BAD_REQUEST` with the message `input validation failed`.
 
 ## Context And Error Options
 
 | Option | Behavior |
 | --- | --- |
 | `WithContextCreator(fn)` | Derives the request context from `r.Context()` and `*http.Request`. |
-| `WithOnError(fn)` | Receives tRPC errors for server-side logging/observability before response formatting. |
+| `WithOnError(fn)` | Receives procedure errors for server-side logging before response formatting. |
 | `WithErrorFormatter(fn)` | Changes the serialized error shape sent to clients. |
 | `WithDev(bool)` | Adds stack traces to error responses and enables dev generation behavior. |
 
@@ -120,6 +122,8 @@ The returned context still cancels when the original request context cancels.
 | `WithSSEReconnectAfterInactivity(d)` | disabled | Sends `reconnectAfterInactivityMs` in the `connected` event. |
 | `WithSSEMaxConnections(n)` | unlimited | Rejects extra streams with `TOO_MANY_REQUESTS`. |
 
+Use a positive ping interval; `0` uses the default of 10 seconds. For `WithSSEMaxDuration` and `WithSSEMaxConnections`, `0` leaves the current setting unchanged and `-1` removes the limit.
+
 ## Generation Options
 
 | Option | Behavior |
@@ -130,7 +134,7 @@ The returned context still cancels when the original request context cancels.
 | `WithEnumsOutput(path)` | Writes runtime enum value objects in dev mode. |
 | `WithWatchPackages(patterns...)` | Restricts dev watcher analysis to package patterns like `./cmd/api` or `./internal/...`. |
 
-Dev generation starts when `trpc.NewHandler` is constructed and `WithDev(true)` plus `WithTypeOutput(...)` are set.
+Dev generation starts when `trpc.NewHandler` is constructed and `WithDev(true)` plus `WithTypeOutput(...)` are set. Zod and enum output also require `WithTypeOutput(...)`. Call `router.Close()` during shutdown to stop the watcher.
 
 ## Router Merging
 

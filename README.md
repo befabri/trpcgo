@@ -4,6 +4,8 @@
 
 trpcgo is a Go implementation of the [tRPC](https://trpc.io) protocol. You get the same end-to-end type safety as a TypeScript backend, but your server is written in Go. Define your API with Go structs and handlers, and trpcgo generates the TypeScript `AppRouter` type that plugs directly into `@trpc/client` and `@trpc/react-query`. No manual type syncing, no OpenAPI specs, no protobuf.
 
+See the [documentation](https://trpcgo.dev/docs/) for guides and the API reference.
+
 ## Table of Contents
 
 - [Why](#why)
@@ -25,36 +27,47 @@ trpcgo is a Go implementation of the [tRPC](https://trpc.io) protocol. You get t
 
 ## Why
 
-[tRPC](https://trpc.io) gives you end-to-end typesafe APIs: change a type on the server and TypeScript catches every broken call site at compile time. But tRPC requires a TypeScript server.
+[tRPC](https://trpc.io) gives you end-to-end typesafe APIs: change a type on the server and TypeScript catches broken call sites at compile time. But tRPC requires a TypeScript server.
 
 trpcgo removes that constraint. Write your server in Go and still get the full tRPC developer experience on the frontend. Your TypeScript client code looks exactly the same as if the server were written in TypeScript.
 
 ## Install
 
+Requires Go 1.26+. Run these commands in your Go module:
+
 ```bash
 # Add the runtime library to your Go module
 go get github.com/befabri/trpcgo@latest
 
-# Install the code generator (Go 1.26+ tool directive)
-# In your go.mod:
-tool github.com/befabri/trpcgo/cmd/trpcgo
+# Add the code generator to go.mod's tool directives
+go get -tool github.com/befabri/trpcgo/cmd/trpcgo@latest
 ```
 
 ## Quick Start
 
 ### 1. Define types and handlers in Go
 
+This example uses `go-playground/validator` to validate inputs on the server:
+
+```bash
+go get github.com/go-playground/validator/v10
+```
+
+Save the following as `main.go` in your module root. Output paths are relative to that directory.
+
 ```go
-//go:generate go tool trpcgo generate -o ../web/gen/trpc.ts --zod ../web/gen/zod.ts
+//go:generate go tool trpcgo generate -o web/gen/trpc.ts --zod web/gen/zod.ts
 
 package main
 
 import (
     "context"
+    "log"
     "net/http"
 
     "github.com/befabri/trpcgo"
     "github.com/befabri/trpcgo/trpc"
+    "github.com/go-playground/validator/v10"
 )
 
 type CreateUserInput struct {
@@ -69,10 +82,12 @@ type User struct {
 }
 
 func main() {
+    validate := validator.New()
     router := trpcgo.NewRouter(
         trpcgo.WithDev(true),
-        trpcgo.WithTypeOutput("../web/gen/trpc.ts"),
-        trpcgo.WithZodOutput("../web/gen/zod.ts"),
+        trpcgo.WithValidator(validate.Struct),
+        trpcgo.WithTypeOutput("web/gen/trpc.ts"),
+        trpcgo.WithZodOutput("web/gen/zod.ts"),
     )
     defer router.Close()
 
@@ -89,13 +104,25 @@ func main() {
 
     mux := http.NewServeMux()
     mux.Handle("/trpc/", handler)
-    http.ListenAndServe(":8080", mux)
+    if err := http.ListenAndServe(":8080", mux); err != nil {
+        log.Print(err)
+    }
 }
 ```
 
-### 2. Generated TypeScript (automatic)
+`WithValidator(validate.Struct)` enables server-side validation; the tags alone do not validate requests.
 
-`trpc.ts` (full AppRouter type):
+### 2. Generate types and start the server
+
+```bash
+mkdir -p web/gen
+go generate ./...
+go run .
+```
+
+The CLI needs the output directory to exist. With the server running in dev mode, saving Go files also regenerates the frontend files. Restart the server to apply changes to handler behavior.
+
+`web/gen/trpc.ts` (abbreviated):
 
 ```typescript
 export interface CreateUserInput {
@@ -112,29 +139,43 @@ export interface User {
 export type AppRouter = { /* ... structural types matching @trpc/client */ };
 ```
 
-`zod.ts` (validation schemas from Go `validate` tags):
+`web/gen/zod.ts` (validation schemas from Go `validate` tags):
 
 ```typescript
 import { z } from "zod";
 
 export const CreateUserInputSchema = z.object({
   name: z.string().min(1).max(100),
-  email: z.email(),
-});
+  email: z.email().min(1),
+}).meta({ id: "CreateUserInput" });
 ```
 
 ### 3. Use with @trpc/client
 
-```typescript
-import { createTRPCReact } from "@trpc/react-query";
-import type { AppRouter } from "../gen/trpc.js";
+Install the frontend dependencies in your frontend project:
 
-export const trpc = createTRPCReact<AppRouter>();
+```bash
+npm install @trpc/client@11 @trpc/server@11
+```
+
+For example, in `web/client.ts`:
+
+```typescript
+import { createTRPCClient, httpBatchLink } from "@trpc/client";
+import type { AppRouter } from "./gen/trpc.js";
+
+const client = createTRPCClient<AppRouter>({
+  links: [httpBatchLink({ url: "http://localhost:8080/trpc" })],
+});
 
 // Fully typed: input and output inferred from Go types
-const mutation = trpc.user.create.useMutation();
-mutation.mutate({ name: "Alice", email: "alice@example.com" });
+const user = await client.user.create.mutate({
+  name: "Alice",
+  email: "alice@example.com",
+});
 ```
+
+The Go handler above allows browser requests from `http://localhost:3000`. Use your frontend's origin if it runs elsewhere. Install `zod@4` if you also import the generated schemas.
 
 ## Procedure Types
 
@@ -182,6 +223,8 @@ if err := trpcgo.Query(router, "user.getById", handler); err != nil {
     log.Fatal(err)
 }
 ```
+
+For resumable subscriptions, send values with `trpcgo.Tracked("message-42", message)`. The tRPC subscription link delivers each tracked item as `{ id, data }`; read the payload from `event.data`. See [Subscriptions](https://trpcgo.dev/subscriptions/) for registration and reconnect examples.
 
 ## Base Procedures
 
@@ -233,18 +276,16 @@ router := trpcgo.NewRouter(
         log.Printf("error on %s: %v", path, err)
     }),
     trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
-        return map[string]any{
-            "error": map[string]any{
-                "code":    input.Shape.Error.Code,
-                "message": input.Shape.Error.Message,
-                "data":    input.Shape.Error.Data,
-            },
+        shape := input.Shape
+        if input.Error.Code == trpcgo.CodeUnauthorized {
+            shape.Error.Message = "please sign in"
         }
+        return shape
     }),
 
     // Context
-    trpcgo.WithContextCreator(func(r *http.Request) context.Context {
-        return context.WithValue(r.Context(), authKey, r.Header.Get("Authorization"))
+    trpcgo.WithContextCreator(func(ctx context.Context, r *http.Request) context.Context {
+        return context.WithValue(ctx, authKey, r.Header.Get("Authorization"))
     }),
 
     // Code generation (auto-regenerates on file save in dev mode)
@@ -317,6 +358,8 @@ user, err := trpcgo.Call[CreateUserInput, User](router, ctx, "user.create", inpu
 result, err := router.RawCall(ctx, path, jsonBytes)
 ```
 
+`Call` and `RawCall` support queries and mutations. To use a subscription within Go, call its handler directly.
+
 ## Struct Tags
 
 ### JSON mapping
@@ -352,6 +395,8 @@ Use output hooks when a procedure should validate or transform its handler resul
 - `WithOutputValidator(func(any) error)` is the builder-friendly untyped validator form.
 - `OutputParser[O, P]` is the typed form and updates generated output types to `P`.
 - `WithOutputParser(func(any) (any, error))` is the builder-friendly untyped form; codegen falls back to `unknown` unless a typed `OutputParser` override is present.
+
+Each registration below is a separate example:
 
 ```go
 // Typed: validate only
@@ -389,18 +434,18 @@ authedProcedure := trpcgo.Procedure().Use(authMW).
     })
 ```
 
-Parser failures return `INTERNAL_SERVER_ERROR`. Clients and `WithErrorFormatter(...)` see a generic `internal server error`, while `WithOnError(...)` still receives the original wrapped cause for logging.
+Plain Go errors from output validators or parsers become `INTERNAL_SERVER_ERROR`. Clients and `WithErrorFormatter(...)` see a generic `internal server error`, while `WithOnError(...)` receives the wrapped cause for logging. Typed trpcgo errors keep their code and follow the same sanitization rules as handler errors.
 
-When both are present, the output validator runs before the output parser. For subscriptions, both run on each emitted item before `TrackedEvent` unwrapping. If either fails, the server sends a `serialized-error` SSE event and closes the stream.
+When both are present, the output validator runs before the output parser. For subscriptions, both run on each emitted item before `TrackedEvent` unwrapping. If either fails, the server sends a `serialized-error` SSE event and closes the stream. See [Output Hooks](https://trpcgo.dev/procedures/#output-hooks) for final values.
 
 ### Validation
 
-`validate` tags ([go-playground/validator](https://github.com/go-playground/validator)) generate both server-side validation and Zod schemas:
+The generator reads supported `validate` tags ([go-playground/validator](https://github.com/go-playground/validator)) to produce Zod schemas. Pass `WithValidator(validate.Struct)` to the router to apply validation on the server as well:
 
 ```go
 type Input struct {
     Name  string   `json:"name" validate:"required,min=1,max=100"`    // z.string().min(1).max(100)
-    Email string   `json:"email" validate:"required,email"`           // z.email()
+    Email string   `json:"email" validate:"required,email"`           // z.email().min(1)
     Role  string   `json:"role" validate:"oneof=admin editor viewer"` // z.enum([...])
     Tags  []string `json:"tags" validate:"min=1,dive,min=1,max=50"`   // z.array(z.string().min(1).max(50)).min(1)
     Age   int      `json:"age" validate:"gte=18,lte=150"`             // z.int().gte(18).lte(150)
@@ -412,7 +457,7 @@ type Input struct {
 ## CLI
 
 ```bash
-trpcgo generate [flags] [packages]
+go tool trpcgo generate [flags] [packages]
 ```
 
 | Flag | Description |
@@ -431,6 +476,7 @@ trpcgo generate [flags] [packages]
 ```
 
 ```bash
+mkdir -p ../web/gen
 go generate ./...
 ```
 
@@ -440,9 +486,9 @@ go generate ./...
 go tool trpcgo generate -o ../web/gen/trpc.ts --zod ../web/gen/zod.ts -w
 ```
 
-### Runtime watch (zero config)
+### Runtime watch
 
-When you set `WithDev(true)` with `WithTypeOutput` (and optionally `WithZodOutput` or `WithEnumsOutput`) on the router, `trpc.NewHandler` starts a file watcher automatically. Save a `.go` file anywhere in the project tree and types regenerate instantly, no separate process needed. Call `router.Close()` to stop the watcher on shutdown.
+When you set `WithDev(true)` with `WithTypeOutput` (and optionally `WithZodOutput` or `WithEnumsOutput`) on the router, `trpc.NewHandler` starts a file watcher automatically. Saving a `.go` file in a watched directory regenerates the frontend files. Call `router.Close()` to stop the watcher on shutdown. The watcher updates generated files; restart your Go server to run changed handlers.
 
 Use `WithWatchPackages` to restrict watching to specific packages (go/packages patterns) — useful in monorepos to avoid watching unrelated directories like frontend build output.
 
@@ -460,13 +506,13 @@ export const trpc = createTRPCReact<AppRouter>();
 
 ```typescript
 // main.tsx
-import { httpBatchLink, splitLink, unstable_httpSubscriptionLink } from "@trpc/client";
+import { httpBatchLink, httpSubscriptionLink, splitLink } from "@trpc/client";
 
 const trpcClient = trpc.createClient({
   links: [
     splitLink({
       condition: (op) => op.type === "subscription",
-      true: unstable_httpSubscriptionLink({ url: "/trpc" }),
+      true: httpSubscriptionLink({ url: "/trpc" }),
       false: httpBatchLink({ url: "/trpc" }),
     }),
   ],
@@ -506,17 +552,21 @@ if err := router.Merge(userRouter, adminRouter); err != nil {
 // or: router, err := trpcgo.MergeRouters(userRouter, adminRouter)
 ```
 
+Merging copies procedures and their per-procedure middleware. It does not copy global middleware or router options, so configure those on the destination router. Register and merge procedures before creating the HTTP handler.
+
 ## How It Works
 
 trpcgo implements the [tRPC HTTP protocol](https://trpc.io/docs/rpc) in Go and provides two code generation paths:
 
-1. **Static analysis** (`trpcgo generate`): reads Go source via `go/packages`, extracts types with full fidelity (comments, validate tags, const unions). This is what generates Zod schemas.
+1. **Static analysis** (`go tool trpcgo generate`): reads Go source via `go/packages`, including comments, validation tags, and const unions. It can generate TypeScript types, Zod schemas, and runtime enum values.
 
-2. **Runtime reflection** (`Router.GenerateTS`): uses `reflect` to inspect registered procedure types at startup. Faster but less information (no comments, no validate tags).
+2. **Runtime reflection** (`Router.GenerateTS` and `Router.GenerateZod`): inspects registered procedure types and struct tags, including `validate` tags. It does not have access to source comments or const declarations.
 
-When you use `WithDev(true)` with `WithTypeOutput`, both paths run: reflection generates types immediately on startup, then a file watcher runs static analysis in the background and overwrites with the richer version. On subsequent file saves, only static analysis runs. In production, use `go generate` pre-build. The watcher only starts in dev mode.
+See [Code Generation](https://trpcgo.dev/code-generation/) for the differences between the two, and [Compatibility](https://trpcgo.dev/reference/compatibility/) when upgrading generated files.
 
-The file watcher is recursive. It watches all subdirectories and handles directory creation/removal automatically. Generated files are only written when content changes, avoiding spurious Vite HMR cycles.
+When you use `WithDev(true)` with `WithTypeOutput`, `trpc.NewHandler` starts a watcher that runs static analysis in the background, first at startup and again when Go files change. Reflection generation is available through explicit calls to `GenerateTS` or `GenerateZod`. In production, generate frontend files before building your app. The watcher only starts in dev mode.
+
+The file watcher discovers Go directories recursively and handles new and removed directories. During source regeneration, it writes generated files only when their content changes, avoiding unnecessary frontend reloads.
 
 ## Example
 
@@ -526,7 +576,9 @@ See [`examples/start-trpc/`](examples/start-trpc/) for a full working example wi
 
 **Go:** Requires Go 1.26+ (uses `tool` directive, `errors.AsType`, generics).
 
-**tRPC client:** Works with `@trpc/client` v11 and `@trpc/react-query` v11. The generated `AppRouter` type imports from `@trpc/server` (which is a dependency of `@trpc/client`).
+**tRPC client:** Works with `@trpc/client`, `@trpc/react-query`, and `@trpc/tanstack-react-query` v11. Keep your `@trpc/*` packages on matching versions. Install `@trpc/server` for the generated type imports, even though your API server runs in Go.
+
+**Subscriptions:** Use `httpSubscriptionLink` for SSE. The link does not expose the payload of final `return` events; see [Subscription Limitations](https://trpcgo.dev/reference/compatibility/#subscription-limitations).
 
 **HTTP:** Pure `net/http`, no framework dependency. Works with any Go router or middleware.
 

@@ -3,7 +3,7 @@ title: Code Generation
 description: Generate TypeScript AppRouter types and Zod schemas from Go procedures.
 ---
 
-Generation turns Go procedure registrations into the TypeScript contract consumed by tRPC clients.
+Generate TypeScript types from your Go procedures so tRPC clients know which calls are available and what data they accept and return.
 
 ## Recommended Production Flow
 
@@ -17,7 +17,7 @@ Use static analysis before building the frontend:
 go generate ./...
 ```
 
-Static analysis reads source packages with `go/packages`, so it can preserve source-only information that reflection cannot see.
+Static analysis reads Go source without starting your server. It includes comments, aliases, and const values that runtime reflection cannot recover.
 
 ## CLI
 
@@ -46,12 +46,12 @@ go tool trpcgo generate -o web/gen/trpc.ts --zod web/gen/zod.ts -w ./...
 ```
 
 :::caution
-The CLI writes `-o`, `-zod`, and `-enums` paths directly. Create parent directories before running the command.
+Create parent directories before running the CLI. Output paths are relative to where you run the command, even when you set `-dir`.
 :::
 
 ## Runtime And Dev Generation
 
-The router can write generated files from registered procedure reflection types:
+After registering your procedures, you can generate files directly from the router using runtime reflection:
 
 ```go
 if err := router.GenerateTS("web/gen/trpc.ts"); err != nil {
@@ -75,11 +75,11 @@ router := trpcgo.NewRouter(
 defer router.Close()
 ```
 
-When `trpc.NewHandler` is constructed, trpcgo starts the watcher. It generates once from source, then regenerates when `.go` files change. If source analysis fails because the Go code is temporarily broken, previous generated files are preserved.
+With `WithDev(true)` and `WithTypeOutput` set, constructing `trpc.NewHandler` starts the watcher. It generates once from source, then regenerates on `.go` file create/write events. If source analysis fails because the Go code is temporarily broken, previous generated files are preserved. `router.Close()` stops the watcher.
 
-The watcher runs static analysis, so it resolves const unions and the runtime enum value objects (`WithEnumsOutput`) at full fidelity — the same as the CLI. The reflection methods `GenerateTS` and `GenerateZod` cannot see Go const groups, so there is deliberately no `GenerateEnums` counterpart: runtime enum value objects come only from `WithEnumsOutput` under the watcher or `--enums` on the CLI.
+The watcher uses the same static analysis as the CLI, including const unions and runtime enum objects. `GenerateTS` and `GenerateZod` use reflection, which cannot read Go const declarations. To generate enum objects, use `WithEnumsOutput` with the watcher or `--enums` with the CLI.
 
-Use `WithWatchPackages` to avoid watching unrelated frontend or generated directories in larger repositories:
+By default, the dev watcher analyzes `.`. If registrations live in other packages, include them with `WithWatchPackages`. This also limits which directories are watched:
 
 ```go
 trpcgo.WithWatchPackages("./cmd/api", "./internal/...")
@@ -87,7 +87,7 @@ trpcgo.WithWatchPackages("./cmd/api", "./internal/...")
 
 ## Static Analysis Vs Reflection
 
-| Feature | Static CLI | Runtime reflection |
+| Feature | CLI / dev watcher | Runtime reflection |
 | --- | --- | --- |
 | Registered procedure input/output types | Yes | Yes |
 | `json`, `tstype`, `validate`, `ts_doc`, `zod_omit` tags | Yes | Yes |
@@ -95,6 +95,7 @@ trpcgo.WithWatchPackages("./cmd/api", "./internal/...")
 | const groups as string/number unions | Yes | No |
 | runtime enum value objects (`enums.ts`) | Yes | No |
 | aliases and defined basic types | Yes | Limited |
+| generic struct declarations | Generic TypeScript interfaces | Concrete interfaces per instantiation |
 | source-level typed output parser discovery | Yes | Registered typed parsers only |
 
 Const groups generate unions for reachable named types declared in the analyzed packages or other packages in the same Go module. Standard-library and third-party constants are ignored, so types like `time.Duration` still generate as their normal primitive TypeScript shape.
@@ -149,9 +150,11 @@ Common Go-to-TypeScript mappings:
 | `any`, `interface{}` | `unknown` |
 | `json.RawMessage` | `unknown` |
 | `json.Number` | `number` |
-| `TrackedEvent[T]` | `T` |
+| `TrackedEvent[T]` subscription item | `{ id: string; data: T }` |
 
-Pointer fields and fields tagged `omitempty` or `omitzero` become optional unless overridden with `tstype:",required"`.
+For subscriptions, `TrackedEvent[T]` and `*TrackedEvent[T]` generate the `{ id, data }` value that `httpSubscriptionLink` passes to `onData`. In query results, inputs, or nested fields, `TrackedEvent[T]` keeps its Go JSON fields: `ID`, `Retry`, and `Data`.
+
+Pointer fields and fields tagged `omitempty` or `omitzero` become optional. On named structs, `validate:"required"` or `tstype:",required"` makes them required. See [Struct Tags](/struct-tags/) for optionality and JSON null handling.
 
 ## Detection Rules And Limits
 
@@ -161,6 +164,7 @@ Important limits:
 
 - Procedure paths must be string literals for static analysis.
 - Packages must load and type-check successfully.
+- Only packages matched by the supplied patterns are scanned for registrations. Include subpackages with `./...` when needed.
 - Custom wrapper functions are only detected if the analyzer can see the underlying top-level registration call with a literal path.
 - Zod generation targets procedure input types and their dependencies, not output-only types.
 - Reflection generation cannot emit source comments, const unions, or the runtime enum value objects derived from them. These need source analysis — the CLI or the dev watcher.
@@ -173,13 +177,13 @@ Pass `--zod` or configure `WithZodOutput` to generate schemas for typed procedur
 go tool trpcgo generate -o web/gen/trpc.ts --zod web/gen/zod.ts ./...
 ```
 
-If no procedures have typed inputs, runtime `GenerateZod` and dev watch remove stale Zod files. The CLI can still create an empty file.
+If no procedures have typed inputs, runtime `GenerateZod` and dev watch remove stale Zod files. The CLI writes an empty file at the requested Zod path.
 
 See [Zod Schemas](/zod-schemas/) for validate tag mapping, `zod/mini`, `omitempty`, `dive`, cross-field rules, and frontend usage.
 
 ## Enum Values
 
-A TypeScript string-literal union is erased at runtime, so iterating an enum's members, populating a `<select>`, or writing a membership guard means re-listing the values by hand — which silently drifts when the Go enum gains a member. Pass `--enums` or configure `WithEnumsOutput` to also emit the members as a runtime `as const` object:
+A TypeScript union gives you type checking, but its values are unavailable at runtime. To populate a `<select>` or check enum membership, pass `--enums` or configure `WithEnumsOutput`. This generates an `as const` object from the same Go constants:
 
 ```bash
 go tool trpcgo generate -o web/gen/trpc.ts --enums web/gen/enums.ts ./...
@@ -194,10 +198,8 @@ export const RoleEnum = {
 } as const;
 ```
 
-The object is keyed by value, so `Object.values(RoleEnum)` iterates the members, `Object.hasOwn(RoleEnum, value)` tests membership, and `RoleEnum.viewer` autocompletes. Members come from the same analysis as the `Role` union, so they cannot drift from the type.
+The object is keyed by value, so `Object.values(RoleEnum)` lists the members, `Object.hasOwn(RoleEnum, value)` tests membership, and `RoleEnum.viewer` autocompletes. Regenerating updates both the object and the `Role` union.
 
-Enum objects are written to their own file to keep `trpc.ts` free of runtime values (type-only imports). They cover every named string enum, including output-only enums that never appear in a Zod input schema. Numeric enums are skipped.
+Enum objects are written to their own file so you can import `trpc.ts` using type-only imports. They cover named string enums reachable from procedure inputs or outputs, including enums that never appear in a Zod input schema. Numeric enums are skipped.
 
-If `--enums` or `WithEnumsOutput` is set but no named string enums are in scope, trpcgo still writes a generated header-only `enums.ts`. The CLI and dev watcher intentionally match here; unlike Zod output, the watcher does not delete an empty enum file.
-
-Like const-union narrowing, enum objects come from source analysis, so they are produced by the CLI (`--enums`, including `-w`) and the dev watcher (`WithEnumsOutput` with `WithDev`) — not by the reflection-based `GenerateTS`/`GenerateZod`, which never see Go const groups.
+If no named string enums are reachable, the CLI and dev watcher write an `enums.ts` containing only the generated-file header.

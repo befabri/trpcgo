@@ -28,7 +28,7 @@ Path traversal segments `.` and `..` are rejected.
 | Mutation | `POST`. |
 | Subscription | `GET` or `POST`, served as SSE after setup succeeds. |
 
-Other HTTP methods return `METHOD_NOT_SUPPORTED`.
+Other HTTP methods return `METHOD_NOT_SUPPORTED`, except CORS preflight `OPTIONS` requests handled by `trpc.WithCORS`.
 
 ## Inputs
 
@@ -36,6 +36,13 @@ For `GET`, input comes from the `input` query parameter:
 
 ```http
 GET /trpc/user.get?input={"id":"1"}
+```
+
+The examples show readable JSON. URL-encode the `input` parameter in actual requests; the tRPC client handles this for you. With `curl`:
+
+```sh
+curl --get 'http://localhost:8080/trpc/user.get' \
+  --data-urlencode 'input={"id":"1"}'
 ```
 
 For `POST`, input comes from the raw request body:
@@ -47,9 +54,15 @@ Content-Type: application/json
 {"name":"Alice","email":"alice@example.com"}
 ```
 
-Empty input is passed as the zero value for typed procedures or `nil` for void procedures.
+Missing input is passed as the Go zero value for typed procedures or `nil` for void procedures. A configured input validator still checks struct inputs, so omitted required fields can fail validation.
 
-`POST` requests with bodies must use `Content-Type: application/json`; charset parameters are allowed and empty-body `POST` requests do not need a content type. The handler also rejects cross-origin `POST` requests by default unless the `Origin` or `Referer` is same-origin or trusted with `trpc.WithTrustedOrigins`. `GET` subscriptions do not receive that CSRF check by default; enable `trpc.WithSubscriptionOriginCheck(true)` to gate browser subscription requests by same-origin, trusted, public, or CORS-allowed origins before resolvers run. For TLS-terminating reverse proxies, configure the public API origin with `trpc.WithPublicOrigin`.
+JSON `null` follows Go's decoding rules. For an `any` or interface input, the handler receives `nil`. This also applies to subscriptions and server-side calls.
+
+`POST` requests with bodies must use `Content-Type: application/json`; charset parameters are allowed, and empty-body `POST` requests do not need a content type.
+
+The handler checks `Origin` or `Referer` on `POST` requests by default. Same-origin requests and origins configured with `trpc.WithTrustedOrigins` are accepted. Requests without either header are allowed only when they do not carry cookies, unless you also enable `trpc.WithCSRFRequireOrigin(true)` to require an origin for all POSTs.
+
+`GET` subscriptions use a separate, optional origin check. Enable `trpc.WithSubscriptionOriginCheck(true)` to check their origins before handlers run. For reverse proxies that terminate TLS, configure the public API origin with `trpc.WithPublicOrigin`. See [Router & Options](/router-options/#handler-options) for the full CORS and origin configuration.
 
 ## Success Envelope
 
@@ -86,6 +99,8 @@ Errors use the tRPC error shape:
 
 `WithDev(true)` adds `data.stack` for debugging.
 
+SSE `serialized-error` events carry the inner `{ code, message, data }` object. See [Streaming Errors](/errors/#streaming-errors) for custom formatter behavior.
+
 ## JSON Batching
 
 Batch requests use `?batch=1` and comma-separated procedure paths.
@@ -105,7 +120,9 @@ For `POST`, the body has the same indexed shape:
 }
 ```
 
-The response is an array of individual envelopes. If every item has the same HTTP status, the batch response uses that status. Mixed statuses return HTTP `207 Multi-Status`.
+Regular JSON batch calls run sequentially in request order. The response is an array of envelopes in the same order. Each call follows the method rules above: a POST batch containing queries needs `WithMethodOverride(true)`.
+
+If every item has the same HTTP status, the batch response uses that status. Mixed statuses return HTTP `207 Multi-Status`.
 
 Subscriptions cannot be batched.
 
@@ -119,6 +136,10 @@ trpc-accept: application/jsonl
 ```
 
 JSONL batch calls execute concurrently. Chunks may arrive out of request order, and per-call errors are represented inside their chunks. The HTTP status is `200` after streaming starts.
+
+If a result cannot be encoded as JSON, that call receives a complete `INTERNAL_SERVER_ERROR` envelope and the other results continue streaming. If the custom error formatter's result also cannot be encoded, trpcgo uses its built-in error envelope for that call.
+
+Headers are sent before the procedures run, so cookies and response headers set by those procedures are not included. Use regular JSON requests for calls that need to set cookies. See [Response Metadata](/response-metadata/#when-metadata-is-sent).
 
 ## Handler Snapshot
 

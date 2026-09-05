@@ -3,7 +3,7 @@ title: Procedures
 description: Register typed Go queries, mutations, subscriptions, reusable base procedures, and output hooks.
 ---
 
-Procedures are the unit of work exposed to tRPC clients. Each procedure has a path, a type, an optional input type, an output type, middleware, metadata, and optional output hooks.
+Each procedure exposes a Go handler to tRPC clients at a named path. Choose a query, mutation, or subscription, then add middleware, metadata, or output hooks as needed.
 
 ## Queries
 
@@ -49,7 +49,7 @@ trpcgo.MustVoidMutation(router, "system.reset", func(ctx context.Context) (Reset
 
 ## Subscriptions
 
-Subscriptions return a receive-only channel and are served as SSE streams.
+Subscriptions return a receive-only channel and send its values as server-sent events (SSE).
 
 ```go
 trpcgo.MustSubscribe(router, "chat.messages", func(ctx context.Context, input RoomInput) (<-chan Message, error) {
@@ -64,15 +64,19 @@ trpcgo.MustSubscribe(router, "chat.messages", func(ctx context.Context, input Ro
 })
 ```
 
-Use `SubscribeWithFinal` to send a final value in the SSE `return` event after the channel closes:
+Close the channel when the stream finishes, and stop sending when `ctx` is canceled. See [Subscriptions](/subscriptions/) for a complete example with cancellation handling.
+
+Use `VoidSubscribe` when there is no input. Use `SubscribeWithFinal` to send a final value in the SSE `return` event after the channel closes:
 
 ```go
 trpcgo.MustSubscribeWithFinal(router, "job.progress", func(ctx context.Context, input JobInput) (<-chan Progress, func() any, error) {
-    ch := make(chan Progress)
+    ch := runJob(ctx, input)
     final := func() any { return map[string]string{"status": "done"} }
     return ch, final, nil
 })
 ```
+
+Here, `runJob` is your application helper: it returns a progress channel, closes it when the job finishes, and stops work when `ctx` is canceled.
 
 ## Error Handling At Registration
 
@@ -128,6 +132,18 @@ Seed one builder from another when composing domains:
 orgProcedure := trpcgo.Procedure(authedProcedure).Use(requireOrgAccess)
 ```
 
+Use `.With(...)` to add other options, such as a typed output parser, to a builder:
+
+```go
+publicUserProcedure := authedProcedure.With(
+    trpcgo.OutputParser(func(u User) (PublicUser, error) {
+        return PublicUser{ID: u.ID, Name: u.Name}, nil
+    }),
+)
+```
+
+Options are applied in order. Middleware accumulates, while later metadata, validators, and parsers replace earlier values of the same kind.
+
 ## Output Hooks
 
 Output hooks run after a handler succeeds. Validators run before parsers.
@@ -158,8 +174,8 @@ trpcgo.MustQuery(router, "user.get", getUser,
 )
 ```
 
-For subscriptions, output validators and parsers run for every emitted item. If an output hook fails, the client receives an SSE `serialized-error` event and the stream closes.
+For subscriptions, hooks run on each item and receive the full `TrackedEvent[T]` wrapper. They also run on non-nil [final values](/subscriptions/#final-values). If a hook fails, the server sends an SSE `serialized-error` event and closes the stream.
 
 :::caution
-Untyped `WithOutputParser` changes runtime output but cannot tell codegen the resulting shape. Use `OutputParser[O, P]` when the TypeScript output type should change.
+Untyped `WithOutputParser` changes runtime output but cannot describe the resulting shape to the generator. Use `OutputParser[O, P]` when the TypeScript output type should change.
 :::
