@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -21,7 +22,10 @@ import (
 
 type ctxKey int
 
-const contextKeyRequestID ctxKey = iota
+const (
+	contextKeyRequestID ctxKey = iota
+	contextKeySeedData
+)
 
 // Types — source of truth for both Go and TypeScript.
 
@@ -146,11 +150,10 @@ func requireRequestID(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
 // Handlers
 
 type userService struct {
-	mu            sync.RWMutex
-	users         []User
-	nextID        int
-	startedAt     time.Time
-	skipBroadcast bool
+	mu        sync.RWMutex
+	users     []User
+	nextID    int
+	startedAt time.Time
 
 	subsMu sync.Mutex
 	subs   []chan User
@@ -208,8 +211,9 @@ func (s *userService) ListUsers(ctx context.Context, input ListUsersInput) (Pagi
 	start := min((page-1)*perPage, total)
 	end := min(start+perPage, total)
 
+	// JSON encoding happens after RUnlock, so the result must not alias s.users.
 	return PaginatedList[User]{
-		Items:   s.users[start:end],
+		Items:   slices.Clone(s.users[start:end]),
 		Total:   total,
 		Page:    page,
 		PerPage: perPage,
@@ -218,7 +222,7 @@ func (s *userService) ListUsers(ctx context.Context, input ListUsersInput) (Pagi
 
 func (s *userService) CreateUser(ctx context.Context, input CreateUserInput) (User, error) {
 	user := s.insertUser(input)
-	if !s.skipBroadcast {
+	if ctx.Value(contextKeySeedData) == nil {
 		s.broadcast(user)
 	}
 	return user, nil
@@ -277,10 +281,10 @@ func (s *userService) ResetDemo(router *trpcgo.Router) func(ctx context.Context)
 		s.nextID = 0
 		s.mu.Unlock()
 
-		// Suppress broadcast during seeding so the live feed only shows
-		// genuinely new users. Call still runs the full middleware chain.
-		s.skipBroadcast = true
-		defer func() { s.skipBroadcast = false }()
+		// Seeding goes through Call so the middleware chain runs. A context
+		// value rather than a service flag suppresses the broadcast, so
+		// concurrent unrelated creations still reach the live feed.
+		ctx = context.WithValue(ctx, contextKeySeedData, true)
 
 		seedUsers := []CreateUserInput{
 			{Name: "Alice", Email: "alice@example.com", Role: RoleAdmin},
