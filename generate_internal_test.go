@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/befabri/trpcgo/internal/typemap/testdata/embedding"
 )
 
 func analysisFixtureDir(t *testing.T, name string) string {
@@ -68,24 +70,6 @@ func TestRegenerateFromSourcePreservesExistingOnAnalyzeError(t *testing.T) {
 	}
 }
 
-func TestBasicArgToTS(t *testing.T) {
-	tests := map[string]string{
-		"string":                 "string",
-		"bool":                   "boolean",
-		"int":                    "number",
-		"uint64":                 "number",
-		"float32":                "number",
-		"example.com/app.User":   "User",
-		"github.com/acme.Status": "Status",
-		"Custom":                 "Custom",
-	}
-	for in, want := range tests {
-		if got := basicArgToTS(in); got != want {
-			t.Errorf("basicArgToTS(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestReflectGoKindAndTypeScriptMapping(t *testing.T) {
 	tests := []struct {
 		name string
@@ -112,8 +96,34 @@ func TestReflectGoKindAndTypeScriptMapping(t *testing.T) {
 			if got := reflectGoKind(tt.typ); got != tt.kind {
 				t.Errorf("reflectGoKind(%v) = %q, want %q", tt.typ, got, tt.kind)
 			}
-			if got := goTypeToTS(tt.typ, map[string]*reflectDef{}, nil); got != tt.ts {
+			if got := goTypeToTS(tt.typ, map[string]*reflectDef{}); got != tt.ts {
 				t.Errorf("goTypeToTS(%v) = %q, want %q", tt.typ, got, tt.ts)
+			}
+		})
+	}
+}
+
+func TestReflectedJSONFieldDominance(t *testing.T) {
+	for _, value := range embedding.Cases {
+		typ := reflect.TypeOf(value)
+		t.Run(typ.Name(), func(t *testing.T) {
+			data, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var encoded map[string]any
+			if err := json.Unmarshal(data, &encoded); err != nil {
+				t.Fatal(err)
+			}
+			fields, extends, _ := collectFieldsTS(typ, map[string]*reflectDef{})
+			if len(extends) != 0 || len(fields) != len(encoded) {
+				t.Fatalf("fields=%+v extends=%v; JSON=%s", fields, extends, data)
+			}
+			for _, field := range fields {
+				v, ok := encoded[field.Name]
+				if !ok || goTypeToTS(reflect.TypeOf(v), map[string]*reflectDef{}) != field.Type {
+					t.Errorf("field=%+v disagrees with JSON=%s", field, data)
+				}
 			}
 		})
 	}

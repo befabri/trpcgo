@@ -178,7 +178,7 @@ func TestGenerateZodMini(t *testing.T) {
 }
 
 func TestGenerateZodExtends(t *testing.T) {
-	t.Run("basic extends uses .extend()", func(t *testing.T) {
+	t.Run("basic extends retains inherited fields", func(t *testing.T) {
 		r := trpcgo.NewRouter()
 		trpcgo.Mutation(r, "create", func(_ context.Context, input ZodDerived) (string, error) {
 			return "", nil
@@ -194,23 +194,16 @@ func TestGenerateZodExtends(t *testing.T) {
 			t.Error("ZodBaseSchema missing id field")
 		}
 
-		// Derived must use .extend(), not z.object().
-		if !strings.Contains(zod, "export const ZodDerivedSchema = ZodBaseSchema.extend({") {
-			t.Errorf("ZodDerivedSchema should use ZodBaseSchema.extend(), got:\n%s", zod)
+		if !strings.Contains(zod, "export const ZodDerivedSchema = z.object({\n  id: z.string().min(1),") {
+			t.Errorf("ZodDerivedSchema should include inherited fields, got:\n%s", zod)
 		}
 		if !strings.Contains(zod, "name: z.string().min(1),") {
 			t.Error("ZodDerivedSchema missing name field")
 		}
 
-		// Base schema must appear before derived (topo order).
-		baseIdx := strings.Index(zod, "ZodBaseSchema")
-		derivedIdx := strings.Index(zod, "ZodDerivedSchema")
-		if baseIdx > derivedIdx {
-			t.Error("ZodBaseSchema must appear before ZodDerivedSchema (topo order)")
-		}
 	})
 
-	t.Run("multiple extends uses .merge().extend()", func(t *testing.T) {
+	t.Run("multiple extends retains all base fields", func(t *testing.T) {
 		r := trpcgo.NewRouter()
 		trpcgo.Mutation(r, "create", func(_ context.Context, input ZodMultiBase) (string, error) {
 			return "", nil
@@ -226,13 +219,12 @@ func TestGenerateZodExtends(t *testing.T) {
 			t.Error("missing ExAuditFieldsSchema")
 		}
 
-		// Derived uses merge+extend.
-		if !strings.Contains(zod, "ZodBaseSchema.merge(ExAuditFieldsSchema).extend({") {
-			t.Errorf("ZodMultiBaseSchema should use .merge().extend(), got:\n%s", zod)
+		if !strings.Contains(zod, "export const ZodMultiBaseSchema = z.object({\n  id: z.string().min(1),\n  createdBy: z.string(),\n  updatedBy: z.string(),") {
+			t.Errorf("ZodMultiBaseSchema should include both bases, got:\n%s", zod)
 		}
 	})
 
-	t.Run("pointer extends uses .partial()", func(t *testing.T) {
+	t.Run("pointer extends makes inherited fields optional", func(t *testing.T) {
 		r := trpcgo.NewRouter()
 		trpcgo.Mutation(r, "create", func(_ context.Context, input ZodPtrExtends) (string, error) {
 			return "", nil
@@ -240,9 +232,9 @@ func TestGenerateZodExtends(t *testing.T) {
 		zod := generateZod(t, r)
 		t.Log(zod)
 
-		// Pointer extends without required → Partial<ZodBase> → .partial().extend()
-		if !strings.Contains(zod, "ZodBaseSchema.partial().extend({") {
-			t.Errorf("pointer extends should use .partial().extend(), got:\n%s", zod)
+		// A nil embedded pointer omits its fields, so inherited fields are optional.
+		if !strings.Contains(zod, "export const ZodPtrExtendsSchema = z.object({\n  id: z.string().min(1).optional(),") {
+			t.Errorf("pointer extends should make inherited fields optional, got:\n%s", zod)
 		}
 		if !strings.Contains(zod, "label: z.string(),") {
 			t.Error("missing own field 'label'")
@@ -264,7 +256,7 @@ func TestGenerateZodExtends(t *testing.T) {
 		}
 	})
 
-	t.Run("cyclic type with extends uses z.lazy + .extend()", func(t *testing.T) {
+	t.Run("cyclic type with extends defers recursive fields", func(t *testing.T) {
 		r := trpcgo.NewRouter()
 		trpcgo.Mutation(r, "create", func(_ context.Context, input ZodCyclicNode) (string, error) {
 			return "", nil
@@ -273,20 +265,14 @@ func TestGenerateZodExtends(t *testing.T) {
 		t.Log(zod)
 
 		// The exact expected output for the cyclic+extends case.
-		// z.lazy wraps the whole expression for the cycle; .extend chains the base.
-		want := `export const ZodCyclicNodeSchema: z.ZodType<ZodCyclicNode> = z.lazy(() => ZodBaseSchema.extend({
-  children: z.array(ZodCyclicNodeSchema),
-})).meta({ id: "ZodCyclicNode" });`
+		want := `export const ZodCyclicNodeSchema = z.object({
+  id: z.string().min(1),
+  children: z.lazy((): z.ZodType<$ZodCyclicNode["children"], $ZodCyclicNode["children"]> => z.array(ZodCyclicNodeSchema)),
+}).meta({ id: "ZodCyclicNode" });`
 		if !strings.Contains(zod, want) {
 			t.Errorf("cyclic+extends output mismatch.\nwant:\n%s\n\ngot:\n%s", want, zod)
 		}
 
-		// Base must appear before derived (topo order).
-		baseIdx := strings.Index(zod, "ZodBaseSchema =")
-		derivedIdx := strings.Index(zod, "ZodCyclicNodeSchema")
-		if baseIdx < 0 || derivedIdx < 0 || baseIdx > derivedIdx {
-			t.Errorf("ZodBaseSchema must be emitted before ZodCyclicNodeSchema:\n%s", zod)
-		}
 	})
 }
 
@@ -457,7 +443,7 @@ func TestGenerateZodNewTags(t *testing.T) {
 		"id":     "z.ulid()",
 		"mac":    "z.mac()",
 		"subnet": "z.cidrv4()",
-		"code":   "z.uppercase()",
+		"code":   "z.string().uppercase()",
 	}
 	for field, base := range checks {
 		if !strings.Contains(zod, field+": "+base) {

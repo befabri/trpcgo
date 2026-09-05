@@ -39,7 +39,12 @@ func Prepare(result *analysis.Result, metas map[string]typemap.TypeMeta) *Genera
 		if p.InputType != nil {
 			inputTS = mapper.Convert(p.InputType)
 		}
-		outputTS := mapper.Convert(p.OutputType)
+		var outputTS string
+		if p.Type == "subscription" {
+			outputTS = mapper.ConvertSubscriptionOutput(p.OutputType)
+		} else {
+			outputTS = mapper.Convert(p.OutputType)
+		}
 
 		procs = append(procs, ProcEntry{
 			Path:     p.Path,
@@ -107,16 +112,7 @@ func WriteAppRouter(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef) erro
 
 	// Type definitions (interfaces, unions, aliases).
 	for _, def := range defs {
-		writeJSDoc(ew, def.Comment, "")
-		switch def.Kind {
-		case typemap.TypeDefInterface:
-			writeInterface(ew, def)
-		case typemap.TypeDefUnion:
-			writeUnion(ew, def)
-		case typemap.TypeDefAlias:
-			writeAlias(ew, def)
-		}
-		ew.println("")
+		writeTypeDef(ew, def)
 	}
 
 	// Procedure type aliases (only emit types that are used).
@@ -173,6 +169,19 @@ export type AppRouter = {
 	return ew.err
 }
 
+func writeTypeDef(ew *errWriter, def typemap.TypeDef) {
+	writeJSDoc(ew, def.Comment, "")
+	switch def.Kind {
+	case typemap.TypeDefInterface:
+		writeInterface(ew, def)
+	case typemap.TypeDefUnion:
+		writeUnion(ew, def)
+	case typemap.TypeDefAlias:
+		writeAlias(ew, def)
+	}
+	ew.println("")
+}
+
 func writeJSDoc(ew *errWriter, comment, indent string) {
 	if comment == "" {
 		return
@@ -204,15 +213,7 @@ func writeInterface(ew *errWriter, def typemap.TypeDef) {
 	ew.printf("export interface %s%s%s {\n", def.Name, typeParams, extendsClause)
 	for _, f := range def.Fields {
 		writeJSDoc(ew, f.Comment, "  ")
-		opt := ""
-		if f.Optional {
-			opt = "?"
-		}
-		prefix := ""
-		if f.Readonly {
-			prefix = "readonly "
-		}
-		ew.printf("  %s%s%s: %s;\n", prefix, typemap.QuotePropName(f.Name), opt, f.Type)
+		ew.printf("  %s;\n", typemap.PropertyDeclaration(f))
 	}
 	ew.println("}")
 }

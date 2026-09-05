@@ -14,7 +14,6 @@ var zodFormatBases = map[string]string{
 	"e164":             "z.e164()",
 	"jwt":              "z.jwt()",
 	"base64":           "z.base64()",
-	"lowercase":        "z.lowercase()",
 	"ip":               "z.ipv4()",
 	"ipv4":             "z.ipv4()",
 	"ipv6":             "z.ipv6()",
@@ -26,7 +25,6 @@ var zodFormatBases = map[string]string{
 	"mac":              "z.mac()",
 	"cidrv4":           "z.cidrv4()",
 	"cidrv6":           "z.cidrv6()",
-	"uppercase":        "z.uppercase()",
 }
 
 var zodGoKindBases = map[string]string{
@@ -64,8 +62,6 @@ var zodStringBases = map[string]bool{
 	"z.jwt()":       true,
 	"z.base64()":    true,
 	"z.base64url()": true,
-	"z.lowercase()": true,
-	"z.uppercase()": true,
 	"z.ipv4()":      true,
 	"z.ipv6()":      true,
 	"z.hostname()":  true,
@@ -87,6 +83,8 @@ var zodZeroLiterals = map[string]string{
 }
 
 var zodMiniChecks = map[string]string{
+	"lowercase":  "lowercase",
+	"uppercase":  "uppercase",
 	"min":        "minLength",
 	"max":        "maxLength",
 	"length":     "length",
@@ -122,6 +120,9 @@ func ZodType(f Field, style ZodStyle) string {
 	}
 
 	result := base + constraints
+	if strings.HasPrefix(base, "z.enum(") || strings.HasPrefix(base, "z.literal(") || strings.HasPrefix(base, "z.union(") {
+		result = zodWithChecks(base, constraints)
+	}
 	if omitemptyLit != "" {
 		result += ".or(" + omitemptyLit + ")"
 	}
@@ -136,24 +137,16 @@ func ZodType(f Field, style ZodStyle) string {
 // already accepts the zero value. Optional covers undefined; this covers the
 // Go zero value.
 func zodOmitemptyLiteral(f Field, base, constraints string) string {
-	if !f.ValidateOmitempty {
+	if !f.ValidateOmitempty || f.IsPointer {
 		return ""
 	}
-	// Only a constraint or a format base such as z.email() rejects the zero
-	// value.
-	if constraints == "" && !isFormatBase(base) {
+	// base may already be a format, enum, or literal that rejects the zero
+	// value, so derive the zero literal from the unconstrained type.
+	unconstrainedBase := ZodBaseForTSType(f.Type, f.GoKind)
+	if constraints == "" && base == unconstrainedBase {
 		return ""
 	}
-	return zodZeroLiteral(base)
-}
-
-// isFormatBase reports whether base is a format constructor that rejects the
-// empty string, as z.email() does.
-func isFormatBase(base string) bool {
-	if isStringBase(base) && base != "z.string()" {
-		return true
-	}
-	return strings.HasPrefix(base, "z.enum(")
+	return zodZeroLiteral(unconstrainedBase)
 }
 
 // zodZeroLiteral returns the Zod literal for the zero value of the given base type.
@@ -228,7 +221,7 @@ func zodConstraints(f Field, base string) string {
 		return ""
 	}
 
-	isStr := isStringBase(base)
+	isStr := isStringBase(base) || strings.HasPrefix(base, "z.enum(")
 	var parts []string
 	if shouldRequireNonEmptyString(f, isStr) {
 		parts = append(parts, `.min(1)`)
@@ -244,6 +237,9 @@ func zodConstraints(f Field, base string) string {
 }
 
 func zodConstraint(rule ValidateRule, f Field, isStr bool) string {
+	if isStr && (rule.Tag == "lowercase" || rule.Tag == "uppercase") {
+		return "." + rule.Tag + "()"
+	}
 	if rule.Tag == "alphanum" {
 		return `.regex(/^[a-zA-Z0-9]*$/)`
 	}
@@ -525,13 +521,22 @@ func zodConstraintMethod(tag string, isStr bool) string {
 }
 
 // zodMini generates Zod Mini functional syntax.
-// omitemptyLit is the zero-value literal for .or() wrapping (empty string if not needed).
+// omitemptyLit is the zero-value alternative (empty string if not needed).
 func zodMini(base string, constraints string, optional bool, omitemptyLit string) string {
-	if constraints == "" && !optional && omitemptyLit == "" {
-		return base
+	inner := zodWithChecks(base, constraints)
+	if omitemptyLit != "" {
+		inner = "z.union([" + inner + ", " + omitemptyLit + "])"
 	}
+	if optional {
+		return fmt.Sprintf("z.optional(%s)", inner)
+	}
+	return inner
+}
 
-	// Zod Mini takes constraints as z.check arguments instead of a method chain.
+// zodWithChecks appends constraints as .check(...) calls. This is the only
+// form zod/mini accepts, and ZodEnum, ZodLiteral, and ZodUnion in standard
+// Zod have no .min() or .max() methods either.
+func zodWithChecks(base, constraints string) string {
 	var checks []string
 	if constraints != "" {
 		remaining := constraints
@@ -558,19 +563,10 @@ func zodMini(base string, constraints string, optional bool, omitemptyLit string
 		}
 	}
 
-	inner := base
 	if len(checks) > 0 {
-		inner = fmt.Sprintf("%s.check(%s)", base, strings.Join(checks, ", "))
+		return fmt.Sprintf("%s.check(%s)", base, strings.Join(checks, ", "))
 	}
-
-	if omitemptyLit != "" {
-		inner += ".or(" + omitemptyLit + ")"
-	}
-
-	if optional {
-		return fmt.Sprintf("z.optional(%s)", inner)
-	}
-	return inner
+	return base
 }
 
 func zodCallCloseIndex(s string) int {

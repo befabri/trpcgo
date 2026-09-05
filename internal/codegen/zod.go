@@ -1,7 +1,6 @@
 package codegen
 
 import (
-	"cmp"
 	"fmt"
 	"io"
 	"maps"
@@ -32,6 +31,11 @@ func WriteZodSchemas(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef, sty
 	}
 
 	reachable := transitiveReachable(inputTypeNames, defsByName)
+	var err error
+	defsByName, err = expandZodInheritance(defsByName, reachable)
+	if err != nil {
+		return err
+	}
 
 	plan := topologicalSort(reachable, defsByName)
 
@@ -45,6 +49,8 @@ func WriteZodSchemas(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef, sty
 		ew.println(`import { z } from "zod";`)
 	}
 	ew.println("")
+
+	writeZodShapeTypes(ew, plan, defsByName)
 
 	for _, name := range plan.Order {
 		def, ok := defsByName[name]
@@ -66,24 +72,16 @@ func writeZodSchema(ew *errWriter, def typemap.TypeDef, cycles map[string]map[st
 	case typemap.TypeDefUnion:
 		writeZodEnum(ew, def, style)
 	case typemap.TypeDefAlias:
-		writeZodAlias(ew, def, style)
+		writeZodAlias(ew, def, cycles, style)
 	}
 }
 
 func writeZodObject(ew *errWriter, def typemap.TypeDef, cycles map[string]map[string]bool, style typemap.ZodStyle) {
 	schemaName := def.Name + "Schema"
-	isCyclic := len(cycles[def.Name]) > 0
-	hasExtends := len(def.Extends) > 0
-
-	var objectExpr string
-	if hasExtends {
-		objectExpr = extendsBaseExpr(def.Extends, style) + "{"
-	} else {
-		objectExpr = "z.object({"
-	}
-
 	omitted := map[string]bool{}
+	fields := make(map[string]typemap.Field, len(def.Fields))
 	for _, f := range def.Fields {
+		fields[f.Name] = f
 		if f.ZodOmit {
 			omitted[f.Name] = true
 		}
@@ -97,17 +95,32 @@ func writeZodObject(ew *errWriter, def typemap.TypeDef, cycles map[string]map[st
 		}
 	}
 
-	if isCyclic {
-		ew.printf("export const %s: z.ZodType<%s> = z.lazy(() => %s\n", schemaName, def.Name, objectExpr)
-	} else {
-		ew.printf("export const %s = %s\n", schemaName, objectExpr)
-	}
+	ew.printf("export const %s = z.object({\n", schemaName)
 
 	for _, f := range def.Fields {
 		if f.ZodOmit {
 			continue
 		}
-		zodType := fieldToZod(f, cycles[def.Name], style)
+		zodType := fieldToZod(f, style)
+		for _, ref := range extractTypeRefs(zodFieldType(f)) {
+			if cycles[def.Name][ref] {
+				// z.lazy needs an explicit type annotation or TypeScript cannot
+				// infer a schema that refers to itself.
+				annotation := "z.ZodType"
+				if style == typemap.ZodMini {
+					annotation = "z.ZodMiniType"
+				}
+				fieldType := fmt.Sprintf("$%s[%q]", def.Name, f.Name)
+				inner := f
+				inner.Optional = false
+				if f.Optional {
+					fieldType = "Exclude<" + fieldType + ", undefined>"
+				}
+				zodType = fmt.Sprintf("z.lazy((): %s<%s, %s> => %s)", annotation, fieldType, fieldType, fieldToZod(inner, style))
+				zodType = optionalZod(zodType, f.Optional, style)
+				break
+			}
+		}
 		if f.Comment != "" && style != typemap.ZodMini {
 			zodType += fmt.Sprintf(".describe(%q)", f.Comment)
 		}
@@ -116,11 +129,7 @@ func writeZodObject(ew *errWriter, def typemap.TypeDef, cycles map[string]map[st
 	}
 
 	// No semicolon yet: refinements and meta follow.
-	if isCyclic {
-		ew.print("}))")
-	} else {
-		ew.print("})")
-	}
+	ew.print("})")
 
 	// zod/mini has no .refine method; it takes z.refine through .check().
 	for _, ref := range activeRefs {
@@ -133,8 +142,7 @@ func writeZodObject(ew *errWriter, def typemap.TypeDef, cycles map[string]map[st
 		if style == typemap.ZodMini {
 			dataParam = "(data: any)"
 		}
-		ew.printf("  %s => %s %s %s,\n",
-			dataParam, zodDataAccess(ref.Field), ref.Op, zodDataAccess(ref.OtherField))
+		ew.printf("  %s => %s,\n", dataParam, zodRefinementPredicate(ref, fields))
 		message := fmt.Sprintf("%s must be %s %s", ref.Field, ref.Op, ref.OtherField)
 		ew.printf("  { message: %q, path: [%q] }\n", message, ref.Field)
 		if style == typemap.ZodMini {
@@ -153,60 +161,6 @@ func zodDataAccess(prop string) string {
 		return "data." + prop
 	}
 	return "data[" + quoted + "]"
-}
-
-// extendsBaseExpr builds the Zod base expression for extends.
-// Standard: BaseSchema.extend( / BaseSchema.partial().extend( / Base1Schema.merge(Base2Schema).extend(
-// Mini:     z.extend(BaseSchema / z.extend(z.partial(BaseSchema) / z.extend(z.merge(Base1Schema, Base2Schema)
-func extendsBaseExpr(extends []string, style typemap.ZodStyle) string {
-	if style == typemap.ZodMini {
-		return extendsBaseExprMini(extends)
-	}
-	return extendsBaseExprStandard(extends)
-}
-
-func extendsBaseExprStandard(extends []string) string {
-	parts := make([]string, len(extends))
-	for i, ext := range extends {
-		if after, ok := strings.CutPrefix(ext, "Partial<"); ok {
-			name := strings.TrimSuffix(after, ">")
-			parts[i] = name + "Schema.partial()"
-		} else {
-			parts[i] = ext + "Schema"
-		}
-	}
-	if len(parts) == 1 {
-		return parts[0] + ".extend("
-	}
-	var result strings.Builder
-	result.WriteString(parts[0])
-	for _, p := range parts[1:] {
-		result.WriteString(".merge(" + p + ")")
-	}
-	return result.String() + ".extend("
-}
-
-func extendsBaseExprMini(extends []string) string {
-	parts := make([]string, len(extends))
-	for i, ext := range extends {
-		if after, ok := strings.CutPrefix(ext, "Partial<"); ok {
-			name := strings.TrimSuffix(after, ">")
-			parts[i] = "z.partial(" + name + "Schema)"
-		} else {
-			parts[i] = ext + "Schema"
-		}
-	}
-	var base string
-	if len(parts) == 1 {
-		base = parts[0]
-	} else {
-		// z.merge only takes two args; chain: z.merge(z.merge(a, b), c)
-		base = parts[0]
-		for _, p := range parts[1:] {
-			base = "z.merge(" + base + ", " + p + ")"
-		}
-	}
-	return "z.extend(" + base + ", "
 }
 
 // unsupportedComment returns a trailing inline comment listing validate tags
@@ -279,18 +233,23 @@ func zodLiteralUnion(literals []string) string {
 	return "z.union([" + strings.Join(literals, ", ") + "])"
 }
 
-func writeZodAlias(ew *errWriter, def typemap.TypeDef, style typemap.ZodStyle) {
-	schemaName := def.Name + "Schema"
-	base := cmp.Or(typemap.ZodBaseForTSType(def.AliasOf, ""), "z.unknown()")
-	f := typemap.Field{Type: def.AliasOf}
-	zodStr := cmp.Or(typemap.ZodType(f, style), base)
-	ew.printf("export const %s = %s", schemaName, zodStr)
+func writeZodAlias(ew *errWriter, def typemap.TypeDef, cycles map[string]map[string]bool, style typemap.ZodStyle) {
+	zodStr := fieldToZod(typemap.Field{Type: def.AliasOf}, style)
+	if len(cycles[def.Name]) > 0 {
+		annotation := "z.ZodType"
+		if style == typemap.ZodMini {
+			annotation = "z.ZodMiniType"
+		}
+		zodStr = fmt.Sprintf("z.lazy((): %s<$%s, $%s> => %s)", annotation, def.Name, def.Name, zodStr)
+	}
+	ew.printf("export const %sSchema = %s", def.Name, zodStr)
 	writeZodMeta(ew, def, style)
 	ew.println(";")
 }
 
 // fieldToZod converts a single field to its Zod representation.
-func fieldToZod(f typemap.Field, cyclicFields map[string]bool, style typemap.ZodStyle) string {
+func fieldToZod(f typemap.Field, style typemap.ZodStyle) string {
+	f.Type = zodFieldType(f)
 	base := typemap.ZodBaseForTSType(f.Type, f.GoKind)
 
 	if base != "" {
@@ -304,11 +263,21 @@ func fieldToZod(f typemap.Field, cyclicFields map[string]bool, style typemap.Zod
 	}
 
 	if strings.HasPrefix(tsType, "Record<") {
-		return recordFieldToZod(tsType, f.Optional, style)
+		return recordFieldToZod(tsType, f, style)
 	}
 
-	// A cyclic reference needs no special form: the parent schema is wrapped
-	// in z.lazy().
+	if fields, ok := inlineTypeFields(tsType); ok {
+		var props []string
+		for _, field := range fields {
+			props = append(props, typemap.QuotePropName(field.Name)+": "+fieldToZod(field, style))
+		}
+		return optionalZod("z.object({ "+strings.Join(props, ", ")+" })", f.Optional, style)
+	}
+	if tsType == "never" {
+		return optionalZod("z.never()", f.Optional, style)
+	}
+
+	// Cyclic references are wrapped in z.lazy by writeZodObject, not here.
 	refName := stripGenericArgs(tsType)
 	ref := refName + "Schema"
 
@@ -330,15 +299,19 @@ func arrayFieldToZod(elemType string, f typemap.Field, style typemap.ZodStyle) s
 }
 
 func elementZod(elemType string, f typemap.Field, style typemap.ZodStyle) string {
-	if len(f.ElementValidate) > 0 && f.ElementGoKind != "" && f.ElementGoKind != "struct" {
-		return typemap.ZodType(typemap.Field{
-			Type:      elemType,
-			GoKind:    f.ElementGoKind,
-			IsPointer: f.ElementIsPointer,
-			Validate:  f.ElementValidate,
-		}, style)
+	rules, elementRules := typemap.SplitAtDive(f.ElementValidate)
+	element := typemap.Field{
+		Type:              elemType,
+		Validate:          rules,
+		ValidateOmitempty: slices.ContainsFunc(rules, func(rule typemap.ValidateRule) bool { return rule.Tag == "omitempty" }),
+		ElementValidate:   elementRules,
 	}
-	return tsTypeToZodRef(elemType, f.ElementGoKind)
+	if f.Element != nil {
+		element.GoKind = f.Element.GoKind
+		element.IsPointer = f.Element.IsPointer
+		element.Element = f.Element.Element
+	}
+	return fieldToZod(element, style)
 }
 
 func arrayConstraints(rules []typemap.ValidateRule, style typemap.ZodStyle) string {
@@ -396,15 +369,15 @@ func arrayConstraintsMini(rules []typemap.ValidateRule) string {
 	return fmt.Sprintf(".check(%s)", strings.Join(checks, ", "))
 }
 
-func recordFieldToZod(tsType string, optional bool, style typemap.ZodStyle) string {
+func recordFieldToZod(tsType string, f typemap.Field, style typemap.ZodStyle) string {
 	inner := tsType[len("Record<") : len(tsType)-1]
 	parts := splitTopLevel(inner, ',')
 	if len(parts) != 2 {
-		return optionalZod(stripGenericArgs(tsType)+"Schema", optional, style)
+		return optionalZod(stripGenericArgs(tsType)+"Schema", f.Optional, style)
 	}
-	keyZod := tsTypeToZodRef(strings.TrimSpace(parts[0]), "")
-	valZod := tsTypeToZodRef(strings.TrimSpace(parts[1]), "")
-	return optionalZod(fmt.Sprintf("z.record(%s, %s)", keyZod, valZod), optional, style)
+	keyZod := fieldToZod(typemap.Field{Type: strings.TrimSpace(parts[0])}, style)
+	valZod := elementZod(strings.TrimSpace(parts[1]), f, style)
+	return optionalZod(fmt.Sprintf("z.record(%s, %s)", keyZod, valZod), f.Optional, style)
 }
 
 func optionalZod(result string, optional bool, style typemap.ZodStyle) string {
@@ -415,15 +388,6 @@ func optionalZod(result string, optional bool, style typemap.ZodStyle) string {
 		return fmt.Sprintf("z.optional(%s)", result)
 	}
 	return result + ".optional()"
-}
-
-// tsTypeToZodRef converts a TS type string to a Zod reference (for array/record elements).
-func tsTypeToZodRef(tsType, goKind string) string {
-	base := typemap.ZodBaseForTSType(tsType, goKind)
-	if base != "" {
-		return base
-	}
-	return stripGenericArgs(tsType) + "Schema"
 }
 
 // stripGenericArgs removes generic type arguments: "Foo<Bar>" → "Foo"
@@ -437,29 +401,42 @@ func stripGenericArgs(s string) string {
 // splitTopLevel splits a string by sep, respecting angle brackets.
 func splitTopLevel(s string, sep byte) []string {
 	var parts []string
-	depth := 0
-	start := 0
+	depth, start := 0, 0
+	var quote byte
+	escaped := false
 	for i := range len(s) {
-		switch s[i] {
-		case '<':
+		c := s[i]
+		if quote != 0 {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'', '`':
+			quote = c
+		case '<', '(', '{', '[':
 			depth++
-		case '>':
+		case '>', ')', '}', ']':
 			depth--
-		case sep:
-			if depth == 0 {
+		default:
+			if c == sep && depth == 0 {
 				parts = append(parts, s[start:i])
 				start = i + 1
 			}
 		}
 	}
-	parts = append(parts, s[start:])
-	return parts
+	return append(parts, s[start:])
 }
 
 // EmitPlan holds the topological order and cycle information for Zod emission.
 type EmitPlan struct {
 	Order  []string                   // type names in dependency order (leaves first)
-	Cycles map[string]map[string]bool // parent type → field types that close a cycle; the parent is emitted via z.lazy()
+	Cycles map[string]map[string]bool // parent type → field types not yet initialized; those fields use z.lazy()
 }
 
 // transitiveReachable finds all types reachable from the given root set.
@@ -475,17 +452,8 @@ func transitiveReachable(roots map[string]bool, defs map[string]typemap.TypeDef)
 		if !ok {
 			return
 		}
-		if def.Kind == typemap.TypeDefInterface {
-			for _, f := range def.Fields {
-				for _, ref := range extractTypeRefs(f.Type) {
-					visit(ref)
-				}
-			}
-			for _, ext := range def.Extends {
-				for _, ref := range extractTypeRefs(ext) {
-					visit(ref)
-				}
-			}
+		for _, ref := range definitionRefs(def) {
+			visit(ref)
 		}
 	}
 	for name := range roots {
@@ -497,37 +465,15 @@ func transitiveReachable(roots map[string]bool, defs map[string]typemap.TypeDef)
 // topologicalSort orders the reachable types leaves first and reports which
 // references close a cycle.
 func topologicalSort(reachable map[string]bool, defs map[string]typemap.TypeDef) EmitPlan {
-	// A self-reference is not a graph edge but still needs z.lazy().
 	deps := make(map[string][]string)
-	selfRefs := make(map[string]bool)
 	for name := range reachable {
 		def, ok := defs[name]
 		if !ok {
 			continue
 		}
-		if def.Kind == typemap.TypeDefInterface {
-			for _, f := range def.Fields {
-				for _, ref := range extractTypeRefs(f.Type) {
-					if !reachable[ref] {
-						continue
-					}
-					if ref == name {
-						selfRefs[name] = true
-					} else {
-						deps[name] = append(deps[name], ref)
-					}
-				}
-			}
-			// Extends are also dependencies — base schemas must emit first.
-			for _, ext := range def.Extends {
-				for _, ref := range extractTypeRefs(ext) {
-					if !reachable[ref] {
-						continue
-					}
-					if ref != name {
-						deps[name] = append(deps[name], ref)
-					}
-				}
+		for _, ref := range definitionRefs(def) {
+			if reachable[ref] && ref != name {
+				deps[name] = append(deps[name], ref)
 			}
 		}
 	}
@@ -539,7 +485,6 @@ func topologicalSort(reachable map[string]bool, defs map[string]typemap.TypeDef)
 		black
 	)
 	colors := make(map[string]color)
-	cycles := make(map[string]map[string]bool)
 	var order []string
 
 	var dfs func(name string)
@@ -552,12 +497,7 @@ func topologicalSort(reachable map[string]bool, defs map[string]typemap.TypeDef)
 		}
 		colors[name] = gray
 		for _, dep := range deps[name] {
-			if colors[dep] == gray {
-				if cycles[name] == nil {
-					cycles[name] = make(map[string]bool)
-				}
-				cycles[name][dep] = true
-			} else {
+			if colors[dep] != gray {
 				dfs(dep)
 			}
 		}
@@ -572,63 +512,30 @@ func topologicalSort(reachable map[string]bool, defs map[string]typemap.TypeDef)
 		dfs(name)
 	}
 
-	for name := range selfRefs {
-		if cycles[name] == nil {
-			cycles[name] = make(map[string]bool)
-		}
-		cycles[name][name] = true
+	// A schema at or after position i is not yet initialized when schema i is
+	// built; j == i is a self-reference.
+	position := make(map[string]int, len(order))
+	for i, name := range order {
+		position[name] = i
 	}
-
+	cycles := make(map[string]map[string]bool)
+	for i, name := range order {
+		for _, ref := range definitionRefs(defs[name]) {
+			if j, ok := position[ref]; ok && j >= i {
+				if cycles[name] == nil {
+					cycles[name] = make(map[string]bool)
+				}
+				cycles[name][ref] = true
+			}
+		}
+	}
 	return EmitPlan{Order: order, Cycles: cycles}
 }
 
 // extractTypeRefs pulls named type references from a TS type string.
 // "Foo[]" → ["Foo"], "Record<string, Bar>" → ["Bar"], "Foo" → ["Foo"]
 func extractTypeRefs(tsType string) []string {
-	switch tsType {
-	case "string", "number", "boolean", "unknown", "void", "null", "undefined", "never":
-		return nil
-	}
-
-	if before, ok := strings.CutSuffix(tsType, "[]"); ok {
-		elem := before
-		elem = strings.TrimPrefix(elem, "(")
-		elem = strings.TrimSuffix(elem, ")")
-		return extractTypeRefs(elem)
-	}
-
-	if strings.HasPrefix(tsType, "Record<") {
-		inner := tsType[len("Record<") : len(tsType)-1]
-		parts := splitTopLevel(inner, ',')
-		var refs []string
-		for _, p := range parts {
-			refs = append(refs, extractTypeRefs(strings.TrimSpace(p))...)
-		}
-		return refs
-	}
-
-	if idx := strings.IndexByte(tsType, '<'); idx >= 0 {
-		name := tsType[:idx]
-		inner := tsType[idx+1 : len(tsType)-1]
-		refs := []string{name}
-		for _, p := range splitTopLevel(inner, ',') {
-			refs = append(refs, extractTypeRefs(strings.TrimSpace(p))...)
-		}
-		return refs
-	}
-
-	// Inline object types: "{ foo: string; bar: number }"
-	if strings.HasPrefix(tsType, "{") {
-		return nil
-	}
-
-	if strings.Contains(tsType, " | ") {
-		var refs []string
-		for p := range strings.SplitSeq(tsType, " | ") {
-			refs = append(refs, extractTypeRefs(strings.TrimSpace(p))...)
-		}
-		return refs
-	}
-
-	return []string{tsType}
+	var refs []string
+	mapTypeNames(tsType, func(name string) string { refs = append(refs, name); return name })
+	return refs
 }

@@ -226,7 +226,7 @@ func TestGenerateTSIdempotent(t *testing.T) {
 	}
 }
 
-func TestGenerateTSTrackedEventUnwrap(t *testing.T) {
+func TestGenerateTSTrackedEventWrapper(t *testing.T) {
 	type Notification struct {
 		Message string `json:"message"`
 	}
@@ -247,9 +247,9 @@ func TestGenerateTSTrackedEventUnwrap(t *testing.T) {
 	}
 	output := string(data)
 
-	// The subscription output should be Notification, not TrackedEvent.
-	if !strings.Contains(output, "$Subscription<void, Notification>") {
-		t.Errorf("TrackedEvent should be unwrapped to Notification:\n%s", output)
+	// The subscription output must match httpSubscriptionLink's onData value.
+	if !strings.Contains(output, "$Subscription<void, { id: string; data: Notification }>") {
+		t.Errorf("TrackedEvent should expose the client tracking wrapper:\n%s", output)
 	}
 	if strings.Contains(output, "TrackedEvent") {
 		t.Errorf("TrackedEvent should not appear in output:\n%s", output)

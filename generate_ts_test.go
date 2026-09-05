@@ -115,12 +115,10 @@ func TestGenerateTSGenericInstantiation(t *testing.T) {
 		t.Error("output contains test package path (trpcgo_test.)")
 	}
 
-	// Must contain valid TypeScript generic references in the procedure types.
-	if !strings.Contains(ts, "GenPage<GenAlpha>") {
-		t.Error("expected 'GenPage<GenAlpha>' in procedure output type")
-	}
-	if !strings.Contains(ts, "GenPage<GenBeta>") {
-		t.Error("expected 'GenPage<GenBeta>' in procedure output type")
+	for _, leaf := range []string{"GenAlpha", "GenBeta"} {
+		if !regexp.MustCompile(`(?s)export interface GenPage_[a-f0-9]+ \{[^}]*items: ` + leaf + `\[\]`).MatchString(ts) {
+			t.Errorf("missing concrete page for %s:\n%s", leaf, ts)
+		}
 	}
 }
 
@@ -137,19 +135,16 @@ func TestGenerateTSGenericInterfaceDeduplication(t *testing.T) {
 	trpcgo.Query(r, "c.list", func(_ context.Context, _ struct{}) (GenPage[GenGamma], error) {
 		return GenPage[GenGamma]{}, nil
 	})
+	trpcgo.Query(r, "d.list", func(_ context.Context, _ struct{}) (GenPage[GenAlpha], error) {
+		return GenPage[GenAlpha]{}, nil
+	})
 
 	ts := generateTS(t, r)
 	t.Log("Generated TypeScript:\n" + ts)
 
-	// There must be exactly ONE interface declaration for GenPage.
 	count := countPattern(ts, `(?m)^export interface GenPage`)
-	if count != 1 {
-		t.Errorf("expected exactly 1 'export interface GenPage' declaration, got %d", count)
-	}
-
-	// The single interface must be generic (have a type parameter).
-	if !regexp.MustCompile(`export interface GenPage<\w+>`).MatchString(ts) {
-		t.Error("expected generic interface 'export interface GenPage<T>' (or similar type param name)")
+	if count != 3 {
+		t.Errorf("expected 3 concrete GenPage declarations, got %d", count)
 	}
 
 	// Each concrete type should still have its own interface.
@@ -170,9 +165,8 @@ func TestGenerateTSMultiParamGeneric(t *testing.T) {
 	ts := generateTS(t, r)
 	t.Log("Generated TypeScript:\n" + ts)
 
-	// Must have TypeScript generic reference with two args.
-	if !strings.Contains(ts, "GenPair<GenAlpha, GenBeta>") {
-		t.Error("expected 'GenPair<GenAlpha, GenBeta>' in output")
+	if !strings.Contains(ts, "first: GenAlpha") || !strings.Contains(ts, "second: GenBeta") {
+		t.Errorf("missing concrete pair fields:\n%s", ts)
 	}
 
 	// Must NOT contain Go bracket syntax.
@@ -180,9 +174,8 @@ func TestGenerateTSMultiParamGeneric(t *testing.T) {
 		t.Error("output contains Go-style generic syntax 'GenPair[...]'")
 	}
 
-	// Interface should have two type parameters.
-	if !regexp.MustCompile(`export interface GenPair<\w+, \w+>`).MatchString(ts) {
-		t.Error("expected generic interface with two type parameters like 'GenPair<A, B>'")
+	if !regexp.MustCompile(`export interface GenPair_[a-f0-9]+ \{`).MatchString(ts) {
+		t.Error("expected a specialized GenPair interface")
 	}
 }
 
@@ -228,17 +221,15 @@ func TestGenerateTSGenericFieldTypes(t *testing.T) {
 	t.Log("Generated TypeScript:\n" + ts)
 
 	// Extract the GenPage interface body.
-	re := regexp.MustCompile(`(?s)export interface GenPage<(\w+)> \{(.+?)\}`)
+	re := regexp.MustCompile(`(?s)export interface GenPage_[a-f0-9]+ \{(.+?)\}`)
 	m := re.FindStringSubmatch(ts)
 	if m == nil {
 		t.Fatal("could not find generic GenPage interface in output")
 	}
 
-	paramName := m[1] // e.g., "T"
-	body := m[2]
+	body := m[1]
 
-	// The items field should reference the type parameter, not a concrete type.
-	expectedItems := paramName + "[]"
+	expectedItems := "GenAlpha[]"
 	if !strings.Contains(body, "items: "+expectedItems) {
 		t.Errorf("expected 'items: %s' in GenPage body, got:\n%s", expectedItems, body)
 	}
@@ -448,12 +439,12 @@ func TestGenerateTSTypeEdgeCases(t *testing.T) {
 		if !strings.Contains(ts, "export interface WithPtrEmbed {") {
 			t.Errorf("WithPtrEmbed interface should be emitted:\n%s", ts)
 		}
-		// Base fields should be flattened into WithPtrEmbed.
-		if !strings.Contains(ts, "id: string;") {
-			t.Errorf("embedded PtrBase.ID should be flattened:\n%s", ts)
+		// A nil embedded pointer omits all its promoted JSON fields.
+		if !strings.Contains(ts, "id?: string;") {
+			t.Errorf("embedded PtrBase.ID should be flattened and optional:\n%s", ts)
 		}
-		if !strings.Contains(ts, "createdAt: string;") {
-			t.Errorf("embedded PtrBase.CreatedAt should be flattened:\n%s", ts)
+		if !strings.Contains(ts, "createdAt?: string;") {
+			t.Errorf("embedded PtrBase.CreatedAt should be flattened and optional:\n%s", ts)
 		}
 		if !strings.Contains(ts, "name: string;") {
 			t.Errorf("own Name field should be present:\n%s", ts)

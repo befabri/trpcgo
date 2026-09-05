@@ -434,7 +434,7 @@ func TestZodDiveArrayDirect(t *testing.T) {
 						{Tag: "min", Param: "2"},
 						{Tag: "max", Param: "64"},
 					},
-					ElementGoKind: "string",
+					Element: &typemap.ElementType{GoKind: "string"},
 				},
 			},
 		},
@@ -478,7 +478,7 @@ func TestZodDiveArrayStructElement(t *testing.T) {
 						{Tag: "min", Param: "1"},
 					},
 					ElementValidate: []typemap.ValidateRule{},
-					ElementGoKind:   "struct",
+					Element:         &typemap.ElementType{GoKind: "struct"},
 				},
 			},
 		},
@@ -529,7 +529,7 @@ func TestZodDiveArrayNoElementRules(t *testing.T) {
 					GoKind:          "slice",
 					Validate:        []typemap.ValidateRule{{Tag: "required"}},
 					ElementValidate: nil,
-					ElementGoKind:   "string",
+					Element:         &typemap.ElementType{GoKind: "string"},
 				},
 			},
 		},
@@ -568,7 +568,7 @@ func TestZodMiniDiveArray(t *testing.T) {
 						{Tag: "min", Param: "2"},
 						{Tag: "max", Param: "50"},
 					},
-					ElementGoKind: "string",
+					Element: &typemap.ElementType{GoKind: "string"},
 				},
 			},
 		},
@@ -694,19 +694,12 @@ func TestZodCyclicLazy(t *testing.T) {
 	}
 	output := buf.String()
 
-	// Must use z.lazy() wrapper.
-	if !strings.Contains(output, "z.lazy(() => z.object(") {
-		t.Errorf("cyclic type should use z.lazy().\nOutput:\n%s", output)
+	// Only the recursive field is lazy, so the schema stays a plain z.object.
+	if !strings.Contains(output, `children: z.lazy((): z.ZodType<$TreeNode["children"], $TreeNode["children"]> => z.array(TreeNodeSchema))`) {
+		t.Errorf("cyclic field should be lazy and explicitly typed.\nOutput:\n%s", output)
 	}
-
-	// Must have type annotation for type inference.
-	if !strings.Contains(output, "z.ZodType<TreeNode>") {
-		t.Errorf("cyclic type should have z.ZodType<T> annotation.\nOutput:\n%s", output)
-	}
-
-	// Must close lazy wrapper with })).
-	if !strings.Contains(output, "}))") {
-		t.Errorf("cyclic type should close z.lazy.\nOutput:\n%s", output)
+	if !strings.Contains(output, "export const TreeNodeSchema = z.object(") {
+		t.Errorf("cyclic schema should retain object operations.\nOutput:\n%s", output)
 	}
 
 	// Self-reference should just use TreeNodeSchema.
@@ -773,19 +766,18 @@ func TestZodMutualCycle(t *testing.T) {
 	output := buf.String()
 
 	// DFS visits NodeA first (sorted), discovers back-edge NodeB→NodeA,
-	// so NodeB gets z.lazy. NodeA is emitted second as plain z.object.
-	if !strings.Contains(output, "NodeBSchema: z.ZodType<NodeB> = z.lazy(") {
-		t.Errorf("NodeB (back-edge) should use z.lazy with type annotation.\nOutput:\n%s", output)
+	// so NodeB's a field is lazy.
+	if !strings.Contains(output, `a: z.lazy((): z.ZodType<$NodeB["a"], $NodeB["a"]> => NodeASchema)`) {
+		t.Errorf("back-edge field should use z.lazy with type annotation.\nOutput:\n%s", output)
 	}
 	if !strings.Contains(output, "NodeASchema = z.object(") {
 		t.Errorf("NodeA should be plain z.object.\nOutput:\n%s", output)
 	}
 
-	// Exactly one z.lazy and one plain z.object.
 	lazyCount := strings.Count(output, "z.lazy(")
 	objectCount := strings.Count(output, "= z.object(")
-	if lazyCount != 1 || objectCount != 1 {
-		t.Errorf("expected 1 z.lazy + 1 z.object, got %d + %d.\nOutput:\n%s", lazyCount, objectCount, output)
+	if lazyCount != 1 || objectCount != 2 {
+		t.Errorf("expected 1 z.lazy + 2 z.object, got %d + %d.\nOutput:\n%s", lazyCount, objectCount, output)
 	}
 }
 
@@ -846,10 +838,10 @@ func TestZodOmitemptyE2E(t *testing.T) {
 
 	t.Run("omitempty+optional pointer field", func(t *testing.T) {
 		// nickname is *string with json:"nickname,omitempty" validate:"omitempty,min=3,max=30"
-		// Should have both .or(z.literal("")) AND .optional().
-		want := `z.string().min(3).max(30).or(z.literal("")).optional()`
+		// A nil pointer skips validation; a pointer to "" must satisfy min=3.
+		want := `z.string().min(3).max(30).optional()`
 		if !strings.Contains(zodOutput, want) {
-			t.Errorf("nickname should have both .or() and .optional().\nwant: %s\nOutput:\n%s", want, zodOutput)
+			t.Errorf("nickname should allow absence while validating present values.\nwant: %s\nOutput:\n%s", want, zodOutput)
 		}
 	})
 }
@@ -924,7 +916,7 @@ func TestZodOmitemptyDirect(t *testing.T) {
 		}
 		output := buf.String()
 
-		wantOmitempty := `z.string().check(z.length(6)).or(z.literal(""))`
+		wantOmitempty := `z.union([z.string().check(z.length(6)), z.literal("")])`
 		count := strings.Count(output, wantOmitempty)
 		if count != 2 {
 			t.Errorf("expected %q to appear 2 times, got %d.\nOutput:\n%s", wantOmitempty, count, output)

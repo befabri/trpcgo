@@ -42,16 +42,27 @@ func (d TypeDef) IsStringUnion() bool {
 
 // Refinement represents a cross-field validation constraint emitted as .refine().
 type Refinement struct {
-	Field      string // JSON name of the constrained field
-	Op         string // JS comparison operator: ">=", "<=", ">", "<", "===", "!=="
-	OtherField string // JSON name of the referenced field
-	Tag        string // original validate tag name
+	Field               string   // JSON name of the constrained field
+	Op                  string   // JS comparison operator: ">=", "<=", ">", "<", "===", "!=="
+	OtherField          string   // JSON name of the referenced field
+	Tag                 string   // original validate tag name
+	WhenAnyPresent      []string // JSON names from the same nil-able embedded pointer as Field; the rule applies only when one is present
+	OtherWhenAnyPresent []string // the same set for OtherField when it comes from a different embedded pointer
+}
+
+// ElementType describes one level of a slice, array, or map element chain.
+// The chain stops at a struct element, which has its own TypeDef.
+type ElementType struct {
+	GoKind    string
+	IsPointer bool
+	Element   *ElementType
 }
 
 // Field represents a field in a TypeScript interface.
 type Field struct {
 	Name              string
 	Type              string
+	ZodType           string // underlying type before a tstype override
 	GoKind            string // Go kind for Zod: "string", "int", "int32", "float64", etc.
 	IsPointer         bool   // original Go field was a pointer; affects validate:"required" semantics
 	Optional          bool
@@ -60,9 +71,8 @@ type Field struct {
 	ValidateOmitempty bool           // validate:"omitempty" — Zod should allow zero values
 	Comment           string         // field doc comment → JSDoc
 	Validate          []ValidateRule // parsed validate tag rules (before dive)
-	ElementValidate   []ValidateRule // parsed validate tag rules after dive (for slice elements)
-	ElementGoKind     string         // Go kind of slice/array element type
-	ElementIsPointer  bool           // original slice/array element was a pointer
+	ElementValidate   []ValidateRule // parsed validate tag rules after dive (for container elements)
+	Element           *ElementType
 	UnsupportedZod    []ValidateRule // validate rules with no Zod equivalent
 	InvalidZod        []ValidateRule // validate rules that cannot be emitted safely
 	ZodOmit           bool           // zod_omit:"true" — exclude from Zod schema
@@ -228,6 +238,7 @@ func (m *Mapper) Defs() []TypeDef {
 		// Resolve tokens in field types.
 		for i := range d.Fields {
 			d.Fields[i].Type = ResolveTokens(d.Fields[i].Type, display)
+			d.Fields[i].ZodType = ResolveTokens(d.Fields[i].ZodType, display)
 		}
 		// Resolve tokens in extends clause.
 		for i := range d.Extends {
@@ -248,6 +259,23 @@ func (m *Mapper) Defs() []TypeDef {
 // Convert maps a Go type to its TypeScript representation.
 // Named struct types generate interface definitions as a side effect.
 func (m *Mapper) Convert(t types.Type) string {
+	return m.convert(t)
+}
+
+// ConvertSubscriptionOutput returns the TypeScript type httpSubscriptionLink
+// delivers to onData: a top-level TrackedEvent[T] becomes
+// { id: string; data: T }, and any other type converts as usual.
+func (m *Mapper) ConvertSubscriptionOutput(t types.Type) string {
+	unwrapped := types.Unalias(t)
+	if ptr, ok := unwrapped.(*types.Pointer); ok {
+		unwrapped = types.Unalias(ptr.Elem())
+	}
+	if named, ok := unwrapped.(*types.Named); ok {
+		obj := named.Obj()
+		if obj.Pkg() != nil && obj.Pkg().Path() == "github.com/befabri/trpcgo" && obj.Name() == "TrackedEvent" && named.TypeArgs().Len() == 1 {
+			return "{ id: string; data: " + m.convert(named.TypeArgs().At(0)) + " }"
+		}
+	}
 	return m.convert(t)
 }
 
@@ -317,11 +345,6 @@ func (m *Mapper) convertWellKnownNamed(t *types.Named, name string) string {
 	fullPath := obj.Pkg().Path() + "." + name
 	if ts := wellKnownTSTypes[fullPath]; ts != "" {
 		return ts
-	}
-	// TrackedEvent[T] — unwrap to T for TypeScript output.
-	// The tracking ID is a transport concern, not a type concern.
-	if fullPath == "github.com/befabri/trpcgo.TrackedEvent" && t.TypeArgs() != nil && t.TypeArgs().Len() == 1 {
-		return m.convert(t.TypeArgs().At(0))
 	}
 	return ""
 }
@@ -423,8 +446,7 @@ func (m *Mapper) resolveStructDef(id, name string, named *types.Named) {
 		Comment:    meta.Comment,
 		TypeParams: params,
 	}
-	m.collectFields(st, &def.Fields, &def.Extends, meta.FieldComments)
-	def.Refinements = extractStructRefinements(st, def.Fields)
+	def.Refinements = m.collectFields(st, &def.Fields, &def.Extends, meta.FieldComments)
 	m.defs[id] = def
 }
 
@@ -474,71 +496,47 @@ func pkgName(obj types.Object) string {
 	return ""
 }
 
-func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, extends *[]string, fieldComments map[int]string) {
-	for i := range st.NumFields() {
-		field := st.Field(i)
-		tag := st.Tag(i)
-		jsonName, omitempty, skip := ParseJSONTag(tag)
-		if skip || shouldSkipField(tag) {
-			continue
-		}
-
-		tstag, hasTSTag := ParseTSTypeTag(tag)
-		if m.collectEmbeddedField(field, jsonName, tstag, hasTSTag, fields, extends) {
-			continue
-		}
-
-		if !field.Exported() {
-			continue
-		}
-
-		if jsonName == "" {
-			jsonName = field.Name()
-		}
-		*fields = append(*fields, m.collectField(field, tag, jsonName, omitempty, tstag, hasTSTag, fieldComments, i))
+func (m *Mapper) collectFields(st *types.Struct, fields *[]Field, extends *[]string, fieldComments map[int]string) []Refinement {
+	adapter := FieldAdapter[types.Type]{
+		Fields: func(t types.Type) []EmbeddedField[types.Type] {
+			st := t.Underlying().(*types.Struct)
+			fields := make([]EmbeddedField[types.Type], st.NumFields())
+			for i := range fields {
+				f := st.Field(i)
+				fields[i] = EmbeddedField[types.Type]{Type: f.Type(), Name: f.Name(), Tag: st.Tag(i), Exported: f.Exported(), Embedded: f.Embedded()}
+			}
+			return fields
+		},
+		Struct: func(t types.Type) (types.Type, bool, bool) {
+			t = types.Unalias(t)
+			ptr, pointer := t.(*types.Pointer)
+			if pointer {
+				t = types.Unalias(ptr.Elem())
+			}
+			_, ok := t.Underlying().(*types.Struct)
+			return t, ok, pointer
+		},
+		TypeName: m.convert,
+		Lookup: func(t types.Type, name string) ([]int, bool) {
+			obj, indexes, _ := types.LookupFieldOrMethod(t, false, nil, name)
+			f, ok := obj.(*types.Var)
+			return indexes, ok && f.IsField()
+		},
+		Map: func(owner types.Type, index int, name string, omitted bool, tag TSTypeTag, hasTag bool) Field {
+			inner := owner.Underlying().(*types.Struct)
+			var comments map[int]string
+			if inner == st {
+				comments = fieldComments
+			}
+			return m.collectField(inner.Field(index), inner.Tag(index), name, omitted, tag, hasTag, comments, index)
+		},
 	}
-}
-
-func shouldSkipField(tag string) bool {
-	tstag, hasTSTag := ParseTSTypeTag(tag)
-	return hasTSTag && tstag.Type == "-"
-}
-
-func (m *Mapper) collectEmbeddedField(field *types.Var, jsonName string, tstag TSTypeTag, hasTSTag bool, fields *[]Field, extends *[]string) bool {
-	if !field.Embedded() || jsonName != "" {
-		return false
+	mapped, bases, refs := CollectJSONFields(types.Type(st), adapter, extends != nil)
+	*fields = mapped
+	if extends != nil {
+		*extends = bases
 	}
-	embType, isPtr := embeddedType(field.Type())
-	named, ok := embType.(*types.Named)
-	if !ok {
-		return false
-	}
-	embSt, ok := named.Underlying().(*types.Struct)
-	if !ok {
-		return false
-	}
-	if hasTSTag && tstag.Extends {
-		if extends != nil {
-			*extends = append(*extends, embeddedExtendsName(m.convert(embType), isPtr, tstag.Required))
-		}
-		return true
-	}
-	m.collectFields(embSt, fields, extends, nil)
-	return true
-}
-
-func embeddedType(t types.Type) (types.Type, bool) {
-	if ptr, ok := t.(*types.Pointer); ok {
-		return types.Unalias(ptr.Elem()), true
-	}
-	return types.Unalias(t), false
-}
-
-func embeddedExtendsName(tsName string, isPtr, required bool) string {
-	if isPtr && !required {
-		return "Partial<" + tsName + ">"
-	}
-	return tsName
+	return refs
 }
 
 func (m *Mapper) collectField(field *types.Var, tag, jsonName string, omitempty bool, tstag TSTypeTag, hasTSTag bool, fieldComments map[int]string, index int) Field {
@@ -562,12 +560,11 @@ func applyValidateRules(f *Field, tag string, typ types.Type) {
 	f.ElementValidate = elemRules
 	f.UnsupportedZod = UnsupportedZodRules(sliceRules)
 	f.UnsupportedZod = append(f.UnsupportedZod, UnsupportedZodRules(elemRules)...)
-	if f.GoKind == "slice" || f.GoKind == "array" {
-		f.ElementGoKind = sliceElementGoKind(typ)
-		f.ElementIsPointer = sliceElementIsPointer(typ)
-	}
+	f.Element = containerElementType(typ)
 	f.InvalidZod = InvalidZodRules(sliceRules, f.GoKind)
-	f.InvalidZod = append(f.InvalidZod, InvalidZodRules(elemRules, f.ElementGoKind)...)
+	if f.Element != nil {
+		f.InvalidZod = append(f.InvalidZod, InvalidZodRules(elemRules, f.Element.GoKind)...)
+	}
 	for _, rule := range f.Validate {
 		if rule.Tag == "required" {
 			f.Optional = false
@@ -583,6 +580,7 @@ func applyTSTypeTag(f *Field, tstag TSTypeTag, ok bool) {
 		return
 	}
 	if tstag.Type != "" {
+		f.ZodType = f.Type
 		f.Type = tstag.Type
 	}
 	f.Readonly = tstag.Readonly
@@ -602,44 +600,6 @@ func fieldComment(tag string, comments map[int]string, index int) string {
 	}
 	comment, _ := ParseTSDocTag(tag)
 	return comment
-}
-
-// extractStructRefinements scans collected fields for cross-field validate tags
-// and builds Refinement entries. Uses the types.Struct to map Go field names
-// to JSON names.
-func extractStructRefinements(st *types.Struct, fields []Field) []Refinement {
-	// Build Go field name → JSON name map.
-	goToJSON := map[string]string{}
-	for i := range st.NumFields() {
-		field := st.Field(i)
-		tag := st.Tag(i)
-		jsonName, _, skip := ParseJSONTag(tag)
-		if skip {
-			continue
-		}
-		if jsonName == "" {
-			jsonName = field.Name()
-		}
-		goToJSON[field.Name()] = jsonName
-	}
-
-	var refs []Refinement
-	for _, f := range fields {
-		for _, rule := range f.Validate {
-			op, ok := CrossFieldOp(rule.Tag)
-			if !ok {
-				continue
-			}
-			otherJSON := goToJSON[rule.Param]
-			if otherJSON == "" {
-				continue
-			}
-			refs = append(refs, Refinement{
-				Field: f.Name, Op: op, OtherField: otherJSON, Tag: rule.Tag,
-			})
-		}
-	}
-	return refs
 }
 
 // QuotePropName wraps a property name in quotes if it is not a valid
@@ -663,48 +623,11 @@ func QuotePropName(name string) string {
 }
 
 func (m *Mapper) inlineStruct(st *types.Struct) string {
-	if st.NumFields() == 0 {
-		return "Record<string, never>"
-	}
-	var parts []string
-	for i := range st.NumFields() {
-		field := st.Field(i)
-		if !field.Exported() {
-			continue
-		}
-		tag := st.Tag(i)
-		jsonName, omitempty, skip := ParseJSONTag(tag)
-		if skip {
-			continue
-		}
-		tstag, hasTSTag := ParseTSTypeTag(tag)
-		if hasTSTag && tstag.Type == "-" {
-			continue
-		}
-		if jsonName == "" {
-			jsonName = field.Name()
-		}
-		tsType := m.convert(field.Type())
-		if hasTSTag && tstag.Type != "" {
-			tsType = tstag.Type
-		}
-		opt := ""
-		if omitempty || isPointer(field.Type()) {
-			opt = "?"
-		}
-		if hasTSTag && tstag.Required {
-			opt = ""
-		}
-		prefix := ""
-		if hasTSTag && tstag.Readonly {
-			prefix = "readonly "
-		}
-		parts = append(parts, fmt.Sprintf("%s%s%s: %s", prefix, QuotePropName(jsonName), opt, tsType))
-	}
-	if len(parts) == 0 {
-		return "Record<string, never>"
-	}
-	return "{ " + strings.Join(parts, "; ") + " }"
+	var fields []Field
+	// An inline object type has no extends clause, so inherited fields are
+	// flattened.
+	m.collectFields(st, &fields, nil, nil)
+	return InlineObjectType(fields)
 }
 
 func ParseJSONTag(rawTag string) (name string, omitempty bool, skip bool) {
@@ -785,40 +708,38 @@ func goKind(t types.Type) string {
 	}
 }
 
-// sliceElementGoKind extracts the Go kind of a slice or array's element type.
-func sliceElementGoKind(t types.Type) string {
-	// Unwrap pointers.
+// containerElementType records each container level without following recursive
+// named containers indefinitely.
+func containerElementType(t types.Type) *ElementType {
+	var root *ElementType
+	next := &root
+	seen := make(map[types.Type]bool)
 	for {
-		if ptr, ok := t.(*types.Pointer); ok {
-			t = ptr.Elem()
-		} else {
-			break
+		t = types.Unalias(t)
+		for {
+			ptr, ok := t.(*types.Pointer)
+			if !ok {
+				break
+			}
+			t = types.Unalias(ptr.Elem())
 		}
-	}
-	switch u := t.Underlying().(type) {
-	case *types.Slice:
-		return goKind(u.Elem())
-	case *types.Array:
-		return goKind(u.Elem())
-	}
-	return ""
-}
-
-// sliceElementIsPointer reports whether a slice or array's element type is a pointer.
-func sliceElementIsPointer(t types.Type) bool {
-	// Unwrap pointers to the container.
-	for {
-		if ptr, ok := t.(*types.Pointer); ok {
-			t = ptr.Elem()
-		} else {
-			break
+		if seen[t] {
+			return root
 		}
+		seen[t] = true
+		var elem types.Type
+		switch u := t.Underlying().(type) {
+		case *types.Slice:
+			elem = u.Elem()
+		case *types.Array:
+			elem = u.Elem()
+		case *types.Map:
+			elem = u.Elem()
+		default:
+			return root
+		}
+		*next = &ElementType{GoKind: goKind(elem), IsPointer: isPointer(types.Unalias(elem))}
+		next = &(*next).Element
+		t = elem
 	}
-	switch u := t.Underlying().(type) {
-	case *types.Slice:
-		return isPointer(u.Elem())
-	case *types.Array:
-		return isPointer(u.Elem())
-	}
-	return false
 }

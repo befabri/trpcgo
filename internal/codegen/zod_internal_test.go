@@ -9,32 +9,12 @@ import (
 	"github.com/befabri/trpcgo/internal/typemap"
 )
 
-func TestExtendsBaseExprStandardAndMini(t *testing.T) {
-	standard := extendsBaseExpr([]string{"Base", "Partial<Audit>", "Extra"}, typemap.ZodStandard)
-	if standard != "BaseSchema.merge(AuditSchema.partial()).merge(ExtraSchema).extend(" {
-		t.Errorf("standard extends = %q", standard)
-	}
-
-	mini := extendsBaseExpr([]string{"Base", "Partial<Audit>", "Extra"}, typemap.ZodMini)
-	if mini != "z.extend(z.merge(z.merge(BaseSchema, z.partial(AuditSchema)), ExtraSchema), " {
-		t.Errorf("mini extends = %q", mini)
-	}
-
-	if got := extendsBaseExpr([]string{"Base"}, typemap.ZodStandard); got != "BaseSchema.extend(" {
-		t.Errorf("single standard extends = %q", got)
-	}
-	if got := extendsBaseExpr([]string{"Base"}, typemap.ZodMini); got != "z.extend(BaseSchema, " {
-		t.Errorf("single mini extends = %q", got)
-	}
-}
-
 func TestFieldToZodComplexTypes(t *testing.T) {
 	tests := []struct {
-		name   string
-		field  typemap.Field
-		style  typemap.ZodStyle
-		cycles map[string]bool
-		want   string
+		name  string
+		field typemap.Field
+		style typemap.ZodStyle
+		want  string
 	}{
 		{
 			name:  "optional named reference standard",
@@ -62,7 +42,7 @@ func TestFieldToZodComplexTypes(t *testing.T) {
 		},
 		{
 			name: "array constraints mini",
-			field: typemap.Field{Type: "number[]", ElementGoKind: "int", Validate: []typemap.ValidateRule{
+			field: typemap.Field{Type: "number[]", Element: &typemap.ElementType{GoKind: "int"}, Validate: []typemap.ValidateRule{
 				{Tag: "min", Param: "1"},
 				{Tag: "max", Param: "3"},
 				{Tag: "len", Param: "2"},
@@ -72,7 +52,7 @@ func TestFieldToZodComplexTypes(t *testing.T) {
 		},
 		{
 			name: "array constraints normalize validator length params",
-			field: typemap.Field{Type: "string[]", ElementGoKind: "string", Validate: []typemap.ValidateRule{
+			field: typemap.Field{Type: "string[]", Element: &typemap.ElementType{GoKind: "string"}, Validate: []typemap.ValidateRule{
 				{Tag: "min", Param: "0x10"},
 			}},
 			style: typemap.ZodStandard,
@@ -80,7 +60,7 @@ func TestFieldToZodComplexTypes(t *testing.T) {
 		},
 		{
 			name: "pointer string element required does not imply non-empty",
-			field: typemap.Field{Type: "string[]", ElementGoKind: "string", ElementIsPointer: true, ElementValidate: []typemap.ValidateRule{
+			field: typemap.Field{Type: "string[]", Element: &typemap.ElementType{GoKind: "string", IsPointer: true}, ElementValidate: []typemap.ValidateRule{
 				{Tag: "required"},
 			}},
 			style: typemap.ZodStandard,
@@ -90,7 +70,7 @@ func TestFieldToZodComplexTypes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := fieldToZod(tt.field, tt.cycles, tt.style); got != tt.want {
+			if got := fieldToZod(tt.field, tt.style); got != tt.want {
 				t.Errorf("fieldToZod() = %q, want %q", got, tt.want)
 			}
 		})
@@ -139,7 +119,7 @@ func TestWriteZodAliasAndExtendedObjectPaths(t *testing.T) {
 	output := buf.String()
 	for _, want := range []string{
 		"export const IDSchema = z.string().meta({ id: \"ID\" });",
-		"BaseSchema.merge(AuditSchema.partial()).extend({",
+		"export const ChildSchema = z.object({\n  id: IDSchema,\n  createdAt: z.string().optional(),\n  name: z.string(),",
 		"id: IDSchema",
 		"name: z.string()",
 	} {

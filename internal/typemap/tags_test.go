@@ -305,8 +305,8 @@ func TestCollectFieldsDive(t *testing.T) {
 	}
 
 	// Element Go kind should be derived from the slice element type.
-	if f.ElementGoKind != "string" {
-		t.Errorf("ElementGoKind = %q, want %q", f.ElementGoKind, "string")
+	if f.Element.GoKind != "string" {
+		t.Errorf("Element.GoKind = %q, want %q", f.Element.GoKind, "string")
 	}
 
 	// GoKind should be slice.
@@ -366,8 +366,8 @@ func TestCollectFieldsTracksPointerSemantics(t *testing.T) {
 	if !fields[0].IsPointer {
 		t.Fatalf("Name IsPointer = false, want true")
 	}
-	if !fields[1].ElementIsPointer {
-		t.Fatalf("Tags ElementIsPointer = false, want true")
+	if !fields[1].Element.IsPointer {
+		t.Fatalf("Tags Element.IsPointer = false, want true")
 	}
 }
 
@@ -395,14 +395,14 @@ func TestCollectFieldsNoDive(t *testing.T) {
 	if f.ElementValidate != nil {
 		t.Errorf("ElementValidate should be nil when no dive, got %v", f.ElementValidate)
 	}
-	// ElementGoKind is still populated for slice fields (even without dive).
-	if f.ElementGoKind != "string" {
-		t.Errorf("ElementGoKind = %q, want %q (should always be set for slices)", f.ElementGoKind, "string")
+	// Element.GoKind is still populated for slice fields (even without dive).
+	if f.Element.GoKind != "string" {
+		t.Errorf("Element.GoKind = %q, want %q (should always be set for slices)", f.Element.GoKind, "string")
 	}
 }
 
 func TestCollectFieldsDiveOnNonSlice(t *testing.T) {
-	// A string field with dive tag — dive should be split but ElementGoKind stays empty.
+	// A string field with dive tag — dive should be split but Element.GoKind stays empty.
 	pkg := types.NewPackage("main", "main")
 	nameField := types.NewField(0, pkg, "Name", types.Typ[types.String], false)
 	st := types.NewStruct(
@@ -426,9 +426,9 @@ func TestCollectFieldsDiveOnNonSlice(t *testing.T) {
 	if len(f.ElementValidate) != 1 {
 		t.Errorf("ElementValidate has %d rules, want 1 (min=3 after dive)", len(f.ElementValidate))
 	}
-	// But ElementGoKind is empty because it's not a slice.
-	if f.ElementGoKind != "" {
-		t.Errorf("ElementGoKind = %q, want empty (not a slice)", f.ElementGoKind)
+	// But Element.GoKind is empty because it's not a slice.
+	if f.Element != nil {
+		t.Errorf("Element = %#v, want nil (not a container)", f.Element)
 	}
 }
 

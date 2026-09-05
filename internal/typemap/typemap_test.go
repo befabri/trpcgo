@@ -148,7 +148,7 @@ func TestNamedBasicWithoutMetaResolvesUnderlying(t *testing.T) {
 	}
 }
 
-func TestSliceElementGoKind(t *testing.T) {
+func TestContainerElementType(t *testing.T) {
 	tests := []struct {
 		name string
 		typ  types.Type
@@ -183,23 +183,27 @@ func TestSliceElementGoKind(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := sliceElementGoKind(tt.typ)
-			if got != tt.want {
-				t.Errorf("sliceElementGoKind(%v) = %q, want %q", tt.typ, got, tt.want)
+			got := containerElementType(tt.typ)
+			if tt.want == "" {
+				if got != nil {
+					t.Errorf("non-container has element metadata: %#v", got)
+				}
+			} else if got == nil || got.GoKind != tt.want {
+				t.Errorf("containerElementType(%v) = %#v, want kind %q", tt.typ, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestSliceElementGoKindStruct(t *testing.T) {
+func TestContainerElementTypeStruct(t *testing.T) {
 	pkg := types.NewPackage("main", "main")
 	nameField := types.NewField(0, pkg, "Name", types.Typ[types.String], false)
 	st := types.NewStruct([]*types.Var{nameField}, []string{`json:"name"`})
 	item := types.NewNamed(types.NewTypeName(0, pkg, "Item", nil), st, nil)
 
-	got := sliceElementGoKind(types.NewSlice(item))
-	if got != "struct" {
-		t.Errorf("sliceElementGoKind([]Item) = %q, want %q", got, "struct")
+	got := containerElementType(types.NewSlice(item))
+	if got == nil || got.GoKind != "struct" {
+		t.Errorf("containerElementType([]Item) = %#v, want struct element", got)
 	}
 }
 

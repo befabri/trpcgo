@@ -19,7 +19,7 @@ func TestZodBaseFromKindAndTypeCoversFormatsOneOfAndFallbacks(t *testing.T) {
 		{"e164 format", "string", "string", []ValidateRule{{Tag: "e164"}}, "z.e164()"},
 		{"jwt format", "string", "string", []ValidateRule{{Tag: "jwt"}}, "z.jwt()"},
 		{"base64 format", "string", "string", []ValidateRule{{Tag: "base64"}}, "z.base64()"},
-		{"lowercase format", "string", "string", []ValidateRule{{Tag: "lowercase"}}, "z.lowercase()"},
+		{"lowercase check preserves string base", "string", "string", []ValidateRule{{Tag: "lowercase"}}, "z.string()"},
 		{"ipv4 format", "string", "string", []ValidateRule{{Tag: "ipv4"}}, "z.ipv4()"},
 		{"ipv6 format", "string", "string", []ValidateRule{{Tag: "ipv6"}}, "z.ipv6()"},
 		{"hostname format", "string", "string", []ValidateRule{{Tag: "hostname_rfc1123"}}, "z.hostname()"},
@@ -29,7 +29,7 @@ func TestZodBaseFromKindAndTypeCoversFormatsOneOfAndFallbacks(t *testing.T) {
 		{"mac format", "string", "string", []ValidateRule{{Tag: "mac"}}, "z.mac()"},
 		{"cidrv4 format", "string", "string", []ValidateRule{{Tag: "cidrv4"}}, "z.cidrv4()"},
 		{"cidrv6 format", "string", "string", []ValidateRule{{Tag: "cidrv6"}}, "z.cidrv6()"},
-		{"uppercase format", "string", "string", []ValidateRule{{Tag: "uppercase"}}, "z.uppercase()"},
+		{"uppercase check preserves string base", "string", "string", []ValidateRule{{Tag: "uppercase"}}, "z.string()"},
 		{"numeric oneof", "number", "int", []ValidateRule{{Tag: "oneof", Param: "1 2 3"}}, "z.union([z.literal(1), z.literal(2), z.literal(3)])"},
 		{"single numeric oneof", "number", "int", []ValidateRule{{Tag: "oneof", Param: "1"}}, "z.literal(1)"},
 		{"string oneof", "string", "string", []ValidateRule{{Tag: "oneof", Param: "a b"}}, `z.enum(["a", "b"])`},
@@ -81,7 +81,7 @@ func TestZodConstraintsAndMiniCoverConstraintSyntax(t *testing.T) {
 	}
 
 	mini := zodMini("z.string()", constraints, true, `z.literal("")`)
-	for _, want := range []string{"z.optional(", "z.string().check(", "z.minLength(2)", "z.maxLength(8)", "z.length(4)", "z.regex(/^[a-zA-Z0-9]*$/)", "z.startsWith(\"A\")", `.or(z.literal(""))`} {
+	for _, want := range []string{"z.optional(", "z.string().check(", "z.minLength(2)", "z.maxLength(8)", "z.length(4)", "z.regex(/^[a-zA-Z0-9]*$/)", "z.startsWith(\"A\")", `z.union([`, `z.literal("")])`} {
 		if !strings.Contains(mini, want) {
 			t.Errorf("zodMini missing %q in %q", want, mini)
 		}
@@ -189,7 +189,7 @@ func TestZodTypeString(t *testing.T) {
 		{
 			name:  "uppercase format",
 			field: Field{Name: "code", Type: "string", GoKind: "string", Validate: []ValidateRule{{Tag: "uppercase"}}},
-			want:  "z.uppercase()",
+			want:  "z.string().uppercase()",
 		},
 		// --- format + constraint combo (isStringBase interaction) ---
 		{
@@ -831,7 +831,7 @@ func TestZodTypeOmitempty(t *testing.T) {
 				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "len", Param: "6"}},
 			},
 			style: ZodMini,
-			want:  `z.string().check(z.length(6)).or(z.literal(""))`,
+			want:  `z.union([z.string().check(z.length(6)), z.literal("")])`,
 		},
 		{
 			name: "string omitempty+email format — allows empty string",
@@ -879,7 +879,7 @@ func TestZodTypeOmitempty(t *testing.T) {
 				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "gte", Param: "1"}},
 			},
 			style: ZodMini,
-			want:  "z.int().check(z.gte(1)).or(z.literal(0))",
+			want:  "z.union([z.int().check(z.gte(1)), z.literal(0)])",
 		},
 		{
 			name: "omitempty+optional standard — both .or() and .optional()",
@@ -895,7 +895,7 @@ func TestZodTypeOmitempty(t *testing.T) {
 			want:  `z.string().length(6).or(z.literal("")).optional()`,
 		},
 		{
-			name: "omitempty+optional mini — .or() inside z.optional()",
+			name: "omitempty+optional mini — union inside z.optional()",
 			field: Field{
 				Name:              "code",
 				Type:              "string",
@@ -905,7 +905,7 @@ func TestZodTypeOmitempty(t *testing.T) {
 				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "len", Param: "6"}},
 			},
 			style: ZodMini,
-			want:  `z.optional(z.string().check(z.length(6)).or(z.literal("")))`,
+			want:  `z.optional(z.union([z.string().check(z.length(6)), z.literal("")]))`,
 		},
 		{
 			name: "omitempty+email mini — allows empty string",
@@ -917,7 +917,7 @@ func TestZodTypeOmitempty(t *testing.T) {
 				Validate:          []ValidateRule{{Tag: "omitempty"}, {Tag: "email"}},
 			},
 			style: ZodMini,
-			want:  `z.email().or(z.literal(""))`,
+			want:  `z.union([z.email(), z.literal("")])`,
 		},
 		{
 			name: "string omitempty+min+max standard",
