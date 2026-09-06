@@ -23,10 +23,10 @@ type CORSConfig struct {
 	// "https://app.example.com". The wildcard "*" is allowed only for
 	// non-credentialed CORS responses and does not grant CSRF trust.
 	AllowedOrigins []string
-	// AllowedMethods defaults to GET and POST when empty.
+	// AllowedMethods defaults to Methods when empty.
 	AllowedMethods []string
-	// AllowedHeaders defaults to Authorization, Content-Type, Last-Event-Id,
-	// and trpc-accept when empty. When set, it replaces that default list.
+	// AllowedHeaders defaults to RequestHeaders when empty. When set, it
+	// replaces that default list.
 	AllowedHeaders []string
 	// ExposedHeaders lists response headers visible to browser JavaScript.
 	ExposedHeaders []string
@@ -66,8 +66,8 @@ func defaultHandlerOptions() handlerOptions {
 	return handlerOptions{
 		enforceContentType: true,
 		cors: corsOptions{
-			allowedMethods: []string{http.MethodGet, http.MethodPost},
-			allowedHeaders: []string{"Authorization", "Content-Type", "Last-Event-Id", "trpc-accept"},
+			allowedMethods: transportMethods,
+			allowedHeaders: transportHeaders,
 		},
 		csrf: csrfOptions{
 			enabled:        true,
@@ -221,6 +221,7 @@ func (h *Handler) handleCORS(w http.ResponseWriter, r *http.Request) bool {
 	}
 	method := r.Header.Get("Access-Control-Request-Method")
 	if !containsToken(h.opts.cors.allowedMethods, method) {
+		w.Header().Set("Allow", strings.Join(h.opts.cors.allowedMethods, ", "))
 		h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeMethodNotSupported, "CORS method not allowed"), "", nil, "")
 		return true
 	}

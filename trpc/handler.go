@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/befabri/trpcgo"
@@ -101,10 +103,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) rejectUnsupportedMethod(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method == http.MethodGet || r.Method == http.MethodPost {
+	if slices.Contains(transportMethods, r.Method) {
 		return false
 	}
-	h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeMethodNotSupported, "only GET and POST are supported"), "", nil, "")
+	w.Header().Set("Allow", strings.Join(transportMethods, ", "))
+	h.writeErrorResponse(w, trpcgo.NewError(trpcgo.CodeMethodNotSupported, "only "+strings.Join(transportMethods, " and ")+" are supported"), "", nil, "")
 	return true
 }
 

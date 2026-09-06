@@ -73,7 +73,7 @@ Handler options are separate from router options because they depend on HTTP dep
 
 `WithSubscriptionOriginCheck(true)` checks subscription origins before their handlers run, accepting same-origin requests and origins from `WithTrustedOrigins`, `WithPublicOrigin`, or `WithCORS`. POST subscriptions go through the normal CSRF check first.
 
-`CORSConfig.AllowedHeaders` replaces the default allow-list. The default is `Authorization`, `Content-Type`, `Last-Event-Id`, and `trpc-accept`; include those headers when you add custom headers and still need auth, tRPC JSONL, or subscription resume support.
+`CORSConfig.AllowedHeaders` replaces the default allow-list. The default is `Authorization`, `Content-Type`, `Last-Event-Id`, and `trpc-accept`; include those headers when you add custom headers and still need auth, tRPC JSONL, or subscription resume support. `trpc.RequestHeaders()` returns that default list and `trpc.Methods()` the default `AllowedMethods`, for CORS layers configured outside the handler.
 
 Configured origins must be exact `http` or `https` scheme+host values with no path, query, fragment, or user info. Header values such as `Referer` may include a path; trpcgo extracts their origin before comparison.
 

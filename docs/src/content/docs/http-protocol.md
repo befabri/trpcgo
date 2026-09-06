@@ -28,7 +28,7 @@ Path traversal segments `.` and `..` are rejected.
 | Mutation | `POST`. |
 | Subscription | `GET` or `POST`, served as SSE after setup succeeds. |
 
-Other HTTP methods return `METHOD_NOT_SUPPORTED`, except CORS preflight `OPTIONS` requests handled by `trpc.WithCORS`.
+Other HTTP methods return `METHOD_NOT_SUPPORTED` with an `Allow` header, except CORS preflight `OPTIONS` requests handled by `trpc.WithCORS`. `trpc.Methods()` returns the served methods, so routers that register per method and CORS layers in front of the handler derive them instead of retyping them.
 
 ## Inputs
 

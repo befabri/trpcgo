@@ -100,6 +100,21 @@ trpcHandler := trpc.NewHandler(router, "/trpc",
 
 Only set `AllowCredentials: true` when you intentionally use cookies or other credentialed browser requests, and do not combine it with wildcard origins. `AllowedHeaders` replaces the default list, so keep `Last-Event-Id` if clients resume subscriptions and keep `trpc-accept` if clients request JSONL batch streaming.
 
+### Use Your Own CORS Middleware
+
+When a router-level CORS middleware already fronts the handler, leave `WithCORS` off and let that middleware allow what a tRPC client sends. `trpc.Methods()` returns the served methods and `trpc.RequestHeaders()` the request headers browsers do not safelist, so the allow-lists track trpcgo instead of being retyped:
+
+```go
+cors.Handler(cors.Options{
+    AllowedOrigins:   []string{"https://app.example.com"},
+    AllowedMethods:   trpc.Methods(),
+    AllowedHeaders:   trpc.RequestHeaders(),
+    AllowCredentials: true,
+})
+```
+
+Some middleware, go-chi/cors among them, also withholds `Access-Control-Allow-Origin` from actual responses whose method is unlisted, so include every method your other routes serve as well.
+
 ## Protect Cookie-Authenticated Browsers
 
 CORS controls which browsers can read responses. It does not by itself protect cookie-authenticated mutation requests from cross-site form or fetch attempts.
