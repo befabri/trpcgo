@@ -174,6 +174,11 @@ func WithMaxBatchSize(n int) Option {
 // rejected. Unknown fields return BAD_REQUEST; malformed JSON and trailing
 // tokens return PARSE_ERROR. This uses json.Decoder's DisallowUnknownFields
 // under the hood and is enabled by default.
+//
+// Keys that tRPC clients add on their own are never rejected: "direction",
+// which infinite queries send to a query whose input declares "cursor", and
+// "lastEventId", which a reconnecting subscription sends. When the input
+// struct does not declare them, they are dropped before decoding.
 func WithStrictInput(enabled bool) Option {
 	return func(o *routerOptions) {
 		o.strictInput = enabled

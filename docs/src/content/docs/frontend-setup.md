@@ -170,6 +170,33 @@ export function Users() {
 
 The [TanStack Start example](https://github.com/befabri/trpcgo/tree/main/examples/start-trpc) shows how to share a query client with TanStack Router.
 
+## Infinite Queries
+
+tRPC offers `infiniteQueryOptions` for a query whose input has a `cursor` field. Declare it on the Go input struct and return the next cursor with each page:
+
+```go
+type ListPostsInput struct {
+    Limit  int     `json:"limit,omitempty"`
+    Cursor *string `json:"cursor,omitempty"`
+}
+
+type PostPage struct {
+    Items      []Post  `json:"items"`
+    NextCursor *string `json:"nextCursor"`
+}
+```
+
+```tsx
+import { useInfiniteQuery } from '@tanstack/react-query';
+
+const posts = useInfiniteQuery(trpc.post.list.infiniteQueryOptions(
+  { limit: 20 },
+  { getNextPageParam: (page) => page.nextCursor ?? undefined },
+));
+```
+
+The integration sends `direction` with every page, including the first. Strict input drops it when the input struct does not declare it, so the handler above keeps working. Declare a `Direction` field with the `direction` JSON key only when the handler paginates in both directions.
+
 ## RouterInputs And RouterOutputs
 
 Generated helpers let you reuse exact procedure types in UI code.

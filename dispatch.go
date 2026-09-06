@@ -22,6 +22,7 @@ type ProcedureEntry struct {
 	typ             ProcedureType
 	meta            any
 	inputType       reflect.Type
+	reservedKeys    []string
 	outputType      reflect.Type
 	handler         HandlerFunc
 	outputValidator func(any) error
@@ -97,6 +98,7 @@ func (r *Router) BuildProcedureMap() *ProcedureMap {
 			typ:             proc.typ,
 			meta:            proc.meta,
 			inputType:       proc.inputType,
+			reservedKeys:    proc.reservedKeys,
 			outputType:      proc.outputType,
 			handler:         applyMiddleware(proc.handler, middleware, proc.middleware),
 			outputValidator: proc.outputValidator,
@@ -123,24 +125,24 @@ func (r *Router) BuildProcedureMap() *ProcedureMap {
 // The returned result may be a stream (for subscription procedures).
 // Use [IsStreamResult] to check and [ConsumeStream] to read items.
 func (r *Router) ExecuteEntry(ctx context.Context, entry *ProcedureEntry, raw json.RawMessage) (any, error) {
-	return r.executeCommon(ctx, entry.handler, entry.inputType, raw, entry.outputValidator, entry.outputParser)
+	return r.executeCommon(ctx, entry, raw)
 }
 
-func (r *Router) executeCommon(ctx context.Context, handler HandlerFunc, inputType reflect.Type, raw json.RawMessage, outputValidator func(any) error, outputParser func(any) (any, error)) (any, error) {
-	input, err := r.decodeInput(inputType, raw)
+func (r *Router) executeCommon(ctx context.Context, entry *ProcedureEntry, raw json.RawMessage) (any, error) {
+	input, err := r.decodeInput(entry, raw)
 	if err != nil {
 		return nil, err
 	}
-	if err := r.validateInput(inputType, input); err != nil {
+	if err := r.validateInput(entry.inputType, input); err != nil {
 		return nil, err
 	}
 
-	output, err := handler(ctx, input)
+	output, err := entry.handler(ctx, input)
 	if err != nil {
 		return nil, err
 	}
 
-	output, err = prepareOutput(output, outputValidator, outputParser)
+	output, err = prepareOutput(output, entry.outputValidator, entry.outputParser)
 	if err != nil {
 		return nil, err
 	}
@@ -162,21 +164,26 @@ func prepareOutput(output any, outputValidator func(any) error, outputParser fun
 	return applyOutputHooks(output, outputValidator, outputParser)
 }
 
-func (r *Router) decodeInput(inputType reflect.Type, raw json.RawMessage) (any, error) {
-	if inputType == nil {
+func (r *Router) decodeInput(entry *ProcedureEntry, raw json.RawMessage) (any, error) {
+	if entry.inputType == nil {
 		return nil, nil
 	}
-	ptr := reflect.New(inputType)
+	ptr := reflect.New(entry.inputType)
 	if len(raw) > 0 {
-		if err := r.decodeRawInput(ptr, raw); err != nil {
+		if err := r.decodeRawInput(ptr, raw, entry.reservedKeys); err != nil {
 			return nil, err
 		}
 	}
 	return ptr.Elem().Interface(), nil
 }
 
-func (r *Router) decodeRawInput(ptr reflect.Value, raw json.RawMessage) error {
+// decodeRawInput fills ptr from raw. Strict decoding first drops the reserved
+// protocol keys that the input struct does not declare.
+func (r *Router) decodeRawInput(ptr reflect.Value, raw json.RawMessage, reserved []string) error {
 	if r.opts.strictInput {
+		if len(reserved) > 0 {
+			raw = stripTopLevelKeys(raw, reserved)
+		}
 		return decodeStrictInput(ptr, raw)
 	}
 	if err := json.Unmarshal(raw, ptr.Interface()); err != nil {

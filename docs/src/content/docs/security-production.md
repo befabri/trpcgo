@@ -37,6 +37,8 @@ router := trpcgo.NewRouter(
 
 Strict input also applies to `RawCall`. Set `trpcgo.WithStrictInput(false)` only when you intentionally want Go's normal `json.Unmarshal` behavior, which ignores unknown fields.
 
+Keys that tRPC clients add on their own are not rejected: `direction` on an [infinite query](/frontend-setup/#infinite-queries) whose input declares `cursor`, and `lastEventId` on a [reconnecting subscription](/subscriptions/#reconnect-input). When the input struct does not declare them, they are dropped before decoding.
+
 ## Keep Request Limits
 
 The default limits are:

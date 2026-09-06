@@ -28,6 +28,7 @@ type procedure struct {
 	middleware      []Middleware
 	meta            any
 	inputType       reflect.Type
+	reservedKeys    []string // protocol keys strict input drops, see reservedInputKeys
 	outputType      reflect.Type
 	outputValidator func(any) error
 	outputParser    func(any) (any, error)

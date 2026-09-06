@@ -41,6 +41,8 @@ The base path is stripped before procedure lookup. With base path `/trpc`, `/trp
 
 Strict input uses Go's `json.Decoder.DisallowUnknownFields` and is enabled by default. Unknown object fields and values that do not match the Go input type return `BAD_REQUEST`; malformed JSON and trailing JSON tokens return `PARSE_ERROR`. Set `WithStrictInput(false)` to ignore unknown object fields using Go's normal `json.Unmarshal` behavior. Malformed JSON and trailing tokens are still rejected.
 
+Keys that tRPC clients add on their own are not rejected. Infinite queries send `direction` to a query whose input declares `cursor`, and a reconnecting subscription sends `lastEventId`. When the input struct does not declare them, strict input drops them before decoding. See [Infinite Queries](/frontend-setup/#infinite-queries) and [Reconnect Input](/subscriptions/#reconnect-input).
+
 For `WithMaxBodySize` and `WithMaxBatchSize`, `0` leaves the current setting unchanged. Use `-1` to remove a limit.
 
 ## Handler Options

@@ -147,6 +147,8 @@ Sources are checked in this order:
 
 Use `input.LastEventID` to load missed messages from your message store. Your application handles storing and replaying events.
 
+If your input struct does not declare `lastEventId`, strict input drops it instead of rejecting the reconnect.
+
 ## Final Values
 
 Use `SubscribeWithFinal` when the stream should end with a final value. This small example sends one progress update, then closes the channel:
