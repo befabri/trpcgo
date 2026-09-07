@@ -476,6 +476,7 @@ go tool trpcgo generate [flags] [packages]
 | `--zod-config` | JSON file declaring validation aliases, rules, and imports |
 | `--zod-allow-unknown-fields` | Match `WithStrictInput(false)` in generated objects |
 | `--enums` | Runtime enum value object output file |
+| `--export-types` | Add the exported types of the matched packages to the generation roots |
 
 ### With `go:generate`
 

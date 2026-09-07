@@ -16,10 +16,16 @@ import (
 type ZodOptions struct {
 	AllowUnknownFields bool
 	Validation         zodconfig.Config
+
+	// Roots names type definitions that get a schema without being a
+	// procedure input, as [GenerateResult.Roots] reports them. Validation
+	// rules apply to them exactly as they do to an input: a schema describes
+	// its type wherever the type is used.
+	Roots []string
 }
 
-// WriteZodSchemas writes Zod 4 validation schemas for all procedure input types
-// and their transitive dependencies.
+// WriteZodSchemas writes Zod 4 validation schemas for all procedure input types,
+// any types named by [ZodOptions.Roots], and their transitive dependencies.
 func WriteZodSchemas(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef, style typemap.ZodStyle, options ...ZodOptions) error {
 	var opts ZodOptions
 	if len(options) > 1 {
@@ -39,15 +45,18 @@ func WriteZodSchemas(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef, sty
 	if err := uniqueDefinitionNames(defs); err != nil {
 		return err
 	}
-	inputTypeNames := make(map[string]bool)
+	rootNames := make(map[string]bool)
 	for _, p := range procs {
 		if p.InputTS != "void" {
 			name := stripGenericArgs(p.InputTS)
-			inputTypeNames[name] = true
+			rootNames[name] = true
 		}
 	}
+	for _, name := range opts.Roots {
+		rootNames[name] = true
+	}
 
-	if len(inputTypeNames) == 0 {
+	if len(rootNames) == 0 {
 		return nil
 	}
 
@@ -56,7 +65,7 @@ func WriteZodSchemas(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef, sty
 		defsByName[d.Name] = d
 	}
 
-	reachable := transitiveReachable(inputTypeNames, defsByName)
+	reachable := transitiveReachable(rootNames, defsByName)
 	structRules, err := resolveZodStructRules(opts.Validation, defsByName, reachable)
 	if err != nil {
 		return err

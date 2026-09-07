@@ -165,9 +165,13 @@ func TestGenerateTSNoProcedures(t *testing.T) {
 	}
 	output := string(data)
 
-	// Should still produce valid TypeScript with empty router record.
-	if !strings.Contains(output, "export type AppRouter =") {
-		t.Errorf("empty router should still produce AppRouter type:\n%s", output)
+	// A router with nothing registered describes no router at all, so the
+	// file must not claim an AppRouter or import @trpc/server for it.
+	if strings.Contains(output, "export type AppRouter =") {
+		t.Errorf("empty router should not produce AppRouter type:\n%s", output)
+	}
+	if strings.Contains(output, "@trpc/server") {
+		t.Errorf("empty router should not import @trpc/server:\n%s", output)
 	}
 	// Should not contain any interfaces.
 	if strings.Contains(output, "export interface") {

@@ -255,8 +255,8 @@ func TestRunGenerateWarnsWhenNoProceduresFound(t *testing.T) {
 	if !strings.Contains(stderr.String(), "Warning: no tRPC procedure registrations found") {
 		t.Fatalf("stderr missing no-procedures warning: %q", stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "export type AppRouter") {
-		t.Fatalf("stdout missing empty router output:\n%s", stdout.String())
+	if strings.Contains(stdout.String(), "export type AppRouter") {
+		t.Fatalf("stdout should not describe a router when none was found:\n%s", stdout.String())
 	}
 }
 
@@ -428,4 +428,122 @@ func TestWatchGenerateLoopRegeneratesForConfigReplacement(t *testing.T) {
 	}
 	close(done)
 	<-finished
+}
+
+func TestRunGenerateExportTypesWithoutProcedures(t *testing.T) {
+	dir := t.TempDir()
+	typesOut := filepath.Join(dir, "protocol.ts")
+	zodOut := filepath.Join(dir, "schemas.ts")
+	enumsOut := filepath.Join(dir, "enums.ts")
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{
+		"generate",
+		"--export-types",
+		"--dir", analysisFixtureDir(t, "protocol"),
+		"-o", typesOut,
+		"--zod", zodOut,
+		"--enums", enumsOut,
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run generate: %v\nstderr:\n%s", err, stderr.String())
+	}
+
+	// A package with roots is not a misconfigured router.
+	if strings.Contains(stderr.String(), "no tRPC procedure registrations found") {
+		t.Errorf("unexpected no-procedures warning: %s", stderr.String())
+	}
+	for _, want := range []string{
+		"Including 6 exported type(s) and 0 procedure(s)",
+		"Warning: skipping exported type Dispatch: no TypeScript representation",
+		"Warning: skipping exported type Batch: generic declaration",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+
+	types := readFile(t, typesOut)
+	for _, want := range []string{"export interface Envelope", "export interface Heartbeat"} {
+		if !strings.Contains(types, want) {
+			t.Errorf("generated types missing %q:\n%s", want, types)
+		}
+	}
+	for _, unwanted := range []string{"@trpc/server", "AppRouter"} {
+		if strings.Contains(types, unwanted) {
+			t.Errorf("generated types should not mention %q:\n%s", unwanted, types)
+		}
+	}
+
+	if zod := readFile(t, zodOut); !strings.Contains(zod, "export const HeartbeatSchema") {
+		t.Errorf("generated zod missing a schema for a type no procedure mentions:\n%s", zod)
+	}
+	if enums := readFile(t, enumsOut); !strings.Contains(enums, "export const JobStateEnum = {") {
+		t.Errorf("generated enums missing JobStateEnum:\n%s", enums)
+	}
+}
+
+func TestRunGenerateWithoutExportTypesIgnoresExportedTypes(t *testing.T) {
+	typesOut := filepath.Join(t.TempDir(), "protocol.ts")
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{
+		"generate",
+		"--dir", analysisFixtureDir(t, "protocol"),
+		"-o", typesOut,
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run generate: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Warning: no tRPC procedure registrations found") {
+		t.Errorf("stderr missing no-procedures warning: %q", stderr.String())
+	}
+	if types := readFile(t, typesOut); strings.Contains(types, "export interface") {
+		t.Errorf("exported types reached the output without the flag:\n%s", types)
+	}
+}
+
+func TestRunGenerateExportTypesComposesWithProcedures(t *testing.T) {
+	dir := t.TempDir()
+	typesOut := filepath.Join(dir, "trpc.ts")
+	zodOut := filepath.Join(dir, "schemas.ts")
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{
+		"generate",
+		"--export-types",
+		"--dir", analysisFixtureDir(t, "basic"),
+		"-o", typesOut,
+		"--zod", zodOut,
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run generate: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if want := "Including 3 exported type(s) and 6 procedure(s)"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+	}
+
+	types := readFile(t, typesOut)
+	// The router half survives; the roots merge into the same definitions.
+	for _, want := range []string{"export type AppRouter", "$Mutation<CreateUserInput, User>"} {
+		if !strings.Contains(types, want) {
+			t.Errorf("generated types missing %q:\n%s", want, types)
+		}
+	}
+	if got := strings.Count(types, "export interface User {"); got != 1 {
+		t.Errorf("User declared %d times, want 1:\n%s", got, types)
+	}
+	// User is an output type, so it earns a schema only as a root.
+	if zod := readFile(t, zodOut); !strings.Contains(zod, "export const UserSchema") {
+		t.Errorf("generated zod missing UserSchema:\n%s", zod)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }

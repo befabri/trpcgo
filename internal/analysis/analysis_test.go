@@ -632,3 +632,82 @@ func TestAnalyzeMustVariants(t *testing.T) {
 		}
 	}
 }
+
+func TestAnalyzeExportedTypesRequiresTheOption(t *testing.T) {
+	result, err := analysis.Analyze([]string{"."}, testdataDir("protocol"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.ExportedTypes) != 0 {
+		t.Errorf("exported types collected without the option: %v", result.ExportedTypes)
+	}
+	if len(result.Procedures) != 0 {
+		t.Errorf("fixture must register no procedures, got %d", len(result.Procedures))
+	}
+}
+
+func TestAnalyzeExportedTypes(t *testing.T) {
+	dir := testdataDir("protocol")
+	result, err := analysis.Analyze([]string{"."}, dir, analysis.WithExportedTypes())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var names []string
+	for _, exported := range result.ExportedTypes {
+		names = append(names, exported.Name)
+		if exported.Type == nil {
+			t.Errorf("exported type %s carries no type", exported.Name)
+		}
+		if want := "example.com/protocol." + exported.Name; exported.ID != want {
+			t.Errorf("ID = %q, want %q", exported.ID, want)
+		}
+	}
+	// Sorted, and free of the unexported routing that only Envelope reaches.
+	want := []string{"Batch", "Dispatch", "Envelope", "Heartbeat", "Heartbeats", "JobID", "JobState", "Runner"}
+	if !slices.Equal(names, want) {
+		t.Errorf("exported types = %v, want %v", names, want)
+	}
+
+	// Output has to be byte-identical between runs, and package load order is
+	// not promised.
+	again, err := analysis.Analyze([]string{"."}, dir, analysis.WithExportedTypes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repeat []string
+	for _, exported := range again.ExportedTypes {
+		repeat = append(repeat, exported.Name)
+	}
+	if !slices.Equal(names, repeat) {
+		t.Errorf("order differs between runs: %v then %v", names, repeat)
+	}
+}
+
+func TestAnalyzeExportedTypesExcludesImportedPackages(t *testing.T) {
+	// crosspkg's procedures reference types declared in sibling packages. Those
+	// arrive through the fields that use them, never as roots of their own.
+	result, err := analysis.Analyze([]string{"."}, testdataDir("crosspkg"), analysis.WithExportedTypes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, exported := range result.ExportedTypes {
+		names = append(names, exported.Name)
+		if !strings.HasPrefix(exported.ID, "example.com/crosspkg.") {
+			t.Errorf("root %s comes from outside the matched packages", exported.ID)
+		}
+	}
+	// Declared in the matched package.
+	for _, want := range []string{"GetInput", "Role", "VideoResponse"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("roots %v missing %s", names, want)
+		}
+	}
+	// Declared in domain/ and workflow/, reachable only through fields.
+	for _, unwanted := range []string{"Job", "Status", "Phase"} {
+		if slices.Contains(names, unwanted) {
+			t.Errorf("roots %v include sibling-package type %s", names, unwanted)
+		}
+	}
+}

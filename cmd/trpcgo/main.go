@@ -29,6 +29,7 @@ type generateOptions struct {
 	zodConfig             string
 	zodAllowUnknownFields bool
 	enums                 string
+	exportTypes           bool
 	stdout                io.Writer
 	stderr                io.Writer
 }
@@ -84,6 +85,7 @@ func runGenerate(args []string, stdout, stderr io.Writer) error {
 	zodConfig := fs.String("zod-config", "", "JSON file declaring validation aliases, rules and imports")
 	zodAllowUnknownFields := fs.Bool("zod-allow-unknown-fields", false, "allow unknown object properties, matching WithStrictInput(false)")
 	enumsOutput := fs.String("enums", "", "output path for runtime enum value objects")
+	exportTypes := fs.Bool("export-types", false, "add the exported types of the matched packages to the generation roots")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -105,6 +107,7 @@ func runGenerate(args []string, stdout, stderr io.Writer) error {
 		zodConfig:             *zodConfig,
 		zodAllowUnknownFields: *zodAllowUnknownFields,
 		enums:                 *enumsOutput,
+		exportTypes:           *exportTypes,
 		stdout:                stdout,
 		stderr:                stderr,
 	}
@@ -225,15 +228,27 @@ func generate(opts generateOptions) error {
 	if err != nil {
 		return fmt.Errorf("compiling Zod validation: %w", err)
 	}
-	result, err := analysis.Analyze(opts.patterns, opts.dir)
+	var analyzeOpts []analysis.Option
+	if opts.exportTypes {
+		analyzeOpts = append(analyzeOpts, analysis.WithExportedTypes())
+	}
+	result, err := analysis.Analyze(opts.patterns, opts.dir, analyzeOpts...)
 	if err != nil {
 		return fmt.Errorf("analysis: %w", err)
 	}
-	if len(result.Procedures) == 0 {
-		fmt.Fprintln(opts.stderr, "Warning: no tRPC procedure registrations found")
-	}
 
 	gen := codegen.Prepare(result, result.TypeMetas, program)
+	if opts.exportTypes {
+		// A pattern such as ./... can pull in far more than intended, so report
+		// what the roots actually were.
+		fmt.Fprintf(opts.stderr, "Including %d exported type(s) and %d procedure(s)\n", len(gen.Roots), len(result.Procedures))
+		for _, skipped := range gen.Skipped {
+			fmt.Fprintf(opts.stderr, "Warning: skipping exported type %s: %s\n", skipped.Name, skipped.Reason)
+		}
+	}
+	if len(result.Procedures) == 0 && len(gen.Roots) == 0 {
+		fmt.Fprintln(opts.stderr, "Warning: no tRPC procedure registrations found")
+	}
 	var typesOutput, zodOutput, enumsOutput bytes.Buffer
 	if err := codegen.WriteAppRouter(&typesOutput, gen.Procs, gen.Defs); err != nil {
 		return fmt.Errorf("generating TypeScript output: %w", err)
@@ -243,7 +258,7 @@ func generate(opts generateOptions) error {
 		if opts.zodMini {
 			style = typemap.ZodMini
 		}
-		if err := codegen.WriteZodSchemas(&zodOutput, gen.Procs, gen.Defs, style, codegen.ZodOptions{AllowUnknownFields: opts.zodAllowUnknownFields, Validation: config}); err != nil {
+		if err := codegen.WriteZodSchemas(&zodOutput, gen.Procs, gen.Defs, style, codegen.ZodOptions{AllowUnknownFields: opts.zodAllowUnknownFields, Validation: config, Roots: gen.Roots}); err != nil {
 			return fmt.Errorf("generating Zod schemas: %w", err)
 		}
 	}

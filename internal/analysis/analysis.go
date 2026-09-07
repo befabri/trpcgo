@@ -1,11 +1,13 @@
 package analysis
 
 import (
+	"cmp"
 	"fmt"
 	"go/ast"
 	"go/constant"
 	"go/token"
 	"go/types"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -23,15 +25,45 @@ type Procedure struct {
 	OutputType types.Type
 }
 
+// ExportedType is an exported named type declared in a matched package.
+type ExportedType struct {
+	ID   string // package path and name, for stable ordering and diagnostics
+	Name string // Go name
+	Type types.Type
+}
+
 // Result contains the full output of analysis.
 type Result struct {
 	Procedures []Procedure
 	TypeMetas  map[string]typemap.TypeMeta
+
+	// ExportedTypes is populated only under [WithExportedTypes]. Procedures
+	// remain roots either way; these are additional ones.
+	ExportedTypes []ExportedType
+}
+
+// Option configures [Analyze].
+type Option func(*analyzeConfig)
+
+type analyzeConfig struct {
+	exportedTypes bool
+}
+
+// WithExportedTypes records the exported named types declared in the matched
+// packages, so a contract can be generated from types the procedures never
+// mention — or from packages holding no procedures at all.
+func WithExportedTypes() Option {
+	return func(c *analyzeConfig) { c.exportedTypes = true }
 }
 
 // Analyze loads the given Go package patterns and finds all tRPC procedure registrations,
 // along with type metadata (const groups, type aliases, comments).
-func Analyze(patterns []string, dir string) (*Result, error) {
+func Analyze(patterns []string, dir string, opts ...Option) (*Result, error) {
+	var settings analyzeConfig
+	for _, opt := range opts {
+		opt(&settings)
+	}
+
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedTypes | packages.NeedSyntax |
 			packages.NeedTypesInfo | packages.NeedImports | packages.NeedDeps |
@@ -51,9 +83,13 @@ func Analyze(patterns []string, dir string) (*Result, error) {
 	}
 
 	var procedures []Procedure
+	var exported []ExportedType
 	metas := make(map[string]typemap.TypeMeta)
 
 	for _, pkg := range pkgs {
+		if settings.exportedTypes {
+			exported = append(exported, exportedTypes(pkg)...)
+		}
 		varDefs := buildVarDefs(pkg.Syntax, pkg.TypesInfo)
 		for _, file := range pkg.Syntax {
 			ast.Inspect(file, func(n ast.Node) bool {
@@ -77,7 +113,31 @@ func Analyze(patterns []string, dir string) (*Result, error) {
 	// aliases, and comments.
 	extractImportedTypeInfo(pkgs, metas)
 
-	return &Result{Procedures: procedures, TypeMetas: metas}, nil
+	// packages.Load does not promise a stable package order, and generated
+	// output has to be byte-identical between runs.
+	slices.SortFunc(exported, func(a, b ExportedType) int { return cmp.Compare(a.ID, b.ID) })
+
+	return &Result{Procedures: procedures, TypeMetas: metas, ExportedTypes: exported}, nil
+}
+
+// exportedTypes returns the exported named types declared at package scope.
+// Types from other packages are left out: they still reach the output when a
+// field references one, which keeps an imported package from contributing
+// every type it happens to declare.
+func exportedTypes(pkg *packages.Package) []ExportedType {
+	if pkg.Types == nil {
+		return nil
+	}
+	scope := pkg.Types.Scope()
+	var out []ExportedType
+	for _, name := range scope.Names() {
+		obj, ok := scope.Lookup(name).(*types.TypeName)
+		if !ok || !obj.Exported() {
+			continue
+		}
+		out = append(out, ExportedType{ID: typemap.TypeID(obj), Name: obj.Name(), Type: obj.Type()})
+	}
+	return out
 }
 
 // extractImportedTypeInfo registers metadata for types in packages the matched
