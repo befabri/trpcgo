@@ -88,7 +88,7 @@ func TestReflectGoKindAndTypeScriptMapping(t *testing.T) {
 		{"map", reflect.TypeFor[map[string]int](), "map", "Record<string, number>"},
 		{"interface", reflect.TypeFor[any](), "interface", "unknown"},
 		{"raw message", reflect.TypeFor[json.RawMessage](), "json.RawMessage", "unknown"},
-		{"json number", reflect.TypeFor[json.Number](), "string", "number"},
+		{"json number", reflect.TypeFor[json.Number](), "json.Number", "number"},
 	}
 
 	for _, tt := range tests {
@@ -115,7 +115,7 @@ func TestReflectedJSONFieldDominance(t *testing.T) {
 			if err := json.Unmarshal(data, &encoded); err != nil {
 				t.Fatal(err)
 			}
-			fields, extends, _ := collectFieldsTS(typ, map[string]*reflectDef{})
+			fields, extends, _, _ := collectFieldsTS(typ, map[string]*reflectDef{})
 			if len(extends) != 0 || len(fields) != len(encoded) {
 				t.Fatalf("fields=%+v extends=%v; JSON=%s", fields, extends, data)
 			}

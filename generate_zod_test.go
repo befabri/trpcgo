@@ -39,18 +39,18 @@ func TestGenerateZodBasic(t *testing.T) {
 		t.Error("expected zod import")
 	}
 
-	// ZodLoginInput should have email() and password constraints.
+	// ZodLoginInput should have Go-compatible email and password constraints.
 	if !strings.Contains(zod, "ZodLoginInputSchema") {
 		t.Error("expected ZodLoginInputSchema")
 	}
-	if !strings.Contains(zod, "z.email()") {
-		t.Error("expected z.email() for email field")
+	if !strings.Contains(zod, "email: z.string().check(z.refine(") {
+		t.Error("expected Go-compatible validation for email field")
 	}
-	if !strings.Contains(zod, ".min(8)") {
-		t.Error("expected .min(8) for password field")
+	if !strings.Contains(zod, "Array.from(value).length >= 8)") {
+		t.Error("expected a rune-count minimum of 8 for password field")
 	}
-	if !strings.Contains(zod, ".max(128)") {
-		t.Error("expected .max(128) for password field")
+	if !strings.Contains(zod, "Array.from(value).length <= 128)") {
+		t.Error("expected a rune-count maximum of 128 for password field")
 	}
 
 	// ZodCreateItemInput should have constraints.
@@ -187,14 +187,14 @@ func TestGenerateZodExtends(t *testing.T) {
 		t.Log(zod)
 
 		// Base schema must be emitted.
-		if !strings.Contains(zod, "export const ZodBaseSchema = z.object({") {
+		if !strings.Contains(zod, "export const ZodBaseSchema = z.strictObject({") {
 			t.Error("missing ZodBaseSchema")
 		}
 		if !strings.Contains(zod, "id: z.string().min(1),") {
 			t.Error("ZodBaseSchema missing id field")
 		}
 
-		if !strings.Contains(zod, "export const ZodDerivedSchema = z.object({\n  id: z.string().min(1),") {
+		if !strings.Contains(zod, "export const ZodDerivedSchema = z.strictObject({\n  id: z.string().min(1),") {
 			t.Errorf("ZodDerivedSchema should include inherited fields, got:\n%s", zod)
 		}
 		if !strings.Contains(zod, "name: z.string().min(1),") {
@@ -219,7 +219,7 @@ func TestGenerateZodExtends(t *testing.T) {
 			t.Error("missing ExAuditFieldsSchema")
 		}
 
-		if !strings.Contains(zod, "export const ZodMultiBaseSchema = z.object({\n  id: z.string().min(1),\n  createdBy: z.string(),\n  updatedBy: z.string(),") {
+		if !strings.Contains(zod, "export const ZodMultiBaseSchema = z.strictObject({\n  id: z.string().min(1),\n  createdBy: z.string(),\n  updatedBy: z.string(),") {
 			t.Errorf("ZodMultiBaseSchema should include both bases, got:\n%s", zod)
 		}
 	})
@@ -233,7 +233,7 @@ func TestGenerateZodExtends(t *testing.T) {
 		t.Log(zod)
 
 		// A nil embedded pointer omits its fields, so inherited fields are optional.
-		if !strings.Contains(zod, "export const ZodPtrExtendsSchema = z.object({\n  id: z.string().min(1).optional(),") {
+		if !strings.Contains(zod, "export const ZodPtrExtendsSchema = z.strictObject({\n  id: z.string().min(1).optional(),") {
 			t.Errorf("pointer extends should make inherited fields optional, got:\n%s", zod)
 		}
 		if !strings.Contains(zod, "label: z.string(),") {
@@ -264,13 +264,22 @@ func TestGenerateZodExtends(t *testing.T) {
 		zod := generateZod(t, r)
 		t.Log(zod)
 
-		// The exact expected output for the cyclic+extends case.
-		want := `export const ZodCyclicNodeSchema = z.object({
+		// The exact expected output for the cyclic+extends case. Children has no
+		// dive, so validator never enters the elements and they use the private
+		// rule-free variant of the same recursive schema.
+		want := `export const ZodCyclicNodeSchema = z.strictObject({
   id: z.string().min(1),
-  children: z.lazy((): z.ZodType<$ZodCyclicNode["children"], $ZodCyclicNode["children"]> => z.array(ZodCyclicNodeSchema)),
+  children: z.lazy((): z.ZodType<$ZodCyclicNode["children"], $ZodCyclicNode["children"]> => z.array($goUnvalidatedZodCyclicNodeSchema)),
 }).meta({ id: "ZodCyclicNode" });`
 		if !strings.Contains(zod, want) {
 			t.Errorf("cyclic+extends output mismatch.\nwant:\n%s\n\ngot:\n%s", want, zod)
+		}
+		variant := `export const $goUnvalidatedZodCyclicNodeSchema = z.strictObject({
+  id: z.string(),
+  children: z.lazy((): z.ZodType<$$goUnvalidatedZodCyclicNode["children"], $$goUnvalidatedZodCyclicNode["children"]> => z.array($goUnvalidatedZodCyclicNodeSchema)),
+}).meta({ id: "$goUnvalidatedZodCyclicNode" });`
+		if !strings.Contains(zod, variant) {
+			t.Errorf("rule-free element variant mismatch.\nwant:\n%s\n\ngot:\n%s", variant, zod)
 		}
 
 	})
@@ -398,130 +407,71 @@ func TestGenerateZodCrossFieldAllOps(t *testing.T) {
 }
 
 func TestGenerateZodInt64Number(t *testing.T) {
-	r := trpcgo.NewRouter()
-	trpcgo.Mutation(r, "big", func(_ context.Context, input ZodInt64Input) (string, error) {
-		return "", nil
-	})
-	zod := generateZod(t, r)
-	t.Log(zod)
-
-	// int64 and uint64 should map to z.number() since JSON encodes them as numbers,
-	// not z.int64()/z.uint64() which are ZodBigInt schemas in Zod 4.
-	if strings.Contains(zod, "z.int64()") {
-		t.Errorf("int64 should map to z.number(), not z.int64().\nOutput:\n%s", zod)
-	}
-	if strings.Contains(zod, "z.uint64()") {
-		t.Errorf("uint64 should map to z.number(), not z.uint64().\nOutput:\n%s", zod)
-	}
-
-	// bigSigned and bigUnsigned should be z.number().
-	if !strings.Contains(zod, "bigSigned: z.number(),") {
-		t.Errorf("expected bigSigned: z.number().\nOutput:\n%s", zod)
-	}
-	if !strings.Contains(zod, "bigUnsigned: z.number(),") {
-		t.Errorf("expected bigUnsigned: z.number().\nOutput:\n%s", zod)
-	}
-
-	// int32 should remain z.int32().
-	if !strings.Contains(zod, "normalInt: z.int32(),") {
-		t.Errorf("expected normalInt: z.int32().\nOutput:\n%s", zod)
+	for _, mini := range []bool{false, true} {
+		t.Run(zodStyleName(mini), func(t *testing.T) {
+			r := trpcgo.NewRouter(trpcgo.WithZodMini(mini))
+			t.Cleanup(func() { _ = r.Close() })
+			trpcgo.MustMutation(r, "big", func(_ context.Context, input ZodInt64Input) (string, error) { return "", nil })
+			checkGeneratedZod(t, r, `import { ZodInt64InputSchema as schema } from './schemas';
+const valid = { bigSigned: 1, bigUnsigned: 1, normalInt: 1 };
+for (const input of [valid, { ...valid, bigSigned: -(2 ** 62), bigUnsigned: 2 ** 63 }]) {
+  const parsed = schema.parse(input);
+  const signed: number = parsed.bigSigned;
+  const unsigned: number = parsed.bigUnsigned;
+  if (signed !== input.bigSigned || unsigned !== input.bigUnsigned) throw new Error('integer values changed');
+}
+for (const input of [
+  { ...valid, bigSigned: 1.5 }, { ...valid, bigUnsigned: 1.5 },
+  { ...valid, bigSigned: 2 ** 63 }, { ...valid, bigSigned: -(2 ** 64) },
+  { ...valid, bigUnsigned: -1 }, { ...valid, bigUnsigned: 2 ** 64 },
+  { ...valid, bigSigned: Infinity }, { ...valid, normalInt: 2 ** 31 },
+  { ...valid, bigSigned: '1' }, { ...valid, bigUnsigned: 1n },
+]) {
+  if (schema.safeParse(input).success) throw new Error('invalid Go integer accepted');
+}
+`)
+		})
 	}
 }
 
 func TestGenerateZodNewTags(t *testing.T) {
-	r := trpcgo.NewRouter()
-	trpcgo.Mutation(r, "create", func(_ context.Context, input ZodNewTagsInput) (string, error) {
-		return "", nil
-	})
-	zod := generateZod(t, r)
-	t.Log(zod)
-
-	// Format tags → base types.
-	checks := map[string]string{
-		"host":   "z.hostname()",
-		"token":  "z.base64url()",
-		"id":     "z.ulid()",
-		"mac":    "z.mac()",
-		"subnet": "z.cidrv4()",
-		"code":   "z.string().uppercase()",
-	}
-	for field, base := range checks {
-		if !strings.Contains(zod, field+": "+base) {
-			t.Errorf("expected %s: %s.\nOutput:\n%s", field, base, zod)
-		}
-	}
-
-	// Format + constraint combo: hex with .min(64).max(64).
-	if !strings.Contains(zod, "hash: z.hex().min(64).max(64),") {
-		t.Errorf("expected hash: z.hex().min(64).max(64).\nOutput:\n%s", zod)
-	}
-
-	// Constraint tags on string fields.
-	if !strings.Contains(zod, `website: z.string().startsWith("https://").min(10),`) {
-		t.Errorf("expected website with startsWith + min.\nOutput:\n%s", zod)
-	}
-	if !strings.Contains(zod, `file: z.string().endsWith(".json"),`) {
-		t.Errorf("expected file with endsWith.\nOutput:\n%s", zod)
-	}
-	if !strings.Contains(zod, `path: z.string().includes("/api/"),`) {
-		t.Errorf("expected path with includes.\nOutput:\n%s", zod)
-	}
-
-	// No unsupported comments — all tags are now recognized.
-	if strings.Contains(zod, "/* unsupported") {
-		t.Errorf("no unsupported comments expected.\nOutput:\n%s", zod)
+	for _, mini := range []bool{false, true} {
+		t.Run(zodStyleName(mini), func(t *testing.T) {
+			r := trpcgo.NewRouter(trpcgo.WithZodMini(mini))
+			t.Cleanup(func() { _ = r.Close() })
+			trpcgo.MustMutation(r, "create", func(_ context.Context, input ZodNewTagsInput) (string, error) { return "", nil })
+			checkGeneratedZod(t, r, `import { ZodNewTagsInputSchema as schema } from './schemas';
+const valid = {
+  host: 'example.com', token: 'YQ==', hash: 'a'.repeat(64),
+  id: '01ARZ3NDEKTSV4RRFFQ69G5FAV', mac: '00:00:5e:00:53:01',
+  subnet: '192.168.1.0/24', code: 'ABC', website: 'https://example.com',
+  file: 'config.json', path: '/api/items',
+};
+schema.parse(valid);
+const invalid: Record<string, string[]> = {
+  host: ['-example.com'], token: ['a', 'YQ='], hash: ['x'.repeat(64), 'a'.repeat(63), 'a'.repeat(65)],
+  id: ['invalid'], mac: ['invalid'], subnet: ['192.168.1.1/24'], code: ['abc'],
+  website: ['http://example.com', 'https://a'], file: ['config.txt'], path: ['/v1/items'],
+};
+for (const [field, values] of Object.entries(invalid)) {
+  for (const value of values) {
+    if (schema.safeParse({ ...valid, [field]: value }).success) throw new Error(field + ' accepted ' + value);
+  }
+}
+`)
+		})
 	}
 }
 
 func TestZodRuntimeValidation(t *testing.T) {
-	zodRuntimeDir, err := filepath.Abs("testdata/zodruntime")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tsxPath := filepath.Join(zodRuntimeDir, "node_modules", ".bin", "tsx")
-	if _, err := os.Stat(tsxPath); err != nil {
-		t.Skip("zodruntime node_modules not installed, run: npm install --prefix testdata/zodruntime")
-	}
-
-	tscPath := filepath.Join(zodRuntimeDir, "node_modules", ".bin", "tsc")
-
+	_, tsx := zodRuntime(t)
 	runValidation := func(t *testing.T, zodCode, script string) {
 		t.Helper()
 		dir := t.TempDir()
-
-		// Symlink node_modules so imports resolve.
-		if err := os.Symlink(filepath.Join(zodRuntimeDir, "node_modules"), filepath.Join(dir, "node_modules")); err != nil {
-			t.Fatalf("symlink node_modules: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "schemas.ts"), []byte(zodCode), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "validate.ts"), []byte(script), 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		// Type-check generated schemas with tsc --noEmit.
-		tsconfig := `{
-  "compilerOptions": {
-    "strict": true,
-    "noEmit": true,
-    "target": "ES2022",
-    "module": "ES2022",
-    "moduleResolution": "bundler",
-    "skipLibCheck": true
-  },
-  "include": ["schemas.ts"]
-}`
-		if err := os.WriteFile(filepath.Join(dir, "tsconfig.json"), []byte(tsconfig), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		tsc := exec.Command(tscPath, "--noEmit", "--project", dir)
-		tsc.Dir = dir
-		if tscOut, err := tsc.CombinedOutput(); err != nil {
-			t.Fatalf("tsc type-check failed:\n%s\n\nGenerated schemas:\n%s", string(tscOut), zodCode)
-		}
-
-		cmd := exec.Command(tsxPath, filepath.Join(dir, "validate.ts"))
+		symlinkNodeModules(t, dir)
+		writeTestSources(t, dir, map[string]string{"schemas.ts": zodCode, "validate.ts": script})
+		assertTypeScriptCompiles(t, dir, "schemas.ts", "validate.ts")
+		cmd := exec.CommandContext(t.Context(), tsx, "validate.ts")
 		cmd.Dir = dir
 		output, err := cmd.CombinedOutput()
 		if err != nil {
@@ -574,7 +524,7 @@ let failed = 0;
 let fuzzed = 0;
 function test(name: string, fn: () => void) {
   try { fn(); passed++; console.log("PASS:", name); }
-  catch (e: any) { failed++; console.error("FAIL:", name, e?.message ?? e); }
+  catch (e) { failed++; console.error("FAIL:", name, e instanceof Error ? e.message : e); }
 }
 function mustReject(name: string, schema: z.ZodType, data: unknown) {
   test(name, () => {
@@ -585,32 +535,60 @@ function mustReject(name: string, schema: z.ZodType, data: unknown) {
 
 // ---- Dynamic fuzz: auto-discover and fuzz every exported schema ----
 //
-// The string override handles the z.email()/fast-check incompatibility:
-// fuzz()'s built-in applyStringFormat calls fc.emailAddress() for z.email(),
-// but fast-check generates RFC emails that fail Zod 4's stricter regex.
-// We intercept format:"email" and filter; return null for other strings
-// to fall through to the built-in (which respects min/max constraints).
-const zodEmailRe = /^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/;
+// This checks schema self-consistency, not agreement with Go validation:
+// omitted constraints also disappear from the generated test data. The shared
+// cases in TestZodValidationContract check that independent contract.
+//
 const fuzzOpts = {};
-const fuzzOverrides = {
-  string: (x: any, constraints: any) => {
-    if (x.format === "email") return fc.emailAddress().filter((e: string) => zodEmailRe.test(e));
-    return null; // fall through to built-in (respects min/max/length)
-  },
+const fuzzOverrides: zxTest.fuzz.Overrides = {
+  // This fuzzer treats Zod's strict-object catchall z.never() as undefined and
+  // generates unknown properties. Build valid objects from their known shape;
+  // independent Go/Zod contracts cover unknown-key rejection separately.
+  object: (node) => fc.record(node._zod.def.shape),
 };
 
 // Schemas with .refine() can't be fuzzed (fast-check can't satisfy arbitrary
 // JS predicates). In Zod 4, refinements live in _zod.def.checks as entries
 // with _zod.def.check === "custom".
-function hasRefine(v: any): boolean {
-  const checks = v?._zod?.def?.checks;
-  if (!Array.isArray(checks) || checks.length === 0) return false;
-  return checks.some((ch: any) => ch?._zod?.def?.check === "custom");
+function hasRefine(value: unknown, seen = new Set<object>()): boolean {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return false;
+  seen.add(value);
+  if ('_zod' in value) {
+    const internals = value._zod;
+    if (internals !== null && typeof internals === 'object' && 'def' in internals) {
+      const def = internals.def;
+      if (def !== null && typeof def === 'object') {
+        if ('check' in def && def.check === 'custom') return true;
+        // The fuzzer cannot construct recursive arbitrary values either.
+        if ('type' in def && def.type === 'lazy') return true;
+        return Object.values(def).some(child => hasRefine(child, seen));
+      }
+    }
+    return false;
+  }
+  return Object.values(value).some(child => hasRefine(child, seen));
+}
+
+// Generated objects are strict, but the fuzzer emits catchall keys for strict
+// objects. Values are therefore generated from a structural twin whose objects
+// strip unknown keys and are validated against the real schema. The twin
+// shares every field schema and check, so it generates the same value space.
+function loosen<T extends z.ZodType>(schema: T): T {
+  const def: Record<string, unknown> = { ...schema._zod.def };
+  for (const [key, child] of Object.entries(def)) {
+    if (child instanceof z.ZodType) def[key] = loosen(child);
+    else if (Array.isArray(child) && child.length > 0 && child.every(item => item instanceof z.ZodType)) def[key] = child.map(item => loosen(item as z.ZodType));
+    else if (key === 'shape' && child !== null && typeof child === 'object') {
+      def[key] = Object.fromEntries(Object.entries(child as Record<string, z.ZodType>).map(([field, fieldSchema]) => [field, loosen(fieldSchema)]));
+    }
+  }
+  if (def['type'] === 'object') def['catchall'] = undefined;
+  return z.clone(schema, def as unknown as T['_zod']['def']);
 }
 
 for (const [name, value] of Object.entries(schemas)) {
   // Skip non-schema exports.
-  if (typeof (value as any)?._zod?.def?.type !== "string") continue;
+  if (!(value instanceof z.ZodType)) continue;
 
   // Skip schemas with .refine() — cross-field constraints are arbitrary JS.
   if (hasRefine(value)) {
@@ -619,15 +597,15 @@ for (const [name, value] of Object.entries(schemas)) {
   }
 
   test("fuzz " + name, () => {
-    const arb = zxTest.fuzz(value as any, fuzzOpts, fuzzOverrides);
-    fc.assert(fc.property(arb, (d) => { (value as any).parse(d); }), { numRuns: 100 });
+    const arb = zxTest.fuzz<unknown>(loosen(value), fuzzOpts, fuzzOverrides);
+    fc.assert(fc.property(arb, (d) => { value.parse(d); }), { numRuns: 100 });
     fuzzed++;
   });
 }
 
 // ---- Manual valid data ----
 
-const S = schemas as any;
+const S = schemas;
 
 test("LoginInput valid", () => {
   S.ZodLoginInputSchema.parse({ email: "user@example.com", password: "securepass123" });
@@ -706,7 +684,7 @@ mustReject("OmitInput: name too short", S.ZodOmitInputSchema, { name: "", active
 console.log("Fuzzed " + fuzzed + " schemas dynamically");
 if (failed > 0) {
   console.error(failed + " test(s) FAILED out of " + (passed + failed));
-  process.exit(1);
+  throw new Error("Zod runtime validation failed");
 }
 console.log("All " + passed + " tests passed");
 `
@@ -743,7 +721,7 @@ let passed = 0;
 let failed = 0;
 function test(name: string, fn: () => void) {
   try { fn(); passed++; console.log("PASS:", name); }
-  catch (e: any) { failed++; console.error("FAIL:", name, e?.message ?? e); }
+  catch (e) { failed++; console.error("FAIL:", name, e instanceof Error ? e.message : e); }
 }
 function mustReject(name: string, schema: z.ZodMiniType, data: unknown) {
   test(name, () => {
@@ -752,7 +730,7 @@ function mustReject(name: string, schema: z.ZodMiniType, data: unknown) {
   });
 }
 
-const S = schemas as any;
+const S = schemas;
 
 // ---- Manual valid data ----
 
@@ -800,7 +778,7 @@ mustReject("CrossField: max < min", S.ZodCrossFieldInputSchema, { min_val: 10, m
 // ---- Summary ----
 if (failed > 0) {
   console.error(failed + " test(s) FAILED out of " + (passed + failed));
-  process.exit(1);
+  throw new Error("Zod Mini runtime validation failed");
 }
 console.log("All " + passed + " tests passed");
 `
@@ -837,7 +815,7 @@ func TestGenerateZodDescribeAndMeta(t *testing.T) {
 }
 
 func TestGenerateZodOmit(t *testing.T) {
-	t.Run("field excluded from zod but kept in TS", func(t *testing.T) {
+	t.Run("field unvalidated in Zod but kept in TS", func(t *testing.T) {
 		r := trpcgo.NewRouter()
 		trpcgo.Mutation(r, "update", func(_ context.Context, input ZodOmitInput) (string, error) {
 			return "", nil
@@ -849,11 +827,11 @@ func TestGenerateZodOmit(t *testing.T) {
 			t.Errorf("TS interface should include omitted field.\nOutput:\n%s", ts)
 		}
 
-		// Zod schema should NOT have id.
+		// Known omitted fields are accepted without client validation.
 		zod := generateZod(t, r)
 		t.Log(zod)
-		if strings.Contains(zod, "id: z.") {
-			t.Errorf("omitted field 'id' should not appear in Zod schema.\nOutput:\n%s", zod)
+		if !strings.Contains(zod, "id: z.custom<string>().optional(),") {
+			t.Errorf("omitted field 'id' should be optional and unvalidated.\nOutput:\n%s", zod)
 		}
 		if !strings.Contains(zod, "name: z.string().min(1),") {
 			t.Errorf("non-omitted field 'name' should appear.\nOutput:\n%s", zod)
@@ -871,9 +849,9 @@ func TestGenerateZodOmit(t *testing.T) {
 		zod := generateZod(t, r)
 		t.Log(zod)
 
-		// id should not appear.
-		if strings.Contains(zod, "id: z.") {
-			t.Errorf("omitted field 'id' should not appear.\nOutput:\n%s", zod)
+		// id remains an optional field without validation.
+		if !strings.Contains(zod, "id: z.custom<number>().optional(),") {
+			t.Errorf("omitted field 'id' should be optional and unvalidated.\nOutput:\n%s", zod)
 		}
 
 		// Refinement for max_val >= min_val should still exist.

@@ -2,6 +2,7 @@ package trpcgo_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,9 @@ import (
 	"github.com/befabri/trpcgo/trpc"
 )
 
+// testValidator tests router invocation and error handling. It deliberately
+// implements only a small subset; real validator semantics are covered by the
+// shared validationcontract cases in the example server module.
 func testValidator(v any) error {
 	val := reflect.ValueOf(v)
 	typ := val.Type()
@@ -214,10 +218,17 @@ func TestValidatorWithErrorFormatter(t *testing.T) {
 	}
 }
 
-func TestValidatorSkipsNonStruct(t *testing.T) {
-	router := trpcgo.NewRouter(trpcgo.WithValidator(testValidator))
+func TestValidatorRunsForPrimitiveInput(t *testing.T) {
+	calls := 0
+	router := trpcgo.NewRouter(trpcgo.WithValidator(func(input any) error {
+		calls++
+		if input != "hello" {
+			return fmt.Errorf("unexpected input %v", input)
+		}
+		return nil
+	}))
 
-	// Register a query with primitive string input — validator should be skipped.
+	// Primitive roots reach the same validation callback as struct roots.
 	trpcgo.Query(router, "echo", func(ctx context.Context, input string) (string, error) {
 		return "echo:" + input, nil
 	})
@@ -228,13 +239,16 @@ func TestValidatorSkipsNonStruct(t *testing.T) {
 	resp := mustGet(t, server, "/trpc/echo?input="+input)
 	if resp.StatusCode != 200 {
 		_ = resp.Body.Close()
-		t.Fatalf("status = %d, want 200 (validator should skip primitive input)", resp.StatusCode)
+		t.Fatalf("status = %d, want 200 (validator accepted primitive input)", resp.StatusCode)
 	}
 
 	body := decodeJSON(t, resp)
 	got := resultScalar(t, body)
 	if got != "echo:hello" {
 		t.Errorf("result = %v, want echo:hello", got)
+	}
+	if calls != 1 {
+		t.Errorf("validator calls = %d, want 1", calls)
 	}
 }
 
@@ -1431,4 +1445,113 @@ func TestOutputParserPrecedenceReflection(t *testing.T) {
 			t.Fatalf("expected later nil untyped parser to clear parser and restore handler output type, got:\n%s", ts)
 		}
 	})
+}
+
+type rootValidationSlice []int
+
+type rootValidationMap map[string]int
+
+func TestValidatorReceivesEveryTypedRoot(t *testing.T) {
+	t.Run("string", func(t *testing.T) { assertRootValidation(t, `"value"`, "value") })
+	t.Run("integer", func(t *testing.T) { assertRootValidation(t, `42`, 42) })
+	t.Run("boolean", func(t *testing.T) { assertRootValidation(t, `false`, false) })
+	t.Run("slice", func(t *testing.T) { assertRootValidation(t, `[1,2]`, []int{1, 2}) })
+	t.Run("named slice", func(t *testing.T) { assertRootValidation(t, `[1,2]`, rootValidationSlice{1, 2}) })
+	t.Run("nil slice", func(t *testing.T) { assertRootValidation(t, `null`, []int(nil)) })
+	t.Run("map", func(t *testing.T) { assertRootValidation(t, `{"a":1}`, map[string]int{"a": 1}) })
+	t.Run("named map", func(t *testing.T) { assertRootValidation(t, `{"a":1}`, rootValidationMap{"a": 1}) })
+	t.Run("nil map", func(t *testing.T) { assertRootValidation(t, `null`, map[string]int(nil)) })
+	t.Run("pointer", func(t *testing.T) { value := 42; assertRootValidation(t, `42`, &value) })
+	t.Run("nil pointer", func(t *testing.T) { assertRootValidation(t, `null`, (*int)(nil)) })
+	t.Run("nil interface", func(t *testing.T) { assertRootValidation[any](t, `null`, nil) })
+	t.Run("missing typed root", func(t *testing.T) { assertRootValidation(t, ``, 0) })
+}
+
+func assertRootValidation[I any](t *testing.T, raw string, want I) {
+	t.Helper()
+	for _, procedure := range []string{"query", "mutation", "subscription"} {
+		for _, transport := range []string{"entry", "raw"} {
+			if procedure == "subscription" && transport == "raw" {
+				continue
+			} // RawCall intentionally excludes streams.
+			for _, reject := range []bool{false, true} {
+				outcome := "accept"
+				if reject {
+					outcome = "reject"
+				}
+				t.Run(procedure+"/"+transport+"/"+outcome, func(t *testing.T) {
+					calls, handled := 0, 0
+					cause := errors.New("application input rejection")
+					r := trpcgo.NewRouter(trpcgo.WithValidator(func(input any) error {
+						calls++
+						if !reflect.DeepEqual(input, want) {
+							t.Errorf("validator input=%#v (%T), want %#v (%T)", input, input, want, want)
+						}
+						if reject {
+							return cause
+						}
+						return nil
+					}))
+					t.Cleanup(func() { _ = r.Close() })
+					handler := func(_ context.Context, input I) (string, error) {
+						handled++
+						if !reflect.DeepEqual(input, want) {
+							t.Errorf("handler input=%#v, want %#v", input, want)
+						}
+						return "ok", nil
+					}
+					switch procedure {
+					case "query":
+						trpcgo.MustQuery(r, "root", handler)
+					case "mutation":
+						trpcgo.MustMutation(r, "root", handler)
+					case "subscription":
+						trpcgo.MustSubscribe(r, "root", func(ctx context.Context, input I) (<-chan string, error) {
+							_, err := handler(ctx, input)
+							ch := make(chan string)
+							close(ch)
+							return ch, err
+						})
+					}
+					var err error
+					if transport == "raw" {
+						_, err = r.RawCall(t.Context(), "root", []byte(raw))
+					} else {
+						entry, ok := r.BuildProcedureMap().Lookup("root")
+						if !ok {
+							t.Fatal("entry missing")
+						}
+						_, err = r.ExecuteEntry(t.Context(), entry, []byte(raw))
+					}
+					if calls != 1 {
+						t.Fatalf("validator calls=%d, want 1", calls)
+					}
+					if reject {
+						var rpcError *trpcgo.Error
+						if !errors.As(err, &rpcError) || rpcError.Code != trpcgo.CodeBadRequest || !errors.Is(err, cause) {
+							t.Fatalf("rejection=%v, want wrapped BAD_REQUEST", err)
+						}
+						if handled != 0 {
+							t.Fatal("handler ran despite rejected input")
+						}
+					} else if err != nil || handled != 1 {
+						t.Fatalf("accepted input: err=%v handler calls=%d", err, handled)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestValidatorDoesNotRunAfterDecodeFailure(t *testing.T) {
+	calls := 0
+	r := trpcgo.NewRouter(trpcgo.WithValidator(func(any) error { calls++; return nil }))
+	t.Cleanup(func() { _ = r.Close() })
+	trpcgo.MustQuery(r, "integer", func(context.Context, int) (int, error) { t.Fatal("handler must not run"); return 0, nil })
+	if _, err := r.RawCall(t.Context(), "integer", []byte(`"wrong type"`)); err == nil {
+		t.Fatal("invalid JSON type accepted")
+	}
+	if calls != 0 {
+		t.Fatalf("validator called %d times after decode failure", calls)
+	}
 }

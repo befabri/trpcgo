@@ -222,7 +222,7 @@ func strictInputError(err error) error {
 }
 
 func (r *Router) validateInput(inputType reflect.Type, input any) error {
-	if !r.shouldValidateInput(inputType, input) {
+	if !r.shouldValidateInput(inputType) {
 		return nil
 	}
 	if err := r.opts.validator(input); err != nil {
@@ -231,21 +231,11 @@ func (r *Router) validateInput(inputType reflect.Type, input any) error {
 	return nil
 }
 
-func (r *Router) shouldValidateInput(inputType reflect.Type, input any) bool {
-	if r.opts.validator == nil {
-		return false
-	}
-	if inputType == nil {
-		return false
-	}
-	return derefType(inputType).Kind() == reflect.Struct
-}
-
-func derefType(t reflect.Type) reflect.Type {
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	return t
+func (r *Router) shouldValidateInput(inputType reflect.Type) bool {
+	// The callback owns validation semantics for the registered input type.
+	// A typed nil pointer, map, slice or interface is still an actual input;
+	// only void procedures have no input type and bypass validation.
+	return r.opts.validator != nil && inputType != nil
 }
 
 // IsStreamResult reports whether a procedure result is a subscription stream.

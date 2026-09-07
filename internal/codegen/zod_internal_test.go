@@ -29,10 +29,10 @@ func TestFieldToZodComplexTypes(t *testing.T) {
 			want:  "z.optional(UserSchema)",
 		},
 		{
-			name:  "record with nested generic value",
-			field: typemap.Field{Type: "Record<string, Box<User>>"},
+			name:  "record with concrete generic schema metadata",
+			field: typemap.Field{Type: "Record<string, Box<User>>", Element: &typemap.ElementType{Type: "BoxUser"}},
 			style: typemap.ZodStandard,
-			want:  "z.record(z.string(), BoxSchema)",
+			want:  "z.record(z.string(), BoxUserSchema)",
 		},
 		{
 			name:  "optional record mini",
@@ -48,7 +48,7 @@ func TestFieldToZodComplexTypes(t *testing.T) {
 				{Tag: "len", Param: "2"},
 			}, Optional: true},
 			style: typemap.ZodMini,
-			want:  "z.optional(z.array(z.int()).check(z.minLength(1), z.maxLength(3), z.length(2)))",
+			want:  "(((([]).length >= 1) && (([]).length <= 3) && (([]).length === 2)) ? z.optional(z.array(z.int()).check(z.minLength(1), z.maxLength(3), z.length(2))) : z.array(z.int()).check(z.minLength(1), z.maxLength(3), z.length(2)))",
 		},
 		{
 			name: "array constraints normalize validator length params",
@@ -56,7 +56,7 @@ func TestFieldToZodComplexTypes(t *testing.T) {
 				{Tag: "min", Param: "0x10"},
 			}},
 			style: typemap.ZodStandard,
-			want:  "z.array(z.string()).min(16)",
+			want:  "z.array(z.string()).check(z.minLength(16))",
 		},
 		{
 			name: "pointer string element required does not imply non-empty",
@@ -119,7 +119,7 @@ func TestWriteZodAliasAndExtendedObjectPaths(t *testing.T) {
 	output := buf.String()
 	for _, want := range []string{
 		"export const IDSchema = z.string().meta({ id: \"ID\" });",
-		"export const ChildSchema = z.object({\n  id: IDSchema,\n  createdAt: z.string().optional(),\n  name: z.string(),",
+		"export const ChildSchema = z.strictObject({\n  id: IDSchema,\n  createdAt: z.string().optional(),\n  name: z.string(),",
 		"id: IDSchema",
 		"name: z.string()",
 	} {
@@ -171,7 +171,7 @@ func TestUnsupportedCommentEscapesCommentTerminators(t *testing.T) {
 	}
 }
 
-func TestWriteZodSingleNumericUnionUsesLiteral(t *testing.T) {
+func TestWriteZodSingleNumericConstantKeepsInputOpen(t *testing.T) {
 	procs := []ProcEntry{{Path: "create", ProcType: "mutation", InputTS: "Input", OutputTS: "void"}}
 	defs := []typemap.TypeDef{
 		{
@@ -191,10 +191,24 @@ func TestWriteZodSingleNumericUnionUsesLiteral(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := buf.String()
-	if !strings.Contains(output, "export const PrioritySchema = z.literal(1)") {
-		t.Fatalf("single numeric union should use z.literal, got:\n%s", output)
+	if !strings.Contains(output, "export const PrioritySchema = z.number()") {
+		t.Fatalf("single Go constant must not restrict the numeric input, got:\n%s", output)
 	}
 	if strings.Contains(output, "z.union([z.literal(1)])") {
 		t.Fatalf("single numeric union emitted invalid one-option union:\n%s", output)
+	}
+}
+
+func TestWriteZodRejectsUnresolvedGenericWithoutPartialOutput(t *testing.T) {
+	for _, style := range []typemap.ZodStyle{typemap.ZodStandard, typemap.ZodMini} {
+		defs := []typemap.TypeDef{{Name: "Input", Kind: typemap.TypeDefInterface, Fields: []typemap.Field{{Name: "values", Type: "Record<string, Box<User>>"}}}}
+		var output bytes.Buffer
+		err := WriteZodSchemas(&output, []ProcEntry{{InputTS: "Input"}}, defs, style)
+		if err == nil || !strings.Contains(err.Error(), "Input.values[]") || !strings.Contains(err.Error(), "requires concrete Go type metadata") {
+			t.Fatalf("expected contextual unresolved generic error, got %v", err)
+		}
+		if output.Len() != 0 {
+			t.Fatalf("generation wrote a partial module before returning %v: %s", err, output.String())
+		}
 	}
 }

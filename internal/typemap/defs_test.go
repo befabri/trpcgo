@@ -388,3 +388,50 @@ func TestExtendsTokenResolution(t *testing.T) {
 		}
 	}
 }
+
+// Two packages with the same name need more than the last path segment.
+func TestCollisionRenameUsesEnoughPackagePath(t *testing.T) {
+	first := types.NewPackage("github.com/app/a/models", "models")
+	second := types.NewPackage("github.com/app/b/models", "models")
+	user := func(pkg *types.Package, field string) *types.Named {
+		return types.NewNamed(
+			types.NewTypeName(0, pkg, "User", nil),
+			types.NewStruct([]*types.Var{types.NewField(0, pkg, field, types.Typ[types.String], false)}, []string{`json:"` + strings.ToLower(field) + `"`}),
+			nil,
+		)
+	}
+	m := NewMapper(nil)
+	m.Convert(user(first, "Name"))
+	m.Convert(user(second, "Email"))
+	names := map[string]bool{}
+	for _, d := range m.Defs() {
+		names[d.Name] = true
+	}
+	if !names["AModelsUser"] || !names["BModelsUser"] || len(names) != 2 {
+		t.Fatalf("expected AModelsUser and BModelsUser, got %v", names)
+	}
+}
+
+func TestUniqueTypeNamesFallsBackToSuffix(t *testing.T) {
+	ids := []string{"x/models.User", "y/models.User", "z/other.ModelsUser"}
+	short := func(id string) string { return id[strings.LastIndexByte(id, '.')+1:] }
+	pkg := func(id string) string { return id[:strings.LastIndexByte(id, '.')] }
+	got := UniqueTypeNames(ids, short, pkg)
+	want := map[string]string{"x/models.User": "XModelsUser", "y/models.User": "YModelsUser", "z/other.ModelsUser": "ModelsUser"}
+	for id, name := range want {
+		if got[id] != name {
+			t.Errorf("%s = %q, want %q", id, got[id], name)
+		}
+	}
+	clash := UniqueTypeNames([]string{"models.User", "other.ModelsUser", "more/models.User"}, short, pkg)
+	seen := map[string]bool{}
+	for _, name := range clash {
+		if seen[name] {
+			t.Fatalf("duplicate name %q in %v", name, clash)
+		}
+		seen[name] = true
+	}
+	if clash["other.ModelsUser"] != "ModelsUser" {
+		t.Fatalf("the type declared as ModelsUser must keep its name: %v", clash)
+	}
+}

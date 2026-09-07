@@ -16,7 +16,7 @@ env:
 
 jobs:
   test:
-    name: Test (${{ matrix.go }})
+    name: Test (Go ${{ matrix.go }}, TypeScript ${{ matrix.typescript }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -28,6 +28,12 @@ jobs:
         #         library (e.g. a stdlib type becoming an alias) surfaces here
         #         first instead of in a user's build.
         go: ['go.mod', 'stable']
+        # Use the locked native compiler by default; keep a TypeScript 5 leg
+        # so generated contracts remain usable by existing clients.
+        typescript: ['7']
+        include:
+          - go: 'go.mod'
+            typescript: '5.9.3'
     steps:
       - uses: actions/checkout@v5
 
@@ -42,14 +48,21 @@ jobs:
         with:
           node-version: 'lts/*'
           cache: npm
-          cache-dependency-path: |
-            testdata/zodruntime/package-lock.json
-            examples/start-trpc/web/package-lock.json
+          cache-dependency-path: testdata/zodruntime/package-lock.json
 
       - run: npm ci --prefix testdata/zodruntime
-      - run: npm ci --prefix examples/start-trpc/web
+
+      - name: Install TypeScript compatibility compiler
+        if: matrix.typescript == '5.9.3'
+        run: npm install --prefix testdata/zodruntime --no-save --package-lock=false typescript@5.9.3
+
+      - run: testdata/zodruntime/node_modules/.bin/tsc --version
 
       - run: go test -race -count=1 ./...
+
+      - name: Test example server and Go validation contracts
+        working-directory: examples/start-trpc/server
+        run: go test -race -count=1 ./...
 
   lint:
     name: Lint

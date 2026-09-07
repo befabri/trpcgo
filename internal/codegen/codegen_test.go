@@ -71,7 +71,7 @@ func TestGenerateCrossPackageEnum(t *testing.T) {
 	output := generateFromFixture(t, "crosspkg")
 
 	t.Run("imported enum emits a union referenced by the field", func(t *testing.T) {
-		if !strings.Contains(output, `export type Status = "PENDING" | "RUNNING" | "DONE" | "FAILED";`) {
+		if !strings.Contains(output, `export type Status = "PENDING" | "RUNNING" | "DONE" | "FAILED" | (string & {});`) {
 			t.Errorf("missing cross-package Status union\n%s", output)
 		}
 		if !containsLine(output, "status: Status;") {
@@ -83,7 +83,7 @@ func TestGenerateCrossPackageEnum(t *testing.T) {
 	})
 
 	t.Run("same-package enum still emits a union", func(t *testing.T) {
-		if !strings.Contains(output, `export type Role = "viewer" | "admin" | "owner";`) {
+		if !strings.Contains(output, `export type Role = "viewer" | "admin" | "owner" | (string & {});`) {
 			t.Errorf("missing same-package Role union\n%s", output)
 		}
 		if !containsLine(output, "role: Role;") {
@@ -92,7 +92,7 @@ func TestGenerateCrossPackageEnum(t *testing.T) {
 	})
 
 	t.Run("transitive imported enum emits a union", func(t *testing.T) {
-		if !strings.Contains(output, `export type Phase = "queued" | "processing" | "completed";`) {
+		if !strings.Contains(output, `export type Phase = "queued" | "processing" | "completed" | (string & {});`) {
 			t.Errorf("missing transitive Phase union\n%s", output)
 		}
 		if !containsLine(output, "phase: Phase;") {
@@ -130,8 +130,8 @@ func TestGenerateEnhanced(t *testing.T) {
 						t.Errorf("Status union missing value %s in line: %s", val, line)
 					}
 				}
-				if strings.Count(line, "|") != 2 {
-					t.Errorf("Status union should have 2 pipe separators, got line: %s", line)
+				if strings.Count(line, "|") != 3 {
+					t.Errorf("Status union should have 3 pipe separators including the open scalar, got line: %s", line)
 				}
 				break
 			}
@@ -330,22 +330,22 @@ func TestZodSchemaFromEnhanced(t *testing.T) {
 	})
 
 	t.Run("CreateUserInputSchema present", func(t *testing.T) {
-		if !strings.Contains(zodOutput, "export const CreateUserInputSchema = z.object(") {
+		if !strings.Contains(zodOutput, "export const CreateUserInputSchema = z.strictObject(") {
 			t.Errorf("missing CreateUserInputSchema.\nOutput:\n%s", zodOutput)
 		}
 	})
 
 	t.Run("dive array element constraints", func(t *testing.T) {
 		// tags field: validate:"required,min=1,dive,min=1,max=50"
-		// Expected: z.array(z.string().min(1).max(50)).min(1)
-		if !strings.Contains(zodOutput, "z.array(z.string().min(1).max(50)).min(1)") {
+		// Expected: z.array(z.string().min(1).check(z.refine((value) => Array.from(value).length <= 50))).check(z.minLength(1))
+		if !strings.Contains(zodOutput, "z.array(z.string().min(1).check(z.refine((value) => Array.from(value).length <= 50))).check(z.minLength(1))") {
 			t.Errorf("missing dive array with element constraints.\nOutput:\n%s", zodOutput)
 		}
 	})
 
-	t.Run("email field as z.email()", func(t *testing.T) {
-		if !strings.Contains(zodOutput, "z.email()") {
-			t.Errorf("email field should use z.email() top-level format.\nOutput:\n%s", zodOutput)
+	t.Run("email field uses Go-compatible validation", func(t *testing.T) {
+		if !strings.Contains(zodOutput, "email: z.string().check(z.refine(") {
+			t.Errorf("email field should use the Go-compatible predicate.\nOutput:\n%s", zodOutput)
 		}
 	})
 }
@@ -448,13 +448,13 @@ func TestZodDiveArrayDirect(t *testing.T) {
 
 	// Element constraints (min=2, max=64) applied inside z.array().
 	// Container constraints (min=1, max=10) applied after z.array().
-	want := "z.array(z.string().min(2).max(64)).min(1).max(10)"
+	want := "z.array(z.string().check(z.refine((value) => Array.from(value).length >= 2)).check(z.refine((value) => Array.from(value).length <= 64))).check(z.minLength(1), z.maxLength(10))"
 	if !strings.Contains(output, want) {
 		t.Errorf("missing dive array output.\nwant substring: %s\nOutput:\n%s", want, output)
 	}
 
 	// Name field should have standard string constraints.
-	if !strings.Contains(output, "z.string().min(1).max(100)") {
+	if !strings.Contains(output, "z.string().min(1).check(z.refine((value) => Array.from(value).length <= 100))") {
 		t.Errorf("missing name field constraints.\nOutput:\n%s", output)
 	}
 }
@@ -498,13 +498,13 @@ func TestZodDiveArrayStructElement(t *testing.T) {
 	output := buf.String()
 
 	// Struct elements use schema reference, not inline constraints.
-	if !strings.Contains(output, "z.array(ItemInputSchema).min(1)") {
+	if !strings.Contains(output, "z.array(ItemInputSchema).check(z.minLength(1))") {
 		t.Errorf("missing struct element array.\nOutput:\n%s", output)
 	}
 
 	// ItemInputSchema should be emitted before CreateOrderInputSchema (topo sort).
-	itemIdx := strings.Index(output, "ItemInputSchema = z.object")
-	createIdx := strings.Index(output, "CreateOrderInputSchema = z.object")
+	itemIdx := strings.Index(output, "ItemInputSchema = z.strictObject")
+	createIdx := strings.Index(output, "CreateOrderInputSchema = z.strictObject")
 	if itemIdx < 0 || createIdx < 0 {
 		t.Fatalf("missing schemas.\nOutput:\n%s", output)
 	}
@@ -587,12 +587,12 @@ func TestZodMiniDiveArray(t *testing.T) {
 	miniOutput := miniBuf.String()
 
 	// Standard: element constraints use method chains.
-	if !strings.Contains(stdOutput, "z.array(z.string().min(2).max(50)).min(1)") {
+	if !strings.Contains(stdOutput, "z.array(z.string().check(z.refine((value) => Array.from(value).length >= 2)).check(z.refine((value) => Array.from(value).length <= 50))).check(z.minLength(1))") {
 		t.Errorf("standard output wrong.\nOutput:\n%s", stdOutput)
 	}
 
 	// Mini: element constraints use .check() syntax.
-	if !strings.Contains(miniOutput, "z.string().check(z.minLength(2), z.maxLength(50))") {
+	if !strings.Contains(miniOutput, "z.string().check(z.refine((value) => Array.from(value).length >= 2), z.refine((value) => Array.from(value).length <= 50))") {
 		t.Errorf("mini output missing element .check() syntax.\nOutput:\n%s", miniOutput)
 	}
 
@@ -603,7 +603,7 @@ func TestZodMiniDiveArray(t *testing.T) {
 }
 
 func TestZodIntegerUnion(t *testing.T) {
-	// Integer unions must use z.union([z.literal(N), ...]) not z.enum().
+	// Inferred Go constants retain the numeric base without closing its values.
 	procs := []codegen.ProcEntry{
 		{Path: "task.create", ProcType: "mutation", InputTS: "TaskInput", OutputTS: "void"},
 	}
@@ -628,10 +628,10 @@ func TestZodIntegerUnion(t *testing.T) {
 	}
 	output := buf.String()
 
-	// Must use z.union + z.literal for integers.
-	want := "z.union([z.literal(1), z.literal(2), z.literal(3)])"
+	// Inferred constants keep the underlying numeric input open.
+	want := "PrioritySchema = z.number()"
 	if !strings.Contains(output, want) {
-		t.Errorf("integer union should use z.union([z.literal(N), ...]).\nwant: %s\nOutput:\n%s", want, output)
+		t.Errorf("inferred integer constants must not restrict Go-valid inputs.\nwant: %s\nOutput:\n%s", want, output)
 	}
 
 	// Must NOT use z.enum for integers.
@@ -640,8 +640,8 @@ func TestZodIntegerUnion(t *testing.T) {
 	}
 }
 
-func TestZodStringUnionUnchanged(t *testing.T) {
-	// String unions should still use z.enum().
+func TestZodStringConstantsKeepInputsOpen(t *testing.T) {
+	// Go constants suggest common values without closing the type.
 	procs := []codegen.ProcEntry{
 		{Path: "user.create", ProcType: "mutation", InputTS: "UserInput", OutputTS: "void"},
 	}
@@ -666,9 +666,9 @@ func TestZodStringUnionUnchanged(t *testing.T) {
 	}
 	output := buf.String()
 
-	want := `z.enum(["active", "pending", "banned"])`
+	want := `StatusSchema = z.string()`
 	if !strings.Contains(output, want) {
-		t.Errorf("string union should use z.enum().\nwant: %s\nOutput:\n%s", want, output)
+		t.Errorf("inferred string constants must keep the scalar schema open.\nwant: %s\nOutput:\n%s", want, output)
 	}
 }
 
@@ -694,11 +694,11 @@ func TestZodCyclicLazy(t *testing.T) {
 	}
 	output := buf.String()
 
-	// Only the recursive field is lazy, so the schema stays a plain z.object.
+	// Only the recursive field is lazy, so the schema stays a plain z.strictObject.
 	if !strings.Contains(output, `children: z.lazy((): z.ZodType<$TreeNode["children"], $TreeNode["children"]> => z.array(TreeNodeSchema))`) {
 		t.Errorf("cyclic field should be lazy and explicitly typed.\nOutput:\n%s", output)
 	}
-	if !strings.Contains(output, "export const TreeNodeSchema = z.object(") {
+	if !strings.Contains(output, "export const TreeNodeSchema = z.strictObject(") {
 		t.Errorf("cyclic schema should retain object operations.\nOutput:\n%s", output)
 	}
 
@@ -732,8 +732,8 @@ func TestZodNonCyclicUnchanged(t *testing.T) {
 	if strings.Contains(output, "z.lazy") {
 		t.Errorf("non-cyclic type should not use z.lazy().\nOutput:\n%s", output)
 	}
-	if !strings.Contains(output, "export const UserInputSchema = z.object(") {
-		t.Errorf("non-cyclic type should use plain z.object().\nOutput:\n%s", output)
+	if !strings.Contains(output, "export const UserInputSchema = z.strictObject(") {
+		t.Errorf("non-cyclic type should use plain z.strictObject().\nOutput:\n%s", output)
 	}
 }
 
@@ -770,14 +770,14 @@ func TestZodMutualCycle(t *testing.T) {
 	if !strings.Contains(output, `a: z.lazy((): z.ZodType<$NodeB["a"], $NodeB["a"]> => NodeASchema)`) {
 		t.Errorf("back-edge field should use z.lazy with type annotation.\nOutput:\n%s", output)
 	}
-	if !strings.Contains(output, "NodeASchema = z.object(") {
-		t.Errorf("NodeA should be plain z.object.\nOutput:\n%s", output)
+	if !strings.Contains(output, "NodeASchema = z.strictObject(") {
+		t.Errorf("NodeA should be plain z.strictObject.\nOutput:\n%s", output)
 	}
 
 	lazyCount := strings.Count(output, "z.lazy(")
-	objectCount := strings.Count(output, "= z.object(")
+	objectCount := strings.Count(output, "= z.strictObject(")
 	if lazyCount != 1 || objectCount != 2 {
-		t.Errorf("expected 1 z.lazy + 2 z.object, got %d + %d.\nOutput:\n%s", lazyCount, objectCount, output)
+		t.Errorf("expected 1 z.lazy + 2 z.strictObject, got %d + %d.\nOutput:\n%s", lazyCount, objectCount, output)
 	}
 }
 
@@ -808,7 +808,7 @@ func TestZodOmitemptyE2E(t *testing.T) {
 	})
 
 	t.Run("omitempty+len fields accept empty strings", func(t *testing.T) {
-		want := `z.string().length(6).or(z.literal(""))`
+		want := `z.string().check(z.refine((value) => Array.from(value).length === 6)).or(z.literal(""))`
 		count := strings.Count(zodOutput, want)
 		if count != 2 {
 			t.Errorf("expected %q to appear 2 times (code + current_code), got %d.\nOutput:\n%s", want, count, zodOutput)
@@ -821,25 +821,21 @@ func TestZodOmitemptyE2E(t *testing.T) {
 		}
 	})
 
-	t.Run("omitempty+email allows empty string", func(t *testing.T) {
-		if !strings.Contains(zodOutput, `z.email().or(z.literal(""))`) {
-			t.Errorf("backup_email should have omitempty wrapping on format base.\nOutput:\n%s", zodOutput)
-		}
-	})
-
-	t.Run("required+email unchanged", func(t *testing.T) {
-		// primary_email has validate:"required,email" — no .or() wrapping.
-		// Both emails use z.email(), but only backup_email has .or().
-		orCount := strings.Count(zodOutput, `z.email().or(`)
-		if orCount != 1 {
-			t.Errorf("expected exactly 1 z.email().or() (backup_email), got %d.\nOutput:\n%s", orCount, zodOutput)
-		}
-	})
+	for _, field := range []struct{ name, schema string }{
+		{"backup_email", `z.string().check(z.refine($trpcgoEmail)).or(z.literal(""))`},
+		{"primary_email", `z.string().check(z.refine($trpcgoEmail))`},
+	} {
+		t.Run(field.name+" preserves ordered email validation", func(t *testing.T) {
+			if !strings.Contains(zodOutput, field.name+": "+field.schema) {
+				t.Errorf("email field constraints were not emitted: %s", field.name)
+			}
+		})
+	}
 
 	t.Run("omitempty+optional pointer field", func(t *testing.T) {
 		// nickname is *string with json:"nickname,omitempty" validate:"omitempty,min=3,max=30"
 		// A nil pointer skips validation; a pointer to "" must satisfy min=3.
-		want := `z.string().min(3).max(30).optional()`
+		want := `z.string().check(z.refine((value) => Array.from(value).length >= 3)).check(z.refine((value) => Array.from(value).length <= 30)).optional()`
 		if !strings.Contains(zodOutput, want) {
 			t.Errorf("nickname should allow absence while validating present values.\nwant: %s\nOutput:\n%s", want, zodOutput)
 		}
@@ -897,7 +893,7 @@ func TestZodOmitemptyDirect(t *testing.T) {
 		output := buf.String()
 
 		// omitempty fields should accept empty strings.
-		wantOmitempty := `z.string().length(6).or(z.literal(""))`
+		wantOmitempty := `z.string().check(z.refine((value) => Array.from(value).length === 6)).or(z.literal(""))`
 		count := strings.Count(output, wantOmitempty)
 		if count != 2 {
 			t.Errorf("expected %q to appear 2 times (code + current_code), got %d.\nOutput:\n%s", wantOmitempty, count, output)
@@ -916,7 +912,7 @@ func TestZodOmitemptyDirect(t *testing.T) {
 		}
 		output := buf.String()
 
-		wantOmitempty := `z.union([z.string().check(z.length(6)), z.literal("")])`
+		wantOmitempty := `z.union([z.string().check(z.refine((value) => Array.from(value).length === 6)), z.literal("")])`
 		count := strings.Count(output, wantOmitempty)
 		if count != 2 {
 			t.Errorf("expected %q to appear 2 times, got %d.\nOutput:\n%s", wantOmitempty, count, output)
@@ -963,16 +959,13 @@ func TestZodOmitemptyFormatBase(t *testing.T) {
 	}
 	output := buf.String()
 
-	// backup_email: omitempty + email → z.email().or(z.literal(""))
-	if !strings.Contains(output, `z.email().or(z.literal(""))`) {
-		t.Errorf("backup_email should have omitempty wrapping.\nOutput:\n%s", output)
-	}
-
-	// primary_email: required + email → z.email() (no .or())
-	// Count: z.email() should appear twice (once with .or, once without).
-	emailCount := strings.Count(output, "z.email()")
-	if emailCount != 2 {
-		t.Errorf("expected z.email() 2 times, got %d.\nOutput:\n%s", emailCount, output)
+	for _, want := range []string{
+		`backup_email: z.string().check(z.refine($trpcgoEmail)).or(z.literal(""))`,
+		`primary_email: z.string().check(z.refine($trpcgoEmail))`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("email field constraints were not emitted: %s", want)
+		}
 	}
 }
 
@@ -1384,9 +1377,9 @@ func TestZodOmitField(t *testing.T) {
 	output := buf.String()
 	t.Log(output)
 
-	// id should NOT appear in the schema.
-	if strings.Contains(output, "id: z.") {
-		t.Errorf("omitted field 'id' should not appear in Zod schema.\nOutput:\n%s", output)
+	// id is a known field without client validation.
+	if !strings.Contains(output, "id: z.custom<string>().optional(),") {
+		t.Errorf("omitted field 'id' should be optional and unvalidated.\nOutput:\n%s", output)
 	}
 
 	// name and active should appear.
@@ -1460,9 +1453,9 @@ func TestZodOmitE2E(t *testing.T) {
 	zodOutput := zodBuf.String()
 	t.Log(zodOutput)
 
-	t.Run("omitted field excluded", func(t *testing.T) {
-		if strings.Contains(zodOutput, "id: z.") {
-			t.Errorf("zod_omit field 'id' should not appear in Zod schema.\nOutput:\n%s", zodOutput)
+	t.Run("omitted field unvalidated", func(t *testing.T) {
+		if !strings.Contains(zodOutput, "id: z.custom<string>().optional(),") {
+			t.Errorf("zod_omit field 'id' should be optional and unvalidated.\nOutput:\n%s", zodOutput)
 		}
 	})
 
@@ -1477,9 +1470,9 @@ func TestZodOmitE2E(t *testing.T) {
 
 	t.Run("refinement referencing omitted field skipped", func(t *testing.T) {
 		// UpdateWithRefine has gtefield=ID (omitted) and gtefield=MinVal (kept).
-		if strings.Count(zodOutput, ".refine(") != 1 {
+		if strings.Count(zodOutput, ".refine(\n") != 1 {
 			t.Errorf("expected 1 .refine() (skipping one referencing omitted 'id'), got %d.\nOutput:\n%s",
-				strings.Count(zodOutput, ".refine("), zodOutput)
+				strings.Count(zodOutput, ".refine(\n"), zodOutput)
 		}
 		if !strings.Contains(zodOutput, "data.max_val >= data.min_val") {
 			t.Errorf("expected refinement for non-omitted fields.\nOutput:\n%s", zodOutput)

@@ -3,10 +3,10 @@ package trpcgo
 import (
 	"bytes"
 	"cmp"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -31,7 +31,11 @@ func (r *Router) GenerateTS(outputPath string) error {
 	}
 
 	// Convert registered procedures (reflect types) to codegen entries.
-	procs, defs := r.convertProcedures()
+	program, err := typemap.CompileValidation(r.opts.zodValidation)
+	if err != nil {
+		return fmt.Errorf("compiling Zod validation: %w", err)
+	}
+	procs, defs := r.convertProcedures(program)
 
 	if err := fsutil.AtomicWriteFile(outputPath, 0o644, func(w io.Writer) error {
 		return codegen.WriteAppRouter(w, procs, defs)
@@ -56,7 +60,11 @@ func (r *Router) GenerateZod(outputPath string) error {
 		return fmt.Errorf("creating output directory: %w", err)
 	}
 
-	procs, defs := r.convertProcedures()
+	program, err := typemap.CompileValidation(r.opts.zodValidation)
+	if err != nil {
+		return fmt.Errorf("compiling Zod validation: %w", err)
+	}
+	procs, defs := r.convertProcedures(program)
 
 	style := typemap.ZodStandard
 	if r.opts.zodMini {
@@ -64,7 +72,7 @@ func (r *Router) GenerateZod(outputPath string) error {
 	}
 
 	var buf bytes.Buffer
-	if err := codegen.WriteZodSchemas(&buf, procs, defs, style); err != nil {
+	if err := codegen.WriteZodSchemas(&buf, procs, defs, style, codegen.ZodOptions{AllowUnknownFields: !r.opts.strictInput, Validation: r.opts.zodValidation}); err != nil {
 		return fmt.Errorf("generating Zod schemas: %w", err)
 	}
 
@@ -87,7 +95,7 @@ func (r *Router) GenerateZod(outputPath string) error {
 
 // convertProcedures converts reflect-based procedure registrations to
 // codegen ProcEntry and typemap TypeDef slices.
-func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
+func (r *Router) convertProcedures(validation ...*typemap.ValidationProgram) ([]codegen.ProcEntry, []typemap.TypeDef) {
 	type procInfo struct {
 		path       string
 		typ        ProcedureType
@@ -109,9 +117,9 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 	for _, p := range procs {
 		inputTS := "void"
 		if p.inputType != nil {
-			inputTS = goTypeToTS(p.inputType, defs)
+			inputTS = goTypeToTS(p.inputType, defs, validation...)
 		}
-		outputTS := reflectProcedureOutputTS(p.typ, p.outputType, defs)
+		outputTS := reflectProcedureOutputTS(p.typ, p.outputType, defs, validation...)
 		entries = append(entries, codegen.ProcEntry{
 			Path:     p.path,
 			ProcType: string(p.typ),
@@ -128,15 +136,6 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 	for i := range entries {
 		entries[i].InputTS = typemap.ResolveTokens(entries[i].InputTS, display)
 		entries[i].OutputTS = typemap.ResolveTokens(entries[i].OutputTS, display)
-	}
-	for _, d := range defs {
-		for i := range d.fields {
-			d.fields[i].Type = typemap.ResolveTokens(d.fields[i].Type, display)
-			d.fields[i].ZodType = typemap.ResolveTokens(d.fields[i].ZodType, display)
-		}
-		for i := range d.extends {
-			d.extends[i] = typemap.ResolveTokens(d.extends[i], display)
-		}
 	}
 
 	// Convert reflect defs to typemap.TypeDef for the shared writer.
@@ -157,26 +156,36 @@ func (r *Router) convertProcedures() ([]codegen.ProcEntry, []typemap.TypeDef) {
 		d := dk.def
 		resolvedName := cmp.Or(display[dk.key], d.name)
 		typeDefs[i] = typemap.TypeDef{
+			ID:          dk.key,
+			PkgPath:     d.pkgPath,
 			Name:        resolvedName,
-			Kind:        typemap.TypeDefInterface,
+			Kind:        d.kind,
+			AliasOf:     typemap.ResolveTokens(d.aliasOf, display),
+			Underlying:  d.underlying,
 			Extends:     d.extends,
+			ExtendsAt:   d.extendsAt,
 			Refinements: d.refinements,
 			Fields:      d.fields,
 		}
+		typeDefs[i] = typemap.ResolveTypeDef(typeDefs[i], display)
 	}
 
 	return entries, typeDefs
 }
 
 type reflectDef struct {
+	kind        typemap.TypeDefKind
+	aliasOf     string
+	underlying  *typemap.Field
 	name        string
 	pkgPath     string
 	extends     []string
+	extendsAt   []int
 	refinements []typemap.Refinement
 	fields      []typemap.Field
 }
 
-func reflectProcedureOutputTS(typ ProcedureType, output reflect.Type, defs map[string]*reflectDef) string {
+func reflectProcedureOutputTS(typ ProcedureType, output reflect.Type, defs map[string]*reflectDef, validation ...*typemap.ValidationProgram) string {
 	if typ == ProcedureSubscription {
 		t := output
 		if t.Kind() == reflect.Pointer {
@@ -185,11 +194,11 @@ func reflectProcedureOutputTS(typ ProcedureType, output reflect.Type, defs map[s
 		// httpSubscriptionLink wraps only the top-level stream item as { id, data }.
 		if t.PkgPath() == "github.com/befabri/trpcgo" && strings.HasPrefix(t.Name(), "TrackedEvent[") {
 			if field, ok := t.FieldByName("Data"); ok {
-				return "{ id: string; data: " + goTypeToTS(field.Type, defs) + " }"
+				return "{ id: string; data: " + goTypeToTS(field.Type, defs, validation...) + " }"
 			}
 		}
 	}
-	return goTypeToTS(output, defs)
+	return goTypeToTS(output, defs, validation...)
 }
 
 var reflectKindTS = map[reflect.Kind]string{
@@ -227,7 +236,7 @@ var reflectKindNames = map[reflect.Kind]string{
 }
 
 // goTypeToTS converts a reflect.Type to its TypeScript representation.
-func goTypeToTS(t reflect.Type, defs map[string]*reflectDef) string {
+func goTypeToTS(t reflect.Type, defs map[string]*reflectDef, validation ...*typemap.ValidationProgram) string {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
@@ -239,20 +248,30 @@ func goTypeToTS(t reflect.Type, defs map[string]*reflectDef) string {
 	if ts := reflectKindTS[t.Kind()]; ts != "" {
 		return ts
 	}
+	if t.Name() != "" && (t.Kind() == reflect.Slice || t.Kind() == reflect.Array || t.Kind() == reflect.Map) {
+		key := t.PkgPath() + "." + t.Name()
+		if _, exists := defs[key]; !exists {
+			d := &reflectDef{name: reflectTypeName(t), pkgPath: t.PkgPath(), kind: typemap.TypeDefAlias}
+			defs[key] = d
+			d.aliasOf = reflectContainerToTS(t, defs, validation...)
+			d.underlying = reflectTypeField(t, defs, d.aliasOf, validation...)
+		}
+		return typemap.TokenDelim + key + typemap.TokenDelim
+	}
 	switch t.Kind() {
 	case reflect.Slice:
-		return reflectSliceToTS(t, defs)
+		return reflectSliceToTS(t, defs, validation...)
 
 	case reflect.Array:
-		return goTypeToTS(t.Elem(), defs) + "[]"
+		return goTypeToTS(t.Elem(), defs, validation...) + "[]"
 
 	case reflect.Map:
-		key := goTypeToTS(t.Key(), defs)
-		val := goTypeToTS(t.Elem(), defs)
+		key := goTypeToTS(t.Key(), defs, validation...)
+		val := goTypeToTS(t.Elem(), defs, validation...)
 		return fmt.Sprintf("Record<%s, %s>", key, val)
 
 	case reflect.Struct:
-		return reflectStructToTS(t, defs)
+		return reflectStructToTS(t, defs, validation...)
 
 	case reflect.Interface:
 		return "unknown"
@@ -281,54 +300,49 @@ func reflectWellKnownTS(t reflect.Type) string {
 	return ""
 }
 
-func reflectSliceToTS(t reflect.Type, defs map[string]*reflectDef) string {
+func reflectSliceToTS(t reflect.Type, defs map[string]*reflectDef, validation ...*typemap.ValidationProgram) string {
 	if t.Elem().Kind() == reflect.Uint8 {
 		return "string"
 	}
-	elem := goTypeToTS(t.Elem(), defs)
+	elem := goTypeToTS(t.Elem(), defs, validation...)
 	if strings.Contains(elem, "|") {
 		return "(" + elem + ")[]"
 	}
 	return elem + "[]"
 }
 
-func reflectStructToTS(t reflect.Type, defs map[string]*reflectDef) string {
+func reflectStructToTS(t reflect.Type, defs map[string]*reflectDef, validation ...*typemap.ValidationProgram) string {
 	name := t.Name()
 	if t.PkgPath() == "time" && name == "Time" {
 		return "string"
 	}
 
 	if name == "" {
-		return inlineStructTS(t, defs)
+		return inlineStructTS(t, defs, validation...)
 	}
 	key := t.PkgPath() + "." + name
-	if bracketIdx := strings.IndexByte(name, '['); bracketIdx >= 0 {
-		// Reflection cannot tell which fields are type parameters, so each
-		// instantiation becomes its own interface. The hash keeps the name
-		// stable regardless of registration order.
-		digest := sha256.Sum256([]byte(key))
-		name = fmt.Sprintf("%s_%x", name[:bracketIdx], digest[:8])
-	}
+	name = reflectTypeName(t)
 	if _, ok := defs[key]; !ok {
-		resolveStructDefTS(t, name, key, defs)
+		resolveStructDefTS(t, name, key, defs, validation...)
 	}
 	return typemap.TokenDelim + key + typemap.TokenDelim
 }
 
 // resolveStructDefTS registers a struct type as a TypeScript interface definition.
-func resolveStructDefTS(t reflect.Type, name, key string, defs map[string]*reflectDef) {
+func resolveStructDefTS(t reflect.Type, name, key string, defs map[string]*reflectDef, validation ...*typemap.ValidationProgram) {
 	defs[key] = &reflectDef{
 		name:    name,
 		pkgPath: t.PkgPath(),
 	}
 
-	fields, extends, refs := collectFieldsTS(t, defs)
+	fields, extends, extendsAt, refs := collectFieldsTS(t, defs, validation...)
 	defs[key].fields = fields
 	defs[key].extends = extends
+	defs[key].extendsAt = extendsAt
 	defs[key].refinements = refs
 }
 
-func reflectFieldAdapter(defs map[string]*reflectDef) typemap.FieldAdapter[reflect.Type] {
+func reflectFieldAdapter(defs map[string]*reflectDef, validation ...*typemap.ValidationProgram) typemap.FieldAdapter[reflect.Type] {
 	return typemap.FieldAdapter[reflect.Type]{
 		Fields: func(t reflect.Type) []typemap.EmbeddedField[reflect.Type] {
 			fields := make([]typemap.EmbeddedField[reflect.Type], t.NumField())
@@ -345,48 +359,49 @@ func reflectFieldAdapter(defs map[string]*reflectDef) typemap.FieldAdapter[refle
 			}
 			return t, t.Kind() == reflect.Struct, pointer
 		},
-		TypeName: func(t reflect.Type) string { return goTypeToTS(t, defs) },
+		TypeName: func(t reflect.Type) string { return goTypeToTS(t, defs, validation...) },
 		Lookup:   func(t reflect.Type, name string) ([]int, bool) { f, ok := t.FieldByName(name); return f.Index, ok },
+		Describe: func(t reflect.Type, index int) typemap.Field {
+			f := t.Field(index)
+			field := typemap.Field{GoKind: reflectGoKind(f.Type), IsPointer: f.Type.Kind() == reflect.Pointer, GoType: f.Type.String()}
+			if f.Type.Kind() == reflect.Array {
+				n := int64(f.Type.Len())
+				field.ArrayLen = &n
+			}
+			return field
+		},
 		Map: func(t reflect.Type, index int, name string, omitted bool, tag typemap.TSTypeTag, hasTag bool) typemap.Field {
-			return reflectMappedField(t.Field(index), defs, name, omitted, tag, hasTag)
+			return reflectMappedField(t.Field(index), defs, name, omitted, tag, hasTag, validation...)
 		},
 	}
 }
 
-func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef) ([]typemap.Field, []string, []typemap.Refinement) {
-	return typemap.CollectJSONFields(t, reflectFieldAdapter(defs), true)
+func collectFieldsTS(t reflect.Type, defs map[string]*reflectDef, validation ...*typemap.ValidationProgram) ([]typemap.Field, []string, []int, []typemap.Refinement) {
+	return typemap.CollectJSONFields(t, reflectFieldAdapter(defs, validation...), true)
 }
 
-func reflectMappedField(f reflect.StructField, defs map[string]*reflectDef, jsonName string, omitempty bool, tstag typemap.TSTypeTag, hasTSTag bool) typemap.Field {
-	tsType := goTypeToTS(f.Type, defs)
+func reflectMappedField(f reflect.StructField, defs map[string]*reflectDef, jsonName string, omitempty bool, tstag typemap.TSTypeTag, hasTSTag bool, validation ...*typemap.ValidationProgram) typemap.Field {
+	tsType := goTypeToTS(f.Type, defs, validation...)
 	optional := omitempty || f.Type.Kind() == reflect.Pointer
 
-	field := typemap.Field{Name: jsonName, Type: tsType, Optional: optional, IsPointer: f.Type.Kind() == reflect.Pointer}
+	field := *reflectTypeField(f.Type, defs, tsType, validation...)
+	field.Name, field.GoName, field.Optional = jsonName, f.Name, optional
+	field.JSONString = typemap.JSONStringOption(string(f.Tag), field.GoKind)
+	if field.JSONString {
+		field.Type = "string"
+	}
 
 	field.GoKind = reflectGoKind(f.Type)
 
-	allRules := typemap.ParseValidateTag(string(f.Tag))
-	sliceRules, elemRules := typemap.SplitAtDive(allRules)
-	field.Validate = sliceRules
-	field.ElementValidate = elemRules
-	field.UnsupportedZod = typemap.UnsupportedZodRules(sliceRules)
-	if eu := typemap.UnsupportedZodRules(elemRules); len(eu) > 0 {
-		field.UnsupportedZod = append(field.UnsupportedZod, eu...)
+	var program *typemap.ValidationProgram
+	if len(validation) > 0 {
+		program = validation[0]
 	}
-
-	field.Element = reflectContainerElementType(f.Type)
-
-	for _, rule := range field.Validate {
-		if rule.Tag == "required" {
-			field.Optional = false
-		}
-		if rule.Tag == "omitempty" {
-			field.ValidateOmitempty = true
-		}
-	}
+	typemap.ApplyValidation(&field, string(f.Tag), program)
 
 	if hasTSTag {
 		if tstag.Type != "" {
+			field.TypeOverride = true
 			field.ZodType = field.Type
 			field.Type = tstag.Type
 		}
@@ -406,40 +421,17 @@ func reflectMappedField(f reflect.StructField, defs map[string]*reflectDef, json
 	return field
 }
 
-func inlineStructTS(t reflect.Type, defs map[string]*reflectDef) string {
-	fields, _, _ := typemap.CollectJSONFields(t, reflectFieldAdapter(defs), false)
+func inlineStructTS(t reflect.Type, defs map[string]*reflectDef, validation ...*typemap.ValidationProgram) string {
+	fields, _, _, _ := typemap.CollectJSONFields(t, reflectFieldAdapter(defs, validation...), false)
 	return typemap.InlineObjectType(fields)
 }
 
 // resolveDisplayNames computes a mapping from def key (pkgPath.Name) to
-// display name. When no collisions exist, display names equal short names.
-// On collision (multiple packages define the same type name), names are
-// prefixed with the title-cased last segment of the package path.
+// display name. When no collisions exist, display names equal short names;
+// otherwise package path segments are prefixed until the names are distinct,
+// exactly as the static generator does.
 func resolveDisplayNames(defs map[string]*reflectDef) map[string]string {
-	// Group keys by short name.
-	byName := map[string][]string{} // shortName → [keys...]
-	for key, d := range defs {
-		byName[d.name] = append(byName[d.name], key)
-	}
-
-	display := make(map[string]string, len(defs))
-	for key, d := range defs {
-		if len(byName[d.name]) > 1 {
-			// Collision — prefix with title-cased package last segment.
-			pkg := d.pkgPath
-			if idx := strings.LastIndexByte(pkg, '/'); idx >= 0 {
-				pkg = pkg[idx+1:]
-			}
-			if len(pkg) > 0 {
-				display[key] = strings.ToUpper(pkg[:1]) + pkg[1:] + d.name
-			} else {
-				display[key] = d.name
-			}
-		} else {
-			display[key] = d.name
-		}
-	}
-	return display
+	return typemap.UniqueTypeNames(slices.Sorted(maps.Keys(defs)), func(key string) string { return defs[key].name }, func(key string) string { return defs[key].pkgPath })
 }
 
 // reflectGoKind returns a Go kind string for Zod type discrimination.
@@ -456,6 +448,9 @@ func reflectGoKind(t reflect.Type) string {
 	}
 	if t == rawMessageType {
 		return "json.RawMessage"
+	}
+	if t == jsonNumberType {
+		return "json.Number"
 	}
 
 	if kind := reflectKindNames[t.Kind()]; kind != "" {
@@ -477,31 +472,5 @@ func reflectGoKind(t reflect.Type) string {
 		return "interface"
 	default:
 		return "unknown"
-	}
-}
-
-// reflectContainerElementType is the reflect twin of
-// typemap.containerElementType; keep the two in sync.
-func reflectContainerElementType(t reflect.Type) *typemap.ElementType {
-	var root *typemap.ElementType
-	next := &root
-	seen := make(map[reflect.Type]bool)
-	for {
-		for t.Kind() == reflect.Pointer {
-			t = t.Elem()
-		}
-		if seen[t] {
-			return root
-		}
-		seen[t] = true
-		switch t.Kind() {
-		case reflect.Slice, reflect.Array, reflect.Map:
-			elem := t.Elem()
-			*next = &typemap.ElementType{GoKind: reflectGoKind(elem), IsPointer: elem.Kind() == reflect.Pointer}
-			next = &(*next).Element
-			t = elem
-		default:
-			return root
-		}
 	}
 }

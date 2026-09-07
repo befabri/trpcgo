@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/befabri/trpcgo/internal/codegen"
 	"github.com/befabri/trpcgo/internal/typemap"
+	"github.com/befabri/trpcgo/zodconfig"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -320,7 +322,7 @@ func TestRegenerateFromSourceWritesMiniZodWithTypedInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`import * as z from "zod/mini"`, "CreateUserInputSchema", "z.email()"} {
+	for _, want := range []string{`import * as z from "zod/mini"`, "CreateUserInputSchema", "z.refine($trpcgoEmail)"} {
 		if !strings.Contains(string(zodData), want) {
 			t.Fatalf("zod output missing %q:\n%s", want, string(zodData))
 		}
@@ -491,5 +493,47 @@ func Setup() *trpcgo.Router {
 	}
 	if !strings.Contains(logs.String(), "removed "+zodOut+" (no typed inputs)") {
 		t.Fatalf("stale zod removal was not logged, logs:\n%s", logs.String())
+	}
+}
+
+func TestWatcherPreservesValidationConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	config := zodconfig.Config{TagName: "binding", Aliases: map[string]string{"name": "required"}}
+	r := NewRouter(WithTypeOutput("router.ts"), WithZodOutput("schemas.ts"), WithStrictInput(false), WithZodValidation(config))
+	cfg, err := r.newWatcherConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cfg.watcher.Close()
+	config.Aliases["name"] = "max=1"
+	if !cfg.opts.zodOptions.AllowUnknownFields || cfg.opts.zodOptions.Validation.TagName != "binding" || cfg.opts.zodOptions.Validation.Aliases["name"] != "required" {
+		t.Fatalf("watch options lost or shared configuration: %#v", cfg.opts.zodOptions)
+	}
+}
+
+func TestRegenerateFromSourceUsesValidationConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	opts := watchOpts{dir: filepath.Join(watchAnalysisFixtureDir(t, "basic"), "..", "..", "..", "..", "testdata", "validationconfig"), patterns: []string{"."}, output: filepath.Join(dir, "trpc.ts"), zodOutput: filepath.Join(dir, "schemas.ts"), zodOptions: codegen.ZodOptions{AllowUnknownFields: true, Validation: zodconfig.Config{TagName: "binding", Aliases: map[string]string{"requiredText": "required,min=2", "afterStart": "gtfield=Start", "nonemptyList": "min=1,dive,required"}}}}
+	regenerateFromSource(opts)
+	output, err := os.ReadFile(opts.zodOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"z.looseObject(", "Array.from(value).length >= 2)", "data.end > data.start"} {
+		if !strings.Contains(string(output), expected) {
+			t.Fatalf("watch generation missing %s:\n%s", expected, output)
+		}
+	}
+	beforeTypes, err := os.ReadFile(opts.output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.zodOptions.Validation.Aliases = map[string]string{"cycle": "cycle"}
+	regenerateFromSource(opts)
+	afterTypes, _ := os.ReadFile(opts.output)
+	afterZod, _ := os.ReadFile(opts.zodOutput)
+	if string(beforeTypes) != string(afterTypes) || string(output) != string(afterZod) {
+		t.Fatal("invalid config replaced previous generated outputs")
 	}
 }

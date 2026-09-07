@@ -24,6 +24,7 @@ type watchOpts struct {
 	zodOutput   string
 	enumsOutput string
 	zodStyle    typemap.ZodStyle
+	zodOptions  codegen.ZodOptions
 }
 
 type watcherConfig struct {
@@ -74,6 +75,7 @@ func (r *Router) newWatcherConfig() (watcherConfig, error) {
 			zodOutput:   absPath(r.opts.zodOutput),
 			enumsOutput: absPath(r.opts.enumsOutput),
 			zodStyle:    r.zodStyle(),
+			zodOptions:  codegen.ZodOptions{AllowUnknownFields: !r.opts.strictInput, Validation: r.opts.zodValidation.Clone()},
 		},
 	}, nil
 }
@@ -182,6 +184,11 @@ func absPath(p string) string {
 // regenerateFromSource rewrites the generated files from static analysis,
 // keeping the previous files when the source has errors.
 func regenerateFromSource(opts watchOpts) {
+	program, err := typemap.CompileValidation(opts.zodOptions.Validation)
+	if err != nil {
+		log.Printf("trpcgo: invalid Zod validation configuration: %v", err)
+		return
+	}
 	result, err := analysis.Analyze(opts.patterns, opts.dir)
 	if err != nil {
 		log.Printf("trpcgo: source has errors, keeping previous types")
@@ -193,20 +200,31 @@ func regenerateFromSource(opts watchOpts) {
 	}
 
 	var buf bytes.Buffer
-	genResult, err := codegen.Generate(&buf, result, result.TypeMetas)
+	genResult, err := codegen.Generate(&buf, result, result.TypeMetas, program)
 	if err != nil {
 		log.Printf("trpcgo: codegen failed: %v", err)
 		return
 	}
 
-	writeIfChanged(opts.output, buf.Bytes(), "types")
+	var zodBuf, enumsBuf bytes.Buffer
 
 	if opts.zodOutput != "" && genResult != nil {
-		var zodBuf bytes.Buffer
-		if err := codegen.WriteZodSchemas(&zodBuf, genResult.Procs, genResult.Defs, opts.zodStyle); err != nil {
+		if err := codegen.WriteZodSchemas(&zodBuf, genResult.Procs, genResult.Defs, opts.zodStyle, opts.zodOptions); err != nil {
 			log.Printf("trpcgo: zod codegen failed: %v", err)
 			return
 		}
+	}
+
+	if opts.enumsOutput != "" && genResult != nil {
+		if err := codegen.WriteEnums(&enumsBuf, genResult.Defs); err != nil {
+			log.Printf("trpcgo: enums codegen failed: %v", err)
+			return
+		}
+	}
+	// Complete every render before replacing files, so invalid configuration
+	// or validation metadata keeps all previous generated outputs together.
+	writeIfChanged(opts.output, buf.Bytes(), "types")
+	if opts.zodOutput != "" {
 		if zodBuf.Len() == 0 {
 			if err := os.Remove(opts.zodOutput); err == nil {
 				log.Printf("trpcgo: removed %s (no typed inputs)", opts.zodOutput)
@@ -215,13 +233,7 @@ func regenerateFromSource(opts watchOpts) {
 			writeIfChanged(opts.zodOutput, zodBuf.Bytes(), "zod schemas")
 		}
 	}
-
-	if opts.enumsOutput != "" && genResult != nil {
-		var enumsBuf bytes.Buffer
-		if err := codegen.WriteEnums(&enumsBuf, genResult.Defs); err != nil {
-			log.Printf("trpcgo: enums codegen failed: %v", err)
-			return
-		}
+	if opts.enumsOutput != "" {
 		writeIfChanged(opts.enumsOutput, enumsBuf.Bytes(), "enum values")
 	}
 }

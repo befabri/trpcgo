@@ -62,10 +62,10 @@ export interface ResetResult {
 }
 
 /** Role represents a user's permission level. */
-export type Role = "admin" | "editor" | "viewer";
+export type Role = "admin" | "editor" | "viewer" | (string & {});
 
 /** Status represents a user's account status. */
-export type Status = "active" | "inactive" | "suspended";
+export type Status = "active" | "inactive" | "suspended" | (string & {});
 
 /** User represents a registered user in the system. */
 export interface User {

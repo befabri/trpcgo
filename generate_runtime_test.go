@@ -15,16 +15,7 @@ import (
 )
 
 func TestGenerateTSTsc(t *testing.T) {
-	// Find tsc binary.
-	tscPath := filepath.Join("examples", "start-trpc", "web", "node_modules", ".bin", "tsc")
-	if _, err := os.Stat(tscPath); err != nil {
-		// Fallback: check PATH.
-		var lookupErr error
-		tscPath, lookupErr = exec.LookPath("tsc")
-		if lookupErr != nil {
-			t.Skip("tsc not available, skipping TypeScript compilation check")
-		}
-	}
+	tscPath := typeScriptCompiler(t)
 
 	// Build a router exercising many type paths.
 	r := trpcgo.NewRouter()
@@ -90,14 +81,7 @@ func TestGenerateTSTsc(t *testing.T) {
 }
 
 func TestGenerateEnumsTsc(t *testing.T) {
-	tscPath := filepath.Join("examples", "start-trpc", "web", "node_modules", ".bin", "tsc")
-	if _, err := os.Stat(tscPath); err != nil {
-		var lookupErr error
-		tscPath, lookupErr = exec.LookPath("tsc")
-		if lookupErr != nil {
-			t.Skip("tsc not available, skipping TypeScript compilation check")
-		}
-	}
+	tscPath := typeScriptCompiler(t)
 
 	// Covers awkward enum values that still need to compile as TypeScript.
 	defs := []typemap.TypeDef{
@@ -151,14 +135,7 @@ func TestGenerateEnumsTsc(t *testing.T) {
 
 func TestGenerateTSTscExtended(t *testing.T) {
 	// Extended tsc validation covering all new patterns from typescriptify/tygo.
-	tscPath := filepath.Join("examples", "start-trpc", "web", "node_modules", ".bin", "tsc")
-	if _, err := os.Stat(tscPath); err != nil {
-		var lookupErr error
-		tscPath, lookupErr = exec.LookPath("tsc")
-		if lookupErr != nil {
-			t.Skip("tsc not available, skipping TypeScript compilation check")
-		}
-	}
+	tscPath := typeScriptCompiler(t)
 
 	r := trpcgo.NewRouter()
 
@@ -257,14 +234,7 @@ func TestGenerateTSTscExtended(t *testing.T) {
 }
 
 func TestGenerateTSNodeExecution(t *testing.T) {
-	tscPath := filepath.Join("examples", "start-trpc", "web", "node_modules", ".bin", "tsc")
-	if _, err := os.Stat(tscPath); err != nil {
-		var lookupErr error
-		tscPath, lookupErr = exec.LookPath("tsc")
-		if lookupErr != nil {
-			t.Skip("tsc not available, skipping TypeScript structural check")
-		}
-	}
+	tscPath := typeScriptCompiler(t)
 
 	r := trpcgo.NewRouter()
 	trpcgo.Query(r, "addr.get", func(_ context.Context, _ CgAddress) (CgAddress, error) {

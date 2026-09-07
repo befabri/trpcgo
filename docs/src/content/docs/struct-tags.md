@@ -62,7 +62,7 @@ type User struct {
 
 Type overrides may include commas, such as `Record<string, unknown>`.
 
-Type overrides only change TypeScript; JSON encoding and Zod validation still follow the Go type. To exclude a field from the JSON payload, use `json:"-"`.
+Type replacements only change TypeScript; JSON encoding and Zod validation still follow the Go type. The explicit exclusion `tstype:"-"` also removes the field from the generated schema, so strict schemas reject that key if it is supplied. Go still decodes the field. Use `zod_omit:"true"` to retain a known field while skipping its client validation, or `json:"-"` to exclude it from Go JSON decoding and encoding.
 
 ## Field Documentation
 

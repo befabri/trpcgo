@@ -2,27 +2,78 @@
 
 import { z } from "zod";
 
+const $trpcgoEmail = (value: string): boolean => {
+  const at = value.lastIndexOf("@");
+  if (at <= 0) return false;
+  const local = value.slice(0, at), domain = value.slice(at + 1);
+  // The anchored validator pattern only admits bare addr-specs. Within that
+  // language, these are net/mail's additional quoted-string/dot-atom checks.
+  if (domain.startsWith(".") || domain.endsWith(".") || domain.includes("..")) return false;
+  if (local.startsWith('"')) {
+    if (!local.endsWith('"')) return false;
+    let escaped = false, count = 0;
+    for (const rune of local.slice(1, -1)) {
+      const point = rune.codePointAt(0)!;
+      if (!(point >= 33 && point <= 126 || point >= 128 || point === 32 || point === 9)) return false;
+      if (escaped) { escaped = false; count++; }
+      else if (rune === "\\") escaped = true;
+      else if (rune === '"') return false;
+      else count++;
+    }
+    if (escaped || count === 0) return false;
+  }
+  const machine: readonly (readonly [number, number, number, readonly number[]])[] = [[5,0,0,[]],[3,32,4,[]],[0,3,0,[33,33,35,39,42,43,45,45,47,57,61,61,63,63,65,90,94,126,160,55295,63744,64975,65008,65519]],[1,2,9,[]],[0,5,0,[46,46]],[2,6,2,[]],[0,7,0,[33,33,35,39,42,43,45,45,47,57,61,61,63,63,65,90,94,126,160,55295,63744,64975,65008,65519]],[2,8,3,[]],[1,5,9,[]],[1,4,33,[]],[0,20,0,[34,34]],[0,12,0,[9,9,32,32]],[1,11,13,[]],[0,14,0,[13,13]],[0,16,0,[10,10]],[1,12,16,[]],[0,17,0,[9,9,32,32]],[1,16,19,[]],[1,15,19,[]],[0,20,0,[1,9,11,127,160,55295,63744,64975,65008,65519]],[1,18,30,[]],[0,22,0,[9,9,32,32]],[1,21,23,[]],[0,24,0,[13,13]],[0,26,0,[10,10]],[1,22,26,[]],[2,27,4,[]],[0,28,0,[9,9,32,32]],[2,29,5,[]],[1,26,31,[]],[1,25,31,[]],[0,33,0,[34,34]],[1,2,10,[]],[0,34,0,[64,64]],[0,39,0,[48,57,65,90,97,122,160,55295,63744,64975,65008,65519]],[2,40,0,[]],[0,37,0,[45,46,48,57,65,90,97,122,126,126,160,55295,63744,64975,65008,65519]],[1,36,38,[]],[0,40,0,[48,57,65,90,97,122,160,55295,63744,64975,65008,65519]],[1,35,37,[]],[0,41,0,[46,46]],[1,34,42,[]],[0,47,0,[65,90,97,122,160,55295,63744,64975,65008,65519]],[2,49,0,[]],[0,45,0,[45,46,48,57,65,90,97,122,126,126,160,55295,63744,64975,65008,65519]],[1,44,46,[]],[0,49,0,[65,90,97,122,160,55295,63744,64975,65008,65519]],[1,43,45,[]],[0,50,0,[46,46]],[1,48,50,[]],[3,51,8,[]],[4,0,0,[]]];
+  const symbols = Array.from(value);
+  const add = (start: number, position: number, states: Set<number>): void => {
+    const pending = [start];
+    while (pending.length) {
+      const index = pending.pop()!;
+      if (states.has(index)) continue;
+      states.add(index);
+      const [operation, out, arg] = machine[index]!;
+      if (operation === 1) pending.push(out, arg);
+      else if (operation === 2) pending.push(out);
+      else if (operation === 3 && (!(arg & 4) || position === 0) && (!(arg & 8) || position === symbols.length)) pending.push(out);
+    }
+  };
+  let active = new Set<number>();
+  add(1, 0, active);
+  for (let position = 0; position < symbols.length; position++) {
+    const point = symbols[position]!.codePointAt(0)!;
+    const next = new Set<number>();
+    for (const index of active) {
+      const [operation, out, , ranges] = machine[index]!;
+      if (operation !== 0) continue;
+      for (let i = 0; i < ranges.length; i += 2) {
+        if (point >= ranges[i]! && point <= ranges[i + 1]!) { add(out, position + 1, next); break; }
+      }
+    }
+    if (next.size === 0) return false;
+    active = next;
+  }
+  return Array.from(active).some((index) => machine[index]![0] === 4);
+ };
 export const EmailSchema = z.string().meta({ id: "Email" });
 
-export const RoleSchema = z.enum(["admin", "editor", "viewer"]).meta({ id: "Role" });
+export const RoleSchema = z.string().meta({ id: "Role" });
 
-export const CreateUserInputSchema = z.object({
-  name: z.string().min(1).max(100),
-  email: z.email(),
-  role: z.enum(["admin", "editor", "viewer"]).or(z.literal("")).optional(),
-  bio: z.string().max(500).or(z.literal("")).optional(),
+export const CreateUserInputSchema = z.strictObject({
+  name: z.string().min(1).check(z.refine((value) => Array.from(value).length <= 100)),
+  email: EmailSchema.check(z.refine((value) => z.string().check(z.refine($trpcgoEmail)).safeParse(String(value).replace(/\p{Surrogate}/gu, "\uFFFD")).success)),
+  role: RoleSchema.check(z.refine((value) => (["admin", "editor", "viewer"] as readonly unknown[]).includes(String(value).replace(/\p{Surrogate}/gu, "\uFFFD")))).or(z.literal("")).optional(),
+  bio: z.string().check(z.refine((value) => Array.from(value).length <= 500)).optional(),
 }).meta({ id: "CreateUserInput" });
 
-export const DeleteUserInputSchema = z.object({
-  id: z.string(),
+export const DeleteUserInputSchema = z.strictObject({
+  id: z.string().min(1),
 }).meta({ id: "DeleteUserInput" });
 
-export const GetUserInputSchema = z.object({
-  id: z.string(),
+export const GetUserInputSchema = z.strictObject({
+  id: z.string().min(1),
 }).meta({ id: "GetUserInput" });
 
-export const ListUsersInputSchema = z.object({
-  page: z.int().gte(1),
-  perPage: z.int().gte(1).lte(100),
+export const ListUsersInputSchema = z.strictObject({
+  page: z.int().check(z.refine((value) => Number(value) !== 0)).gte(1),
+  perPage: z.int().check(z.refine((value) => Number(value) !== 0)).gte(1).lte(100),
 }).meta({ id: "ListUsersInput" });
 

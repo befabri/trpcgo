@@ -1,49 +1,38 @@
 package typemap
 
 import (
+	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
 
-var zodFormatBases = map[string]string{
-	"email":            "z.email()",
-	"url":              "z.url()",
-	"uuid":             "z.uuidv4()",
-	"e164":             "z.e164()",
-	"jwt":              "z.jwt()",
-	"base64":           "z.base64()",
-	"ip":               "z.ipv4()",
-	"ipv4":             "z.ipv4()",
-	"ipv6":             "z.ipv6()",
-	"hostname":         "z.hostname()",
-	"hostname_rfc1123": "z.hostname()",
-	"base64url":        "z.base64url()",
-	"hexadecimal":      "z.hex()",
-	"ulid":             "z.ulid()",
-	"mac":              "z.mac()",
-	"cidrv4":           "z.cidrv4()",
-	"cidrv6":           "z.cidrv6()",
-}
-
 var zodGoKindBases = map[string]string{
-	"time.Time": "z.iso.datetime()",
-	"[]byte":    "z.base64()",
-	"int":       "z.int()",
-	"int32":     "z.int32()",
-	"int64":     "z.number()",
-	"uint32":    "z.uint32()",
-	"uint64":    "z.number()",
-	"float32":   "z.float32()",
-	"float64":   "z.float64()",
-	"int8":      "z.number()",
-	"int16":     "z.number()",
-	"uint":      "z.number()",
-	"uint8":     "z.number()",
-	"uint16":    "z.number()",
-	"string":    "z.string()",
-	"bool":      "z.boolean()",
+	"time.Time": "z.string().check(z.refine((value) => " + ZodGoTimeParts("value") + " !== null))",
+	// encoding/json uses base64.StdEncoding, which ignores CR and LF and
+	// accepts empty data. Keep the wire spelling instead of transforming it.
+	"[]byte":      `z.string().check(z.refine((value) => /^(?:[A-Za-z0-9+\/]{4})*(?:[A-Za-z0-9+\/]{2}==|[A-Za-z0-9+\/]{3}=)?$(?![\s\S])/.test(value.replace(/[\r\n]/g, ""))))`,
+	"json.Number": "z.number()",
+	"int":         "z.int()",
+	"int8":        "z.number().check(z.refine(Number.isInteger), z.gte(-128), z.lte(127))",
+	"int16":       "z.number().check(z.refine(Number.isInteger), z.gte(-32768), z.lte(32767))",
+	"int32":       "z.int32()",
+	"int64":       "z.number().check(z.refine((value) => Number.isInteger(value) && value >= -9223372036854775808 && value < 9223372036854775808))",
+	"uint":        "z.number().check(z.refine((value) => Number.isInteger(value) && value >= 0 && value < 18446744073709551616))",
+	"uint8":       "z.number().check(z.refine(Number.isInteger), z.gte(0), z.lte(255))",
+	"uint16":      "z.number().check(z.refine(Number.isInteger), z.gte(0), z.lte(65535))",
+	"uint32":      "z.uint32()",
+	"uint64":      "z.number().check(z.refine((value) => Number.isInteger(value) && value >= 0 && value < 18446744073709551616))",
+	// Decode as Go float32 before checking overflow, while retaining the wire
+	// number. Values slightly above MaxFloat32 can still round to a finite value.
+	"float32": "z.number().check(z.refine((value) => Number.isFinite(Math.fround(value))))",
+	"float64": "z.float64()",
+	"string":  "z.string()",
+	"bool":    "z.boolean()",
 }
 
 var zodTSBases = map[string]string{
@@ -51,51 +40,6 @@ var zodTSBases = map[string]string{
 	"number":  "z.number()",
 	"boolean": "z.boolean()",
 	"unknown": "z.unknown()",
-}
-
-var zodStringBases = map[string]bool{
-	"z.string()":    true,
-	"z.email()":     true,
-	"z.url()":       true,
-	"z.uuidv4()":    true,
-	"z.e164()":      true,
-	"z.jwt()":       true,
-	"z.base64()":    true,
-	"z.base64url()": true,
-	"z.ipv4()":      true,
-	"z.ipv6()":      true,
-	"z.hostname()":  true,
-	"z.hex()":       true,
-	"z.ulid()":      true,
-	"z.mac()":       true,
-	"z.cidrv4()":    true,
-	"z.cidrv6()":    true,
-}
-
-var zodZeroLiterals = map[string]string{
-	"z.int()":     "z.literal(0)",
-	"z.int32()":   "z.literal(0)",
-	"z.uint32()":  "z.literal(0)",
-	"z.float32()": "z.literal(0)",
-	"z.float64()": "z.literal(0)",
-	"z.number()":  "z.literal(0)",
-	"z.boolean()": "z.literal(false)",
-}
-
-var zodMiniChecks = map[string]string{
-	"lowercase":  "lowercase",
-	"uppercase":  "uppercase",
-	"min":        "minLength",
-	"max":        "maxLength",
-	"length":     "length",
-	"gte":        "gte",
-	"lte":        "lte",
-	"gt":         "gt",
-	"lt":         "lt",
-	"regex":      "regex",
-	"startsWith": "startsWith",
-	"endsWith":   "endsWith",
-	"includes":   "includes",
 }
 
 // ZodStyle controls the output format for Zod schema generation.
@@ -106,55 +50,144 @@ const (
 	ZodMini                     // z.optional(z.string().check(z.minLength(5), z.maxLength(100)))
 )
 
-// ZodType converts a Field to its Zod 4 representation.
+// ZodType converts a field to a schema while preserving its JSON wire value.
 func ZodType(f Field, style ZodStyle) string {
-	base := zodBaseType(f)
-	constraints := zodConstraints(f, base)
-
-	// validate:"omitempty" skips validation for the zero value, so the schema
-	// must accept the zero literal as well.
-	omitemptyLit := zodOmitemptyLiteral(f, base, constraints)
-
-	if style == ZodMini {
-		return zodMini(base, constraints, f.Optional, omitemptyLit)
+	base := ZodBaseForTSType(f.Type, f.GoKind)
+	if base == "" {
+		return ""
 	}
-
-	result := base + constraints
-	if strings.HasPrefix(base, "z.enum(") || strings.HasPrefix(base, "z.literal(") || strings.HasPrefix(base, "z.union(") {
-		result = zodWithChecks(base, constraints)
+	result := ApplyZodRules(base, f, style)
+	if f.JSONString {
+		result = zodJSONString(f, result, style)
 	}
-	if omitemptyLit != "" {
-		result += ".or(" + omitemptyLit + ")"
-	}
-	if f.Optional {
-		result += ".optional()"
+	if ZodFieldOptional(f) {
+		result = ZodOptionalField(result, f, style)
 	}
 	return result
 }
 
-// zodOmitemptyLiteral returns the zero-value literal to accept alongside the
-// constrained schema when validate:"omitempty" is set, or "" when the schema
-// already accepts the zero value. Optional covers undefined; this covers the
-// Go zero value.
-func zodOmitemptyLiteral(f Field, base, constraints string) string {
-	if !f.ValidateOmitempty || f.IsPointer {
-		return ""
+// ApplyZodOptional applies field optionality without letting an absent property
+// bypass validator rules on the Go zero value produced by JSON decoding.
+func ApplyZodOptional(base string, f Field, style ZodStyle) string {
+	if !ZodFieldOptional(f) {
+		return base
 	}
-	// base may already be a format, enum, or literal that rejects the zero
-	// value, so derive the zero literal from the unconstrained type.
-	unconstrainedBase := ZodBaseForTSType(f.Type, f.GoKind)
-	if constraints == "" && base == unconstrainedBase {
-		return ""
-	}
-	return zodZeroLiteral(unconstrainedBase)
+	return ZodOptionalField(base, f, style)
 }
 
-// zodZeroLiteral returns the Zod literal for the zero value of the given base type.
-func zodZeroLiteral(base string) string {
-	if isStringBase(base) || strings.HasPrefix(base, "z.enum(") {
-		return `z.literal("")`
+func ZodOptionalField(base string, f Field, style ZodStyle) string {
+	result := ZodOptional(base, style)
+	if len(f.WhenAnyPresent) > 0 {
+		return result
 	}
-	return zodZeroLiterals[base]
+	predicate := ZodMissingValuePredicate(f)
+	if predicate != "true" {
+		if HasCustomZodRule(f.Validate) {
+			// Application predicates run at parse time, including for a missing
+			// field. Evaluating them while constructing the module caches a
+			// potentially stateful result and invokes user code before parsing.
+			return result + ".check(z.refine((value) => value !== undefined || (" + predicate + ")))"
+		}
+		return "((" + predicate + ") ? " + result + " : " + base + ")"
+	}
+	return result
+}
+
+// ZodMissingValuePredicate evaluates the ordered field rules against the Go
+// zero value of an absent JSON property. It intentionally ignores contextual
+// embedded-pointer presence; object emitters apply that context around it.
+func ZodMissingValuePredicate(f Field) string {
+	if f.Required {
+		return "false"
+	}
+	zero := ""
+	switch {
+	case f.IsPointer:
+		zero = "null"
+	case f.GoKind == "string" || f.GoKind == "[]byte" || f.GoKind == "json.Number":
+		zero = `""`
+	case isNumericField(f):
+		zero = "0"
+	case f.GoKind == "bool":
+		zero = "false"
+	case f.GoKind == "map":
+		zero = "{}"
+	case f.GoKind == "slice":
+		zero = "[]"
+	case f.GoKind == "time.Time":
+		zero = `"0001-01-01T00:00:00Z"`
+	}
+	if zero == "" {
+		return "true"
+	}
+	var clauses []string
+	for _, rule := range f.Validate {
+		if rule.Tag == "omitempty" || rule.Tag == "omitzero" {
+			break
+		}
+		if rule.Tag == "dive" {
+			// A nil pointer fails on dive itself; a nil slice or map has no
+			// elements to validate.
+			if f.IsPointer {
+				clauses = append(clauses, "false")
+			}
+			break
+		}
+		if rule.Tag == "omitnil" {
+			if f.IsPointer || f.GoKind == "map" || f.GoKind == "slice" || f.GoKind == "[]byte" {
+				break
+			}
+			// A missing scalar decodes to zero, which is not nil. Its following
+			// validators still run, even when json omitempty made the field optional.
+			continue
+		}
+		if _, cross := CrossFieldOp(rule.Tag); cross {
+			continue
+		}
+		if len(UnsupportedZodRules([]ValidateRule{rule})) > 0 || invalidZodRule(rule, f.GoKind) {
+			continue
+		}
+		if f.IsPointer {
+			clauses = append(clauses, "false")
+			break
+		}
+		if rule.Tag == "required" && (f.GoKind == "map" || f.GoKind == "slice" || f.GoKind == "[]byte") {
+			clauses = append(clauses, "false")
+			break
+		}
+		predicate, ok := zodMissingRulePredicate(f, rule, "("+zero+")")
+		if ok && predicate != "true" {
+			clauses = append(clauses, "("+predicate+")")
+		}
+	}
+	if f.IsPointer && f.ElementValidate != nil && !zodRulesOmitBeforeDive(f.Validate) {
+		// Legacy metadata keeps dive implicit at the ElementValidate boundary.
+		clauses = append(clauses, "false")
+	}
+	if len(clauses) == 0 {
+		return "true"
+	}
+	return strings.Join(clauses, " && ")
+}
+
+func zodRulesOmitBeforeDive(rules []ValidateRule) bool {
+	for _, rule := range rules {
+		if rule.Tag == "dive" {
+			return false
+		}
+		if OmissionZodTag(rule.Tag) {
+			return true
+		}
+	}
+	return false
+}
+
+// ZodOptional wraps a schema using the selected Zod API.
+func ZodOptional(base string, style ZodStyle) string {
+	if style == ZodMini {
+		return "z.optional(" + base + ")"
+	}
+	return base + ".optional()"
 }
 
 // ZodBaseForTSType converts a TypeScript type string to its Zod 4 base type.
@@ -163,23 +196,13 @@ func ZodBaseForTSType(tsType, goKind string) string {
 	return zodBaseFromKindAndType(tsType, goKind, nil)
 }
 
-// zodBaseType determines the Zod base type for a field, checking validate
-// format tags first (they replace z.string() entirely in Zod 4).
-func zodBaseType(f Field) string {
-	return zodBaseFromKindAndType(f.Type, f.GoKind, f.Validate)
-}
-
 func zodBaseFromKindAndType(tsType, goKind string, rules []ValidateRule) string {
-	for _, rule := range rules {
-		if base := zodFormatBases[rule.Tag]; base != "" {
-			return base
-		}
-	}
 
 	// z.enum only takes strings in Zod 4; a numeric oneof becomes a union of
-	// literals.
+	// literals. A json.Number keeps its numeric base: validator compares its
+	// decimal text, which the predicate derives from the wire number.
 	for _, rule := range rules {
-		if rule.Tag == "oneof" && rule.Param != "" {
+		if rule.Tag == "oneof" && rule.Param != "" && goKind != "json.Number" && !invalidZodRule(rule, goKind) {
 			values := parseOneofValues(rule.Param)
 			if len(values) == 0 {
 				continue
@@ -195,10 +218,23 @@ func zodBaseFromKindAndType(tsType, goKind string, rules []ValidateRule) string 
 				return fmt.Sprintf("z.union([%s])", strings.Join(lits, ", "))
 			}
 			quoted := make([]string, len(values))
+			// A replacement rune can also arrive as a lone JSON surrogate. Its
+			// preserved wire value is a string, not the literal type of the rune.
+			if slicesContainReplacementRune(values) {
+				continue
+			}
 			for i, v := range values {
-				quoted[i] = fmt.Sprintf("%q", v)
+				quoted[i] = ZodStringLiteral(v)
 			}
 			return fmt.Sprintf("z.enum([%s])", strings.Join(quoted, ", "))
+		}
+	}
+
+	if goKind == "string" || (goKind == "" && tsType == "string") {
+		for _, rule := range rules {
+			if base := zodFormatBases[rule.Tag]; base != "" {
+				return base
+			}
 		}
 	}
 
@@ -212,126 +248,6 @@ func zodBaseFromKindAndType(tsType, goKind string, rules []ValidateRule) string 
 
 	// Arrays, records, and named types are composed by the caller.
 	return ""
-}
-
-// zodConstraints builds the chained constraint methods for a field. base
-// decides whether min and max are lengths or numeric bounds.
-func zodConstraints(f Field, base string) string {
-	if len(f.Validate) == 0 {
-		return ""
-	}
-
-	isStr := isStringBase(base) || strings.HasPrefix(base, "z.enum(")
-	var parts []string
-	if shouldRequireNonEmptyString(f, isStr) {
-		parts = append(parts, `.min(1)`)
-	}
-
-	for _, rule := range f.Validate {
-		if part := zodConstraint(rule, f, isStr); part != "" {
-			parts = append(parts, part)
-		}
-	}
-
-	return strings.Join(parts, "")
-}
-
-func zodConstraint(rule ValidateRule, f Field, isStr bool) string {
-	if isStr && (rule.Tag == "lowercase" || rule.Tag == "uppercase") {
-		return "." + rule.Tag + "()"
-	}
-	if rule.Tag == "alphanum" {
-		return `.regex(/^[a-zA-Z0-9]*$/)`
-	}
-	if rule.Tag == "alpha" {
-		return `.regex(/^[a-zA-Z]*$/)`
-	}
-	if rule.Tag == "numeric" {
-		return `.regex(/^[0-9]*$/)`
-	}
-	if rule.Param == "" {
-		return ""
-	}
-	method := zodConstraintMethod(rule.Tag, isStr)
-	if method == "" {
-		return ""
-	}
-	if method == "startsWith" || method == "endsWith" || method == "includes" {
-		return fmt.Sprintf(".%s(%q)", method, rule.Param)
-	}
-	// ZodString has no .gt/.gte/.lt/.lte; go-playground/validator treats these on
-	// a string as bounds on its length, so translate them to .min()/.max().
-	if isStr {
-		switch rule.Tag {
-		case "gt", "gte", "lt", "lte":
-			part, ok := zodStringLengthConstraint(rule.Tag, rule.Param)
-			if !ok {
-				return ""
-			}
-			return part
-		}
-	}
-	if f.GoKind != "" && !isStr && !isLengthKind(f.GoKind) && !isNumericField(f) {
-		return ""
-	}
-	param, ok := zodConstraintNumberLiteral(rule.Param, f.GoKind, isStr)
-	if !ok {
-		return ""
-	}
-	if rule.Tag == "len" && !isStr {
-		if !isNumericField(f) {
-			return ""
-		}
-		return fmt.Sprintf(".gte(%s).lte(%s)", param, param)
-	}
-	return fmt.Sprintf(".%s(%s)", method, param)
-}
-
-// zodStringLengthConstraint translates a numeric-comparison validator tag on a
-// string field into the equivalent Zod string-length method. ZodString only
-// exposes inclusive .min()/.max(), so the strict forms gain a ±1 offset:
-// gte=n→.min(n), gt=n→.min(n+1), lte=n→.max(n), lt=n→.max(n-1). Returns false
-// when the parameter is not a safe length literal so the caller drops it.
-func zodStringLengthConstraint(tag, param string) (string, bool) {
-	n, ok := zodLengthValue(param)
-	if !ok {
-		return "", false
-	}
-	switch tag {
-	case "gte":
-		return fmt.Sprintf(".min(%d)", n), true
-	case "gt":
-		if n == math.MaxInt64 {
-			return "", false
-		}
-		return fmt.Sprintf(".min(%d)", n+1), true
-	case "lte":
-		return fmt.Sprintf(".max(%d)", n), true
-	case "lt":
-		if n == math.MinInt64 {
-			return "", false
-		}
-		return fmt.Sprintf(".max(%d)", n-1), true
-	}
-	return "", false
-}
-
-func shouldRequireNonEmptyString(f Field, isStr bool) bool {
-	if !isStr || f.IsPointer || f.ValidateOmitempty {
-		return false
-	}
-	required := false
-	for _, rule := range f.Validate {
-		switch rule.Tag {
-		case "required":
-			required = true
-		case "min", "len":
-			if zodLengthLiteralAtLeast(rule.Param, 1) {
-				return false
-			}
-		}
-	}
-	return required
 }
 
 func zodConstraintNumberLiteral(param, goKind string, isStr bool) (string, bool) {
@@ -403,7 +319,9 @@ func zodFloatLiteral(param string, bitSize int) (string, bool) {
 	if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
 		return "", false
 	}
-	return strconv.FormatFloat(n, 'g', -1, bitSize), true
+	// JavaScript parses literals as float64. Preserve the exact rounded float32
+	// value rather than printing a shorter spelling that requires float32 parsing.
+	return strconv.FormatFloat(n, 'g', -1, 64), true
 }
 
 // ZodNumberLiteral returns param when it is safe to emit as a TypeScript
@@ -460,149 +378,14 @@ func zodNumericOneofLiteral(value, goKind string) (string, bool) {
 	return "", false
 }
 
+var oneofValuePattern = regexp.MustCompile(`'[^']*'|\S+`)
+
 func parseOneofValues(param string) []string {
-	var values []string
-	for i := 0; i < len(param); {
-		for i < len(param) && isASCIISpace(param[i]) {
-			i++
-		}
-		if i >= len(param) {
-			break
-		}
-		start := i
-		if param[i] == '\'' {
-			end := i + 1
-			for end < len(param) && param[end] != '\'' {
-				end++
-			}
-			if end < len(param) {
-				values = append(values, strings.ReplaceAll(param[start:end+1], "'", ""))
-				i = end + 1
-				continue
-			}
-		}
-		for i < len(param) && !isASCIISpace(param[i]) {
-			i++
-		}
-		values = append(values, strings.ReplaceAll(param[start:i], "'", ""))
+	values := oneofValuePattern.FindAllString(param, -1)
+	for i, value := range values {
+		values[i] = strings.ReplaceAll(value, "'", "")
 	}
 	return values
-}
-
-func isASCIISpace(ch byte) bool {
-	switch ch {
-	case ' ', '\t', '\n', '\r', '\f', '\v':
-		return true
-	default:
-		return false
-	}
-}
-
-func zodConstraintMethod(tag string, isStr bool) string {
-	if tag == "min" && !isStr {
-		return "gte"
-	}
-	if tag == "max" && !isStr {
-		return "lte"
-	}
-	methods := map[string]string{
-		"min":        "min",
-		"max":        "max",
-		"len":        "length",
-		"gt":         "gt",
-		"gte":        "gte",
-		"lt":         "lt",
-		"lte":        "lte",
-		"startswith": "startsWith",
-		"endswith":   "endsWith",
-		"contains":   "includes",
-	}
-	return methods[tag]
-}
-
-// zodMini generates Zod Mini functional syntax.
-// omitemptyLit is the zero-value alternative (empty string if not needed).
-func zodMini(base string, constraints string, optional bool, omitemptyLit string) string {
-	inner := zodWithChecks(base, constraints)
-	if omitemptyLit != "" {
-		inner = "z.union([" + inner + ", " + omitemptyLit + "])"
-	}
-	if optional {
-		return fmt.Sprintf("z.optional(%s)", inner)
-	}
-	return inner
-}
-
-// zodWithChecks appends constraints as .check(...) calls. This is the only
-// form zod/mini accepts, and ZodEnum, ZodLiteral, and ZodUnion in standard
-// Zod have no .min() or .max() methods either.
-func zodWithChecks(base, constraints string) string {
-	var checks []string
-	if constraints != "" {
-		remaining := constraints
-		for remaining != "" {
-			if !strings.HasPrefix(remaining, ".") {
-				break
-			}
-			remaining = remaining[1:]
-			parenIdx := strings.IndexByte(remaining, '(')
-			if parenIdx < 0 {
-				break
-			}
-			method := remaining[:parenIdx]
-			closeIdx := zodCallCloseIndex(remaining[parenIdx:])
-			if closeIdx < 0 {
-				break
-			}
-			args := remaining[parenIdx+1 : parenIdx+closeIdx]
-			remaining = remaining[parenIdx+closeIdx+1:]
-
-			if fn := zodMiniChecks[method]; fn != "" {
-				checks = append(checks, fmt.Sprintf("z.%s(%s)", fn, args))
-			}
-		}
-	}
-
-	if len(checks) > 0 {
-		return fmt.Sprintf("%s.check(%s)", base, strings.Join(checks, ", "))
-	}
-	return base
-}
-
-func zodCallCloseIndex(s string) int {
-	depth := 0
-	var quote byte
-	escaped := false
-	for i := range len(s) {
-		ch := s[i]
-		if quote != 0 {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if ch == '\\' {
-				escaped = true
-				continue
-			}
-			if ch == quote {
-				quote = 0
-			}
-			continue
-		}
-
-		switch ch {
-		case '\'', '"', '`':
-			quote = ch
-		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth == 0 {
-				return i
-			}
-		}
-	}
-	return -1
 }
 
 // supportedZodTags is the complete set of validate tags that produce Zod output.
@@ -611,7 +394,10 @@ var supportedZodTags = map[string]bool{
 	// Structural (consumed before Zod generation).
 	"required":  true,
 	"omitempty": true,
+	"omitzero":  true,
 	"dive":      true,
+	"omitnil":   true, "keys": true, "endkeys": true, "structonly": true, "nostructlevel": true,
+	"eq": true, "ne": true, "unique": true, "excludes": true, "containsany": true, "excludesall": true, "startsnotwith": true, "endsnotwith": true, "ascii": true, "printascii": true, "number": true, "alphaunicode": true, "alphanumunicode": true, "base64rawurl": true,
 	// Format tags (become Zod base types).
 	"email":            true,
 	"url":              true,
@@ -659,6 +445,33 @@ var supportedZodTags = map[string]bool{
 	"nefield":  true,
 }
 
+// SupportedZodTags lists every validate tag the generator translates, sorted.
+// The validation contract corpus uses it to prove that each supported tag has
+// Go-versus-Zod coverage, so adding a tag here without fixtures fails a test.
+func SupportedZodTags() []string {
+	return slices.Sorted(maps.Keys(supportedZodTags))
+}
+
+// zodStructuralTags never reject a value by themselves. They decide which
+// later rules run or which container scope those rules apply to, so the Go
+// validator never reports them as a failing tag.
+var zodStructuralTags = map[string]bool{
+	"omitempty":     true,
+	"omitzero":      true,
+	"omitnil":       true,
+	"dive":          true,
+	"keys":          true,
+	"endkeys":       true,
+	"structonly":    true,
+	"nostructlevel": true,
+}
+
+// StructuralZodTag reports whether tag is a supported directive rather than a
+// rule that can reject a value.
+func StructuralZodTag(tag string) bool {
+	return zodStructuralTags[tag]
+}
+
 // crossFieldOps maps cross-field validate tags to their JavaScript comparison operator.
 var crossFieldOps = map[string]string{
 	"gtefield": ">=",
@@ -680,6 +493,13 @@ func CrossFieldOp(tag string) (string, bool) {
 func UnsupportedZodRules(rules []ValidateRule) []ValidateRule {
 	var unsupported []ValidateRule
 	for _, r := range rules {
+		if len(r.Alternatives) > 0 {
+			unsupported = append(unsupported, UnsupportedZodRules(r.Alternatives)...)
+			continue
+		}
+		if r.Custom != nil && !r.Custom.ServerOnly {
+			continue
+		}
 		if !supportedZodTags[r.Tag] {
 			unsupported = append(unsupported, r)
 		}
@@ -693,6 +513,10 @@ func UnsupportedZodRules(rules []ValidateRule) []ValidateRule {
 func InvalidZodRules(rules []ValidateRule, goKind string) []ValidateRule {
 	var invalid []ValidateRule
 	for _, r := range rules {
+		if len(r.Alternatives) > 0 {
+			invalid = append(invalid, InvalidZodRules(r.Alternatives, goKind)...)
+			continue
+		}
 		if invalidZodRule(r, goKind) {
 			invalid = append(invalid, r)
 		}
@@ -701,10 +525,47 @@ func InvalidZodRules(rules []ValidateRule, goKind string) []ValidateRule {
 }
 
 func invalidZodRule(rule ValidateRule, goKind string) bool {
+	if rule.Custom != nil {
+		if len(rule.Custom.GoKinds) == 0 {
+			return false
+		}
+		for _, allowed := range rule.Custom.GoKinds {
+			if goKind == allowed {
+				return false
+			}
+		}
+		return true
+	}
+	if goKind == "json.Number" {
+		goKind = "string"
+	}
+	if len(rule.Alternatives) > 0 {
+		return len(InvalidZodRules(rule.Alternatives, goKind)) > 0 || len(UnsupportedZodRules(rule.Alternatives)) > 0
+	}
+	if (zodFormatBases[rule.Tag] != "" || zodStringRegexes[rule.Tag] != "") && goKind != "" && goKind != "string" && goKind != "json.Number" {
+		return !((rule.Tag == "numeric" || rule.Tag == "number") && isNumericKind(goKind))
+	}
 	if !supportedZodTags[rule.Tag] {
 		return false
 	}
 	switch rule.Tag {
+	case "unique":
+		return goKind != "slice" && goKind != "array" && goKind != "map"
+	case "eq", "ne":
+		if goKind == "string" || goKind == "" {
+			return false
+		}
+		if goKind == "bool" {
+			_, err := strconv.ParseBool(rule.Param)
+			return err != nil
+		}
+		if !isNumericKind(goKind) {
+			return true
+		}
+		_, ok := zodConstraintNumberLiteral(rule.Param, goKind, false)
+		return !ok
+	case "lowercase", "uppercase", "startswith", "endswith", "contains", "excludes", "startsnotwith", "endsnotwith", "containsany", "excludesall":
+		return goKind != "" && goKind != "string" && goKind != "json.Number"
 	case "len":
 		if rule.Param == "" {
 			return true
@@ -728,7 +589,7 @@ func invalidZodRule(rule ValidateRule, goKind string) bool {
 			return true
 		}
 		if !isNumericKind(goKind) {
-			return false
+			return goKind != "string" && goKind != ""
 		}
 		_, ok := zodNumericOneofLiterals(parseOneofValues(rule.Param), goKind)
 		return !ok
@@ -737,15 +598,9 @@ func invalidZodRule(rule ValidateRule, goKind string) bool {
 	}
 }
 
-// isStringBase reports whether base is string-like, which makes min and max
-// lengths rather than numeric bounds.
-func isStringBase(base string) bool {
-	return strings.HasPrefix(base, "z.string()") || zodStringBases[base]
-}
-
 func isLengthKind(goKind string) bool {
 	switch goKind {
-	case "string", "slice", "array", "map":
+	case "string", "slice", "array", "map", "[]byte":
 		return true
 	}
 	return false
@@ -777,4 +632,11 @@ func isNumericKind(goKind string) bool {
 		isUnsignedIntegerKind(goKind) ||
 		goKind == "float32" ||
 		goKind == "float64"
+}
+
+// ZodStringLiteral emits a JavaScript string literal. Go's %q uses escapes
+// such as \a that JavaScript interprets differently, so use JSON's shared grammar.
+func ZodStringLiteral(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
 }

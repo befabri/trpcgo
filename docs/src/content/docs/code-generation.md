@@ -34,6 +34,8 @@ If no package pattern is provided, trpcgo analyzes `.`.
 | `-w`, `-watch` | Watch Go files and regenerate on write/create events. |
 | `-zod` | Zod schema output file. |
 | `-zod-mini` | Emit `zod/mini` functional syntax. |
+| `-zod-config` | JSON configuration for validation aliases, rules, and imports. |
+| `-zod-allow-unknown-fields` | Match `WithStrictInput(false)` in generated objects. |
 | `-enums` | Runtime enum value object output file. |
 
 Examples:
@@ -46,7 +48,7 @@ go tool trpcgo generate -o web/gen/trpc.ts --zod web/gen/zod.ts -w ./...
 ```
 
 :::caution
-Create parent directories before running the CLI. Output paths are relative to where you run the command, even when you set `-dir`.
+Create parent directories before running the CLI. Output and `--zod-config` paths are relative to where you run the command, even when you set `-dir`. Configuration is reloaded on each generation pass. In watch mode, editing or replacing the configuration file also regenerates the output; invalid configuration preserves the previous generated files.
 :::
 
 ## Runtime And Dev Generation

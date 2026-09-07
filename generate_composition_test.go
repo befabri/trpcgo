@@ -6,7 +6,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"go/types"
 	"os"
 	"path/filepath"
 	"testing"
@@ -146,7 +145,8 @@ void jsonExcluded;
 import { CompositionHiddenDerivedSchema, CompositionHiddenExtendedSchema, CompositionHiddenEmbeddingSchema, CompositionHiddenAmbiguousSchema } from './schemas.ts';
 for (const schema of [CompositionHiddenDerivedSchema, CompositionHiddenExtendedSchema, CompositionHiddenEmbeddingSchema, CompositionHiddenAmbiguousSchema]) {
   schema.parse({});
-  if ('value' in schema.parse({ value: 123 })) throw new Error('excluded or ambiguous property was emitted');
+  if ('value' in schema.shape) throw new Error('excluded or ambiguous property was emitted');
+  if (schema.safeParse({ value: 123 }).success) throw new Error('strict schema accepted an excluded or ambiguous property');
 }
 `)
 		})
@@ -209,10 +209,7 @@ func TestStaticFieldComposition(t *testing.T) {
 			typeFile.Decls = append(typeFile.Decls, gen)
 		}
 	}
-	pkg, err := new(types.Config).Check("example.com/reviewed", fset, []*ast.File{typeFile}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pkg := typeCheck(t, "example.com/fieldcomposition", fset, []*ast.File{typeFile})
 
 	t.Run("hidden_shadow", func(t *testing.T) {
 		for _, name := range []string{"CompositionHiddenDerived", "CompositionHiddenExtended", "CompositionHiddenEmbedding", "CompositionHiddenAmbiguous"} {
@@ -265,4 +262,29 @@ func TestStaticFieldComposition(t *testing.T) {
 		}
 		assertTypeScriptCompiles(t, dir, "trpc.ts")
 	})
+}
+
+type InheritanceOrderBase struct {
+	Ab int `json:"ab"`
+}
+
+type InheritanceOrderOuter struct {
+	AB                   int `json:"aB"`
+	InheritanceOrderBase `tstype:",extends"`
+	Arr                  [2]int `json:"arr"`
+}
+
+// encoding/json resolves a case-insensitive key against fields in declaration
+// order, including promoted fields at their embedded position. The flattened
+// schema must present the same order to its key matcher.
+func TestZodInheritanceKeepsGoKeyMatchOrder(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.MustQuery(r, "outer", func(context.Context, InheritanceOrderOuter) (string, error) { return "", nil })
+	checkGeneratedZod(t, r, `
+import { InheritanceOrderOuterSchema as schema, parseGoJSON } from './schemas.ts';
+const result = schema.safeParse(parseGoJSON('{"Ab":7,"ab":1,"arr":[1,2]}'));
+if (!result.success) throw new Error('folded key must select the first Go field: ' + JSON.stringify(result.error.issues));
+const data = result.data as { aB: number; ab: number };
+if (data.aB !== 7 || data.ab !== 1) throw new Error('folded key landed on the wrong field: ' + JSON.stringify(data));
+`)
 }

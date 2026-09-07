@@ -8,11 +8,37 @@ import (
 	"strings"
 
 	"github.com/befabri/trpcgo/internal/typemap"
+	"github.com/befabri/trpcgo/zodconfig"
 )
+
+// ZodOptions configures explicit validation counterparts and JSON object policy.
+// Its zero value matches the router's default strict input decoding.
+type ZodOptions struct {
+	AllowUnknownFields bool
+	Validation         zodconfig.Config
+}
 
 // WriteZodSchemas writes Zod 4 validation schemas for all procedure input types
 // and their transitive dependencies.
-func WriteZodSchemas(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef, style typemap.ZodStyle) error {
+func WriteZodSchemas(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef, style typemap.ZodStyle, options ...ZodOptions) error {
+	var opts ZodOptions
+	if len(options) > 1 {
+		return fmt.Errorf("only one Zod options value is allowed")
+	}
+	if len(options) == 1 {
+		opts = options[0]
+	}
+	if _, err := typemap.CompileValidation(opts.Validation); err != nil {
+		return err
+	}
+	var err error
+	procs, defs, err = specializeZodDefinitions(procs, defs)
+	if err != nil {
+		return err
+	}
+	if err := uniqueDefinitionNames(defs); err != nil {
+		return err
+	}
 	inputTypeNames := make(map[string]bool)
 	for _, p := range procs {
 		if p.InputTS != "void" {
@@ -31,13 +57,21 @@ func WriteZodSchemas(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef, sty
 	}
 
 	reachable := transitiveReachable(inputTypeNames, defsByName)
-	var err error
+	structRules, err := resolveZodStructRules(opts.Validation, defsByName, reachable)
+	if err != nil {
+		return err
+	}
 	defsByName, err = expandZodInheritance(defsByName, reachable)
 	if err != nil {
 		return err
 	}
 
 	plan := topologicalSort(reachable, defsByName)
+	if err := validateZodScopes(plan.Order, defsByName, opts.Validation.Strict); err != nil {
+		return err
+	}
+	var customDeclarations string
+	defsByName, structRules, customDeclarations = hoistZodCustomPredicates(plan.Order, defsByName, structRules)
 
 	ew := newErrWriter(w)
 
@@ -49,35 +83,101 @@ func WriteZodSchemas(w io.Writer, procs []ProcEntry, defs []typemap.TypeDef, sty
 		ew.println(`import { z } from "zod";`)
 	}
 	ew.println("")
+	for _, alias := range slices.Sorted(maps.Keys(opts.Validation.Imports)) {
+		ew.printf("import * as %s from %s;\n", alias, typemap.ZodStringLiteral(opts.Validation.Imports[alias]))
+	}
+	output := ew
+	var generated strings.Builder
+	ew = newErrWriter(&generated)
+	fixedArrays := zodNeedsFixedArrays(defsByName, reachable)
+	arrayContexts := zodArrayContexts(defsByName, reachable)
+	unvalidated := zodUnvalidatedTypes(defsByName, reachable)
+	emitter := zodSchemaEmitter{arrayContexts: arrayContexts, unvalidatedTypes: unvalidated, style: style, decodeJSON: zodNeedsIntegerMaps(defsByName, reachable) || fixedArrays, allowUnknownFields: opts.AllowUnknownFields, structRules: structRules}
+	if emitter.decodeJSON {
+		writeZodJSONHelpers(ew)
+		writeZodIntegerMapHelpers(ew)
+		writeZodWireChecks(ew, plan.Order, defsByName, style, emitter.allowUnknownFields)
+		writeZodMergeHelpers(ew, plan.Order, defsByName, style)
+	}
+	if fixedArrays {
+		writeZodArrayHelpers(ew, plan.Order, defsByName)
+		writeZodArrayRuleHelpers(ew, plan.Order, defsByName)
+	}
+	writeZodRefinementHelpers(ew, defsByName, reachable)
 
-	writeZodShapeTypes(ew, plan, defsByName)
+	writeZodShapeTypes(ew, plan, defsByName, zodVariants{contexts: arrayContexts, unvalidated: unvalidated})
 
 	for _, name := range plan.Order {
 		def, ok := defsByName[name]
 		if !ok {
 			continue
 		}
-		writeZodSchema(ew, def, plan.Cycles, style)
+		emitter.writeSchema(ew, def, plan.Cycles)
 		ew.println("")
+		if arrayContexts[name] {
+			contextual := emitter
+			contextual.arrayContext = true
+			contextual.writeSchema(ew, def, plan.Cycles)
+			ew.println("")
+			contextual.skipValidation = true
+			contextual.writeSchema(ew, def, plan.Cycles)
+			ew.println("")
+		}
+		if unvalidated[name] {
+			plain := emitter
+			plain.unvalidated, plain.skipValidation = true, true
+			plain.writeSchema(ew, def, plan.Cycles)
+			ew.println("")
+		}
 	}
 
-	return ew.err
+	helpers, body := typemap.HoistZodRuntimeHelpers(generated.String())
+	output.print(customDeclarations)
+	output.print(helpers)
+	output.print(body)
+	return output.err
 }
 
-// writeZodSchema emits a single Zod schema definition.
-func writeZodSchema(ew *errWriter, def typemap.TypeDef, cycles map[string]map[string]bool, style typemap.ZodStyle) {
+// zodSchemaEmitter carries module capabilities through named, anonymous and
+// container schemas. Every nested object uses the same decoding policy.
+type zodSchemaEmitter struct {
+	skipValidation     bool
+	arrayContext       bool
+	arrayContexts      map[string]bool
+	unvalidated        bool            // Emitting the rule-free variant of a type validator never enters.
+	unvalidatedTypes   map[string]bool // Types that get a rule-free variant; see zodUnvalidatedTypes.
+	style              typemap.ZodStyle
+	decodeJSON         bool
+	allowUnknownFields bool
+	structRules        map[string][]zodconfig.StructRule
+}
+
+func (e zodSchemaEmitter) writeSchema(ew *errWriter, def typemap.TypeDef, cycles map[string]map[string]bool) {
 	switch def.Kind {
 	case typemap.TypeDefInterface:
-		writeZodObject(ew, def, cycles, style)
+		e.writeObject(ew, def, cycles)
 	case typemap.TypeDefUnion:
-		writeZodEnum(ew, def, style)
+		writeZodEnum(ew, def, e.style)
 	case typemap.TypeDefAlias:
-		writeZodAlias(ew, def, cycles, style)
+		e.writeAlias(ew, def, cycles)
 	}
 }
 
-func writeZodObject(ew *errWriter, def typemap.TypeDef, cycles map[string]map[string]bool, style typemap.ZodStyle) {
-	schemaName := def.Name + "Schema"
+func (e zodSchemaEmitter) writeObject(ew *errWriter, def typemap.TypeDef, cycles map[string]map[string]bool) {
+	ew.printf("export const %sSchema = ", e.schemaName(def.Name))
+	e.writeObjectExpression(ew, def, cycles)
+	def.Name = e.schemaName(def.Name)
+	writeZodMeta(ew, def, e.style)
+	ew.println(";")
+}
+
+// Inline and named structs share one emitter, so nested tags and refinements
+// never need to be reconstructed from a TypeScript object type string.
+func (e zodSchemaEmitter) writeObjectExpression(ew *errWriter, def typemap.TypeDef, cycles map[string]map[string]bool) {
+	style := e.style
+	if e.decodeJSON {
+		ew.print("$goDecodeStruct(")
+	}
 	omitted := map[string]bool{}
 	fields := make(map[string]typemap.Field, len(def.Fields))
 	for _, f := range def.Fields {
@@ -90,19 +190,31 @@ func writeZodObject(ew *errWriter, def typemap.TypeDef, cycles map[string]map[st
 	// A refinement that references an omitted field is dropped.
 	var activeRefs []typemap.Refinement
 	for _, ref := range def.Refinements {
-		if !omitted[ref.Field] && !omitted[ref.OtherField] {
+		if !e.skipValidation && !zodRefinementOmitted(ref, omitted) {
 			activeRefs = append(activeRefs, ref)
 		}
 	}
 
-	ew.printf("export const %s = z.object({\n", schemaName)
+	constructor := "z.strictObject"
+	if e.allowUnknownFields {
+		constructor = "z.looseObject"
+	}
+	ew.print(constructor + "({\n")
 
 	for _, f := range def.Fields {
 		if f.ZodOmit {
+			// The field is known to Go but intentionally has no client validation.
+			// It keeps its TypeScript type so parsed values stay assignable to the
+			// procedure input. Zod objects reject an absent key unless its schema
+			// is optional, so the property may always be omitted.
+			passthrough := typemap.ZodOptional("z.custom<"+zodOmittedFieldType(f)+">()", style)
+			ew.printf("  %s: %s,\n", typemap.QuotePropName(f.Name), passthrough)
 			continue
 		}
-		zodType := fieldToZod(f, style)
-		for _, ref := range extractTypeRefs(zodFieldType(f)) {
+		zodType := e.fieldToZod(f)
+		// Use the same concrete metadata as dependency discovery. Anonymous
+		// generic bodies can reference a specialization absent from the public TS type.
+		for _, ref := range extractTypeRefs(zodShapeFieldType(f)) {
 			if cycles[def.Name][ref] {
 				// z.lazy needs an explicit type annotation or TypeScript cannot
 				// infer a schema that refers to itself.
@@ -110,19 +222,20 @@ func writeZodObject(ew *errWriter, def typemap.TypeDef, cycles map[string]map[st
 				if style == typemap.ZodMini {
 					annotation = "z.ZodMiniType"
 				}
-				fieldType := fmt.Sprintf("$%s[%q]", def.Name, f.Name)
+				fieldType := "$" + e.schemaName(def.Name) + "[" + typemap.ZodStringLiteral(f.Name) + "]"
 				inner := f
 				inner.Optional = false
-				if f.Optional {
+				inner.ValidateOmitempty = false
+				if typemap.ZodFieldOptional(f) {
 					fieldType = "Exclude<" + fieldType + ", undefined>"
 				}
-				zodType = fmt.Sprintf("z.lazy((): %s<%s, %s> => %s)", annotation, fieldType, fieldType, fieldToZod(inner, style))
-				zodType = optionalZod(zodType, f.Optional, style)
+				zodType = fmt.Sprintf("z.lazy((): %s<%s, %s> => %s)", annotation, fieldType, fieldType, e.fieldToZod(inner))
+				zodType = typemap.ApplyZodOptional(zodType, f, style)
 				break
 			}
 		}
 		if f.Comment != "" && style != typemap.ZodMini {
-			zodType += fmt.Sprintf(".describe(%q)", f.Comment)
+			zodType += ".describe(" + typemap.ZodStringLiteral(f.Comment) + ")"
 		}
 		comment := validationComment(f.UnsupportedZod, f.InvalidZod)
 		ew.printf("  %s: %s,%s\n", typemap.QuotePropName(f.Name), zodType, comment)
@@ -130,6 +243,12 @@ func writeZodObject(ew *errWriter, def typemap.TypeDef, cycles map[string]map[st
 
 	// No semicolon yet: refinements and meta follow.
 	ew.print("})")
+
+	if !e.skipValidation {
+		writeZodEmbeddedPresence(ew, def.Fields, style)
+		writeZodMissingCustomChecks(ew, def.Fields)
+		e.writeMissingArrayChecks(ew, def.Fields)
+	}
 
 	// zod/mini has no .refine method; it takes z.refine through .check().
 	for _, ref := range activeRefs {
@@ -143,16 +262,57 @@ func writeZodObject(ew *errWriter, def typemap.TypeDef, cycles map[string]map[st
 			dataParam = "(data: any)"
 		}
 		ew.printf("  %s => %s,\n", dataParam, zodRefinementPredicate(ref, fields))
-		message := fmt.Sprintf("%s must be %s %s", ref.Field, ref.Op, ref.OtherField)
-		ew.printf("  { message: %q, path: [%q] }\n", message, ref.Field)
+		message := zodRefinementMessage(ref)
+		ew.printf("  { message: %s, path: [%s] }\n", typemap.ZodStringLiteral(message), typemap.ZodStringLiteral(ref.Field))
 		if style == typemap.ZodMini {
 			ew.print("))")
 		} else {
 			ew.print(")")
 		}
 	}
-	writeZodMeta(ew, def, style)
-	ew.println(";")
+	for _, rule := range e.structRules[def.Name] {
+		if e.skipValidation {
+			continue
+		}
+		var path []string
+		for _, part := range rule.Path {
+			path = append(path, typemap.ZodStringLiteral(part))
+		}
+		message := rule.Message
+		if message == "" {
+			message = "Custom struct validation failed"
+		}
+		ew.printf(".check(z.refine((data) => %s, { message: %s, path: [%s] }))", typemap.ZodCustomPredicate(rule.Predicate, "data"), typemap.ZodStringLiteral(message), strings.Join(path, ", "))
+	}
+	if e.decodeJSON {
+		ew.print(", (value) => " + zodWireObjectPredicate(def.Fields, "value", style))
+		previous := "undefined"
+		if e.arrayContext {
+			previous = zodZeroObjectForValue(def, "value")
+		}
+		ew.print(", (value) => " + zodMergeObjectExpression(def, "value", previous))
+		if e.arrayContext {
+			ew.print(", true")
+		}
+		ew.print(")")
+	}
+}
+
+func zodRefinementOmitted(ref typemap.Refinement, omitted map[string]bool) bool {
+	// An explicitly server-only alternative may satisfy the entire OR rule.
+	// Applying the remaining branches would incorrectly reject valid inputs.
+	if ref.ScalarRule != nil && ref.ScalarRule.Custom != nil && ref.ScalarRule.Custom.ServerOnly {
+		return true
+	}
+	if omitted[ref.Field] || (!ref.MissingTarget && ref.OtherHidden == nil && ref.ScalarRule == nil && omitted[ref.OtherField]) {
+		return true
+	}
+	for _, branch := range ref.Alternatives {
+		if zodRefinementOmitted(branch, omitted) {
+			return true
+		}
+	}
+	return false
 }
 
 func zodDataAccess(prop string) string {
@@ -171,8 +331,19 @@ func unsupportedComment(unsupported []typemap.ValidateRule) string {
 
 func validationComment(unsupported, invalid []typemap.ValidateRule) string {
 	var parts []string
-	if len(unsupported) > 0 {
-		parts = append(parts, "unsupported: "+ruleListComment(unsupported))
+	var serverOnly, unmapped []typemap.ValidateRule
+	for _, rule := range unsupported {
+		if rule.Custom != nil && rule.Custom.ServerOnly {
+			serverOnly = append(serverOnly, rule)
+		} else {
+			unmapped = append(unmapped, rule)
+		}
+	}
+	if len(serverOnly) > 0 {
+		parts = append(parts, "server-only: "+ruleListComment(serverOnly))
+	}
+	if len(unmapped) > 0 {
+		parts = append(parts, "unsupported: "+ruleListComment(unmapped))
 	}
 	if len(invalid) > 0 {
 		parts = append(parts, "invalid zod params: "+ruleListComment(invalid))
@@ -205,189 +376,276 @@ func safeBlockCommentText(s string) string {
 // has a name. Skipped for ZodMini since zod/mini doesn't support .meta().
 func writeZodMeta(ew *errWriter, def typemap.TypeDef, style typemap.ZodStyle) {
 	if def.Name != "" && style != typemap.ZodMini {
-		ew.printf(".meta({ id: %q })", def.Name)
+		ew.printf(".meta({ id: %s })", typemap.ZodStringLiteral(def.Name))
 	}
 }
 
+// Go constants document common values; they do not close a named scalar type.
+// Only an explicit validator such as oneof should restrict accepted values.
 func writeZodEnum(ew *errWriter, def typemap.TypeDef, style typemap.ZodStyle) {
-	schemaName := def.Name + "Schema"
-
-	// z.enum() only accepts string literals.
-	if len(def.UnionMembers) > 0 && !def.IsStringUnion() {
-		literals := make([]string, len(def.UnionMembers))
-		for i, m := range def.UnionMembers {
-			literals[i] = "z.literal(" + m + ")"
-		}
-		ew.printf("export const %s = %s", schemaName, zodLiteralUnion(literals))
-	} else {
-		ew.printf("export const %s = z.enum([%s])", schemaName, strings.Join(def.UnionMembers, ", "))
-	}
+	field := enumUnderlyingField(def)
+	ew.printf("export const %sSchema = %s", def.Name, typemap.ZodType(field, style))
 	writeZodMeta(ew, def, style)
 	ew.println(";")
 }
 
-func zodLiteralUnion(literals []string) string {
-	if len(literals) == 1 {
-		return literals[0]
+func enumUnderlyingField(def typemap.TypeDef) typemap.Field {
+	if def.Underlying != nil {
+		return *def.Underlying
 	}
-	return "z.union([" + strings.Join(literals, ", ") + "])"
+	if def.IsStringUnion() {
+		return typemap.Field{Type: "string", GoKind: "string"}
+	}
+	if len(def.UnionMembers) > 0 && (def.UnionMembers[0] == "true" || def.UnionMembers[0] == "false") {
+		return typemap.Field{Type: "boolean", GoKind: "bool"}
+	}
+	return typemap.Field{Type: "number"}
 }
 
-func writeZodAlias(ew *errWriter, def typemap.TypeDef, cycles map[string]map[string]bool, style typemap.ZodStyle) {
-	zodStr := fieldToZod(typemap.Field{Type: def.AliasOf}, style)
+func (e zodSchemaEmitter) writeAlias(ew *errWriter, def typemap.TypeDef, cycles map[string]map[string]bool) {
+	style := e.style
+	underlying := typemap.Field{Type: def.AliasOf}
+	if def.Underlying != nil {
+		underlying = *def.Underlying
+	}
+	zodStr := e.fieldToZod(underlying)
 	if len(cycles[def.Name]) > 0 {
 		annotation := "z.ZodType"
 		if style == typemap.ZodMini {
 			annotation = "z.ZodMiniType"
 		}
-		zodStr = fmt.Sprintf("z.lazy((): %s<$%s, $%s> => %s)", annotation, def.Name, def.Name, zodStr)
+		zodStr = fmt.Sprintf("z.lazy((): %s<$%s, $%s> => %s)", annotation, e.schemaName(def.Name), e.schemaName(def.Name), zodStr)
 	}
+	def.Name = e.schemaName(def.Name)
 	ew.printf("export const %sSchema = %s", def.Name, zodStr)
 	writeZodMeta(ew, def, style)
 	ew.println(";")
 }
 
-// fieldToZod converts a single field to its Zod representation.
+// fieldToZod converts a field from preserved Go metadata and validation scopes.
 func fieldToZod(f typemap.Field, style typemap.ZodStyle) string {
+	return (zodSchemaEmitter{style: style}).fieldToZod(f)
+}
+
+func (e zodSchemaEmitter) fieldToZod(f typemap.Field) string {
+	scope, err := typemap.FieldValidationScope(f)
+	if err != nil {
+		// WriteZodSchemas reports this error before emitting a module.
+		return "z.never() /* " + safeBlockCommentText(err.Error()) + " */"
+	}
+	return e.scopedFieldToZod(f, scope)
+}
+
+func (e zodSchemaEmitter) scopedFieldToZod(f typemap.Field, scope typemap.ValidationScope) string {
+	if e.skipValidation {
+		scope = typemap.ValidationScope{}
+		f.ValidateOmitempty = false
+	}
+	style := e.style
 	f.Type = zodFieldType(f)
-	base := typemap.ZodBaseForTSType(f.Type, f.GoKind)
-
-	if base != "" {
-		return typemap.ZodType(f, style)
-	}
-
-	tsType := f.Type
-
-	if before, ok := strings.CutSuffix(tsType, "[]"); ok {
-		return arrayFieldToZod(before, f, style)
-	}
-
-	if strings.HasPrefix(tsType, "Record<") {
-		return recordFieldToZod(tsType, f, style)
-	}
-
-	if fields, ok := inlineTypeFields(tsType); ok {
-		var props []string
-		for _, field := range fields {
-			props = append(props, typemap.QuotePropName(field.Name)+": "+fieldToZod(field, style))
+	f.Validate = scope.Rules
+	f.ElementValidate = nil
+	optional, omitEmpty := f.Optional, f.ValidateOmitempty
+	f.Optional = false
+	f.ValidateOmitempty = false
+	wrap := func(schema string) string {
+		field := f
+		field.Optional = optional
+		field.ValidateOmitempty = omitEmpty
+		if scope.Element != nil {
+			// Keep the dive boundary visible to the missing-value predicate: a
+			// nil pointer fails on dive itself when nothing omits it first.
+			field.Validate = append(slices.Clone(field.Validate), typemap.ValidateRule{Tag: "dive"})
 		}
-		return optionalZod("z.object({ "+strings.Join(props, ", ")+" })", f.Optional, style)
-	}
-	if tsType == "never" {
-		return optionalZod("z.never()", f.Optional, style)
-	}
-
-	// Cyclic references are wrapped in z.lazy by writeZodObject, not here.
-	refName := stripGenericArgs(tsType)
-	ref := refName + "Schema"
-
-	if f.Optional {
-		if style == typemap.ZodMini {
-			return fmt.Sprintf("z.optional(%s)", ref)
+		if typemap.ZodFieldOptional(field) && typemap.HasCustomZodRule(field.Validate) {
+			// Object schemas intentionally ignore child errors for absent optional
+			// keys. The containing object emits this dynamic missing-value check.
+			return typemap.ZodOptional(e.arrayContextNullable(schema, field), style)
 		}
-		return ref + ".optional()"
+		return typemap.ApplyZodOptional(e.arrayContextNullable(schema, field), field, style)
 	}
-	return ref
-}
-
-func arrayFieldToZod(elemType string, f typemap.Field, style typemap.ZodStyle) string {
-	elemType = strings.TrimPrefix(elemType, "(")
-	elemType = strings.TrimSuffix(elemType, ")")
-	result := fmt.Sprintf("z.array(%s)", elementZod(elemType, f, style))
-	result += arrayConstraints(f.Validate, style)
-	return optionalZod(result, f.Optional, style)
-}
-
-func elementZod(elemType string, f typemap.Field, style typemap.ZodStyle) string {
-	rules, elementRules := typemap.SplitAtDive(f.ElementValidate)
-	element := typemap.Field{
-		Type:              elemType,
-		Validate:          rules,
-		ValidateOmitempty: slices.ContainsFunc(rules, func(rule typemap.ValidateRule) bool { return rule.Tag == "omitempty" }),
-		ElementValidate:   elementRules,
-	}
-	if f.Element != nil {
-		element.GoKind = f.Element.GoKind
-		element.IsPointer = f.Element.IsPointer
-		element.Element = f.Element.Element
-	}
-	return fieldToZod(element, style)
-}
-
-func arrayConstraints(rules []typemap.ValidateRule, style typemap.ZodStyle) string {
-	if style == typemap.ZodMini {
-		return arrayConstraintsMini(rules)
-	}
-	var result strings.Builder
-	for _, rule := range rules {
-		if rule.Param == "" {
-			continue
-		}
-		switch rule.Tag {
-		case "min", "max", "len":
-			method := rule.Tag
-			if method == "len" {
-				method = "length"
-			}
-			param, ok := typemap.ZodLengthLiteral(rule.Param)
-			if !ok {
-				continue
-			}
-			fmt.Fprintf(&result, ".%s(%s)", method, param)
-		}
-	}
-	return result.String()
-}
-
-func arrayConstraintsMini(rules []typemap.ValidateRule) string {
-	var checks []string
-	for _, rule := range rules {
-		if rule.Param == "" {
-			continue
-		}
-		switch rule.Tag {
-		case "min":
-			param, ok := typemap.ZodLengthLiteral(rule.Param)
-			if ok {
-				checks = append(checks, fmt.Sprintf("z.minLength(%s)", param))
-			}
-		case "max":
-			param, ok := typemap.ZodLengthLiteral(rule.Param)
-			if ok {
-				checks = append(checks, fmt.Sprintf("z.maxLength(%s)", param))
-			}
-		case "len":
-			param, ok := typemap.ZodLengthLiteral(rule.Param)
-			if ok {
-				checks = append(checks, fmt.Sprintf("z.length(%s)", param))
+	// A named container's schema can be reused until a dive applies new rules
+	// to its elements. At that point compose its preserved underlying shape.
+	if scope.Element != nil && f.Element != nil && f.Element.Type != "" {
+		switch f.GoKind {
+		case "slice", "array":
+			f.Type = "(" + f.Element.Type + ")[]"
+		case "map":
+			if f.Key != nil {
+				f.Type = "Record<" + f.Key.Type + ", " + f.Element.Type + ">"
 			}
 		}
 	}
-	if len(checks) == 0 {
-		return ""
+	// validator never enters the struct behind structonly or nostructlevel, so
+	// that struct's schema checks the wire shape without applying its rules.
+	nested := e
+	if zodStructOnlyScope(scope.Rules) {
+		nested.skipValidation, nested.unvalidated = true, true
 	}
-	return fmt.Sprintf(".check(%s)", strings.Join(checks, ", "))
+	var base string
+	var integerKey, wireValue string
+	switch {
+	case f.Inline != nil:
+		var out strings.Builder
+		ew := newErrWriter(&out)
+		nested.writeObjectExpression(ew, *f.Inline, nil)
+		base = out.String()
+	case f.JSONString:
+		return wrap(typemap.ZodType(f, style))
+	case f.GoKind == "[]byte" && scope.Element != nil:
+		child := typemap.Field{Type: "number", GoKind: "uint8"}
+		bytes := "z.array(" + e.scopedFieldToZod(child, *scope.Element) + ")"
+		base = typemap.ZodBaseForTSType("string", "[]byte") + ".check(z.refine((value) => { try { return " + bytes + ".safeParse(Array.from(atob(value), (byte) => byte.charCodeAt(0))).success; } catch { return false; } }))"
+	default:
+		if element, ok := strings.CutSuffix(f.Type, "[]"); ok {
+			element = unwrapZodParentheses(element)
+			child := zodElementField(element, f.Element)
+			childScope := typemap.ValidationScope{}
+			if scope.Element != nil {
+				childScope = *scope.Element
+			}
+			// Element rules run only after dive; without it validator never
+			// enters element structs either.
+			childEmitter := e
+			childEmitter.arrayContext = e.arrayContext || f.ArrayLen != nil
+			childEmitter.skipValidation = e.skipValidation || scope.Element == nil
+			childEmitter.unvalidated = e.unvalidated || childEmitter.skipValidation && !childEmitter.arrayContext
+			base = "z.array(" + childEmitter.scopedFieldToZod(child, childScope) + ")"
+			if f.GoKind == "" {
+				f.GoKind = "slice"
+			}
+		} else if key, value, ok := zodRecordTypes(f.Type); ok {
+			keyField := zodElementField(key, f.Key)
+			// Manually supplied TypeDefs may omit Go metadata. Numeric JSON map
+			// keys still need an integer decoder before BigInt normalization.
+			if keyField.Type == "number" && keyField.GoKind == "" {
+				keyField.GoKind = "int"
+			}
+			keyScope := typemap.ValidationScope{}
+			if scope.Keys != nil {
+				keyScope = *scope.Keys
+			}
+			// Decode integer aliases before key/value and container validators.
+			if zodIntegerKind(keyField.GoKind) {
+				keyField.Type, keyField.JSONString, keyField.MapKey = "string", true, true
+				wireKey := keyField
+				wireKey.Validate, wireKey.EnumValues = nil, nil
+				integerKey = typemap.ZodType(wireKey, style)
+			}
+			keyZod := e.scopedFieldToZod(keyField, keyScope)
+			child := zodElementField(value, f.Element)
+			if integerKey != "" {
+				wireValue = zodWirePredicate(child, "value", style)
+			}
+			childScope := typemap.ValidationScope{}
+			if scope.Element != nil {
+				childScope = *scope.Element
+			}
+			childEmitter := e
+			childEmitter.skipValidation = e.skipValidation || scope.Element == nil
+			childEmitter.unvalidated = e.unvalidated || childEmitter.skipValidation && !e.arrayContext
+			valueZod := childEmitter.scopedFieldToZod(child, childScope)
+			constructor := "z.record"
+			// Zod enum-key records are exhaustive; Go maps are always sparse.
+			if key != "string" && key != "number" {
+				constructor = "z.partialRecord"
+			}
+			base = constructor + "(" + keyZod + ", " + valueZod + ")"
+			if f.GoKind == "" {
+				f.GoKind = "map"
+			}
+		} else if fields, ok := inlineTypeFields(f.Type); ok {
+			// Compatibility for manually supplied TypeDef values. Mapped Go fields
+			// carry Inline metadata and use the first branch above.
+			var out strings.Builder
+			nested.writeObjectExpression(newErrWriter(&out), typemap.TypeDef{Fields: fields}, nil)
+			base = out.String()
+		} else if f.Type == "never" {
+			base = "z.never()"
+		} else if primitive := typemap.ZodBaseForTSType(f.Type, ""); primitive != "" {
+			return wrap(typemap.ZodType(f, style))
+		} else {
+			// Named schemas retain enum and alias constraints. GoKind is still used
+			// when applying field rules, but must never replace the named schema.
+			if strings.Contains(f.Type, "<") {
+				base = "z.never() /* generic schema requires a concrete Go instantiation */"
+			} else {
+				base = nested.schemaName(f.Type) + "Schema"
+			}
+		}
+	}
+	zeroSchema := ""
+	if f.ArrayLen != nil && !e.skipValidation {
+		for _, rule := range f.Validate {
+			if rule.Tag == "omitempty" && !f.IsPointer || rule.Tag == "omitzero" {
+				wireEmitter := e
+				wireEmitter.skipValidation = true
+				wireField := f
+				wireField.Optional, wireField.ValidateOmitempty = false, false
+				wireField.WhenAnyPresent = nil
+				zeroSchema = wireEmitter.scopedFieldToZod(wireField, typemap.ValidationScope{})
+				break
+			}
+		}
+	}
+	base = applyZodArrayRules(base, f, style, zeroSchema)
+	if f.ArrayLen != nil && strings.HasSuffix(f.Type, "[]") {
+		child := zodElementField(unwrapZodParentheses(strings.TrimSuffix(f.Type, "[]")), f.Element)
+		base = zodWrapFixedArray(base, f, child)
+	}
+	if integerKey != "" {
+		base = "$goIntegerMap(" + base + ", " + integerKey + ", (value: unknown) => " + wireValue + ")"
+	}
+	return wrap(base)
 }
 
-func recordFieldToZod(tsType string, f typemap.Field, style typemap.ZodStyle) string {
-	inner := tsType[len("Record<") : len(tsType)-1]
-	parts := splitTopLevel(inner, ',')
+func zodElementField(ts string, element *typemap.ElementType) typemap.Field {
+	field := typemap.Field{Type: ts}
+	if element != nil {
+		if element.Type != "" {
+			field.Type = element.Type
+		}
+		field.GoKind = element.GoKind
+		field.ArrayLen = element.ArrayLen
+		field.Equality = element.Equality
+		field.GoType = element.GoType
+		field.EnumValues = element.EnumValues
+		field.IsPointer = element.IsPointer
+		field.Inline = element.Inline
+		field.Element = element.Element
+		field.Key = element.Key
+	}
+	return field
+}
+
+func unwrapZodParentheses(ts string) string {
+	if strings.HasPrefix(ts, "(") && strings.HasSuffix(ts, ")") {
+		return ts[1 : len(ts)-1]
+	}
+	return ts
+}
+
+func zodRecordTypes(ts string) (key, value string, ok bool) {
+	if strings.HasPrefix(ts, "Partial<") && strings.HasSuffix(ts, ">") {
+		ts = ts[len("Partial<") : len(ts)-1]
+	}
+	if !strings.HasPrefix(ts, "Record<") || !strings.HasSuffix(ts, ">") {
+		return "", "", false
+	}
+	parts := splitTopLevel(ts[len("Record<"):len(ts)-1], ',')
 	if len(parts) != 2 {
-		return optionalZod(stripGenericArgs(tsType)+"Schema", f.Optional, style)
+		return "", "", false
 	}
-	keyZod := fieldToZod(typemap.Field{Type: strings.TrimSpace(parts[0])}, style)
-	valZod := elementZod(strings.TrimSpace(parts[1]), f, style)
-	return optionalZod(fmt.Sprintf("z.record(%s, %s)", keyZod, valZod), f.Optional, style)
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), true
 }
 
-func optionalZod(result string, optional bool, style typemap.ZodStyle) string {
-	if !optional {
-		return result
+func zodNumericKind(kind string) bool {
+	switch kind {
+	case "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "float32", "float64":
+		return true
+	default:
+		return false
 	}
-	if style == typemap.ZodMini {
-		return fmt.Sprintf("z.optional(%s)", result)
-	}
-	return result + ".optional()"
 }
 
 // stripGenericArgs removes generic type arguments: "Foo<Bar>" → "Foo"

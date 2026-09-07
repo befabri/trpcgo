@@ -355,3 +355,77 @@ func TestWatchGenerateLoopStopsWhenDoneCloses(t *testing.T) {
 		return nil
 	})
 }
+
+func TestGenerateLoadsValidationConfigurationOnEveryPass(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "validation.json")
+	typesPath, zodPath := filepath.Join(dir, "trpc.ts"), filepath.Join(dir, "schemas.ts")
+	args := []string{"generate", "--dir", filepath.Join(testRepoRoot(t), "testdata", "validationconfig"), "-o", typesPath, "--zod", zodPath, "--zod-config", configPath, "--zod-allow-unknown-fields"}
+	for _, minimum := range []string{"2", "5"} {
+		config := `{"tagName":"binding","aliases":{"requiredText":"required,min=` + minimum + `","afterStart":"gtfield=Start","nonemptyList":"min=1,dive,required"}}`
+		if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := run(args, new(bytes.Buffer), new(bytes.Buffer)); err != nil {
+			t.Fatal(err)
+		}
+		output, err := os.ReadFile(zodPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, expected := range []string{"z.looseObject(", "Array.from(value).length >= " + minimum + ")", "data.end > data.start"} {
+			if !strings.Contains(string(output), expected) {
+				t.Fatalf("configured output missing %s:\n%s", expected, output)
+			}
+		}
+		types, err := os.ReadFile(typesPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(types), "name?:") {
+			t.Fatalf("required alias applied after optionality binding:\n%s", types)
+		}
+	}
+	beforeTypes, _ := os.ReadFile(typesPath)
+	beforeZod, _ := os.ReadFile(zodPath)
+	if err := os.WriteFile(configPath, []byte(`{"aliases":{"a":"b","b":"a"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if err := run(args, &stdout, new(bytes.Buffer)); err == nil {
+		t.Fatal("cyclic aliases accepted")
+	}
+	afterTypes, _ := os.ReadFile(typesPath)
+	afterZod, _ := os.ReadFile(zodPath)
+	if !bytes.Equal(beforeTypes, afterTypes) || !bytes.Equal(beforeZod, afterZod) || stdout.Len() != 0 {
+		t.Fatal("invalid configuration replaced generated outputs")
+	}
+}
+
+func TestWatchGenerateLoopRegeneratesForConfigReplacement(t *testing.T) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+	path := filepath.Join(t.TempDir(), "validation.json")
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	generated := make(chan struct{}, 1)
+	go func() {
+		defer close(finished)
+		watchGenerateLoop(generateOptions{zodConfig: path}, watcher, done, func(time.Duration) <-chan time.Time {
+			ready := make(chan time.Time, 1)
+			ready <- time.Now()
+			return ready
+		}, func(generateOptions) error { generated <- struct{}{}; return nil })
+	}()
+	watcher.Events <- fsnotify.Event{Name: path, Op: fsnotify.Rename}
+	select {
+	case <-generated:
+	case <-time.After(5 * time.Second):
+		t.Error("config replacement did not trigger regeneration")
+	}
+	close(done)
+	<-finished
+}

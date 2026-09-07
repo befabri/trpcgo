@@ -19,11 +19,11 @@ import "github.com/go-playground/validator/v10"
 validate := validator.New()
 
 router := trpcgo.NewRouter(
-    trpcgo.WithValidator(validate.Struct),
+    trpcgo.WithValidator(trpcgo.StructValidator(validate.Struct)),
 )
 ```
 
-Validation runs after JSON decoding and only for struct inputs.
+`WithValidator` runs after JSON decoding for every typed input. The `StructValidator` adapter applies the struct validator to structs reachable through root pointers, slices, arrays, and map values. Use your own callback for scalar or collection-level rules.
 
 ## Reject Unknown Fields
 

@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"strings"
@@ -28,9 +29,13 @@ func expandZodInheritance(defs map[string]typemap.TypeDef, reachable map[string]
 		}
 		visiting[name] = true
 		defer delete(visiting, name)
-		var fields []typemap.Field
+		type inherited struct {
+			at     int
+			fields []typemap.Field
+		}
+		var bases []inherited
 		var refs []typemap.Refinement
-		for _, ext := range def.Extends {
+		for i, ext := range def.Extends {
 			baseName, partial := strings.CutPrefix(ext, "Partial<")
 			if partial {
 				baseName = strings.TrimSuffix(baseName, ">")
@@ -53,8 +58,13 @@ func expandZodInheritance(defs map[string]typemap.TypeDef, reachable map[string]
 				var presence []string
 				for i := range baseFields {
 					baseFields[i].Optional = true
-					if !baseFields[i].ZodOmit {
-						presence = append(presence, baseFields[i].Name)
+					// Omitted validation does not prevent a supplied field from
+					// allocating the embedded Go pointer.
+					presence = append(presence, baseFields[i].Name)
+				}
+				for i := range baseFields {
+					if len(baseFields[i].WhenAnyPresent) == 0 {
+						baseFields[i].WhenAnyPresent = presence
 					}
 				}
 				for i := range baseRefs {
@@ -63,10 +73,27 @@ func expandZodInheritance(defs map[string]typemap.TypeDef, reachable map[string]
 					}
 				}
 			}
-			fields = append(fields, baseFields...)
+			at := 0
+			if i < len(def.ExtendsAt) {
+				at = def.ExtendsAt[i]
+			}
+			bases = append(bases, inherited{at: at, fields: baseFields})
 			refs = append(refs, baseRefs...)
 		}
-		def.Fields = append(fields, def.Fields...)
+		// Inherited fields take the place of their embedded Go field, so the
+		// flattened list follows encoding/json's byIndex order. That order
+		// decides which field a case-insensitive key match selects.
+		slices.SortStableFunc(bases, func(a, b inherited) int { return cmp.Compare(a.at, b.at) })
+		var fields []typemap.Field
+		next := 0
+		for _, base := range bases {
+			for next < base.at && next < len(def.Fields) {
+				fields = append(fields, def.Fields[next])
+				next++
+			}
+			fields = append(fields, base.fields...)
+		}
+		def.Fields = append(fields, def.Fields[next:]...)
 		def.Refinements = append(refs, def.Refinements...)
 		def.Extends = nil
 		expanded[name] = def

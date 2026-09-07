@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+
+	"github.com/befabri/trpcgo/zodconfig"
 )
 
 const defaultMaxBatchSize int = 10 //
@@ -32,6 +34,7 @@ type routerOptions struct {
 	zodOutput                     string
 	enumsOutput                   string
 	zodMini                       bool
+	zodValidation                 zodconfig.Config
 	watchPackages                 []string
 }
 
@@ -199,12 +202,17 @@ func WithErrorFormatter(fn func(ErrorFormatterInput) any) Option {
 }
 
 // WithValidator sets a function that validates procedure inputs.
-// The function is called with the deserialized input struct after JSON
-// unmarshaling. Only struct-typed inputs are validated; primitives are skipped.
+// The function is called once with every typed input after JSON decoding,
+// including scalar, map, slice and typed nil inputs. Void procedures skip it.
 //
-// This matches go-playground/validator directly — pass validate.V.Struct:
+// A validator that accepts only structs, such as validate.Struct, rejects a
+// slice or scalar root. Wrap it with [StructValidator] so every struct in the
+// input is validated and other roots are left alone:
 //
-//	router := trpcgo.NewRouter(trpcgo.WithValidator(validate.V.Struct))
+//	router := trpcgo.NewRouter(trpcgo.WithValidator(trpcgo.StructValidator(validate.Struct)))
+//
+// Supply a plain callback when root scalars or collections need rules of
+// their own, for example through validate.Var.
 func WithValidator(fn func(any) error) Option {
 	return func(o *routerOptions) {
 		o.validator = fn
@@ -235,6 +243,17 @@ func WithZodOutput(path string) Option {
 func WithZodMini(enabled bool) Option {
 	return func(o *routerOptions) {
 		o.zodMini = enabled
+	}
+}
+
+// WithZodValidation declares client counterparts for configured Go validation.
+// It does not register or execute server validators. The same configuration can
+// be supplied to source generation using the CLI's --zod-config JSON file.
+// Configuration is copied so later caller mutations cannot affect generation.
+func WithZodValidation(config zodconfig.Config) Option {
+	config = config.Clone()
+	return func(o *routerOptions) {
+		o.zodValidation = config.Clone()
 	}
 }
 

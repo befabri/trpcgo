@@ -4,10 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"go/types"
 	"os"
 	"testing"
 
@@ -96,50 +92,35 @@ for (const test of cases) {
   const result = byName[test.type + 'Schema'].safeParse(JSON.parse(test.json));
   if (result.success !== test.valid) throw new Error(test.type + ': ' + test.json + ', expected valid=' + test.valid);
 }
-`
-	for _, mini := range []bool{false, true} {
-		t.Run(zodStyleName(mini), func(t *testing.T) {
-			t.Run("reflection", func(t *testing.T) {
-				r := trpcgo.NewRouter(trpcgo.WithZodMini(mini))
-				register(r)
-				checkGeneratedZod(t, r, script+checks)
-			})
-			t.Run("static", func(t *testing.T) {
-				fset := token.NewFileSet()
-				file, err := parser.ParseFile(fset, "testdata/fieldcomposition/types.go", nil, 0)
-				if err != nil {
-					t.Fatal(err)
-				}
-				pkg, err := new(types.Config).Check("example.com/fieldcomposition", fset, []*ast.File{file}, nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				m := typemap.NewMapper(nil)
-				var procs []codegen.ProcEntry
-				seen := map[string]bool{}
-				for _, test := range inputs {
-					if seen[test.Type] {
-						continue
-					}
-					seen[test.Type] = true
-					input := m.Convert(pkg.Scope().Lookup(test.Type).Type())
-					procs = append(procs, codegen.ProcEntry{Path: test.Type, ProcType: "query", InputTS: input, OutputTS: "string"})
-				}
-				for i := range procs {
-					procs[i].InputTS = m.Resolve(procs[i].InputTS)
-				}
-				style := typemap.ZodStandard
-				if mini {
-					style = typemap.ZodMini
-				}
-				checkGeneratedZodFile(t, func(path string) error {
-					var out bytes.Buffer
-					if err := codegen.WriteZodSchemas(&out, procs, m.Defs(), style); err != nil {
-						return err
-					}
-					return os.WriteFile(path, out.Bytes(), 0o644)
-				}, script+checks)
-			})
-		})
-	}
+` + checks
+	forEachGeneration(t, func(t *testing.T, mini, static bool) {
+		if !static {
+			r := trpcgo.NewRouter(trpcgo.WithZodMini(mini))
+			register(r)
+			checkGeneratedZod(t, r, script)
+			return
+		}
+		pkg := parseFixture(t, "example.com/fieldcomposition", "testdata/fieldcomposition/types.go")
+		m := typemap.NewMapper(nil)
+		var procs []codegen.ProcEntry
+		seen := map[string]bool{}
+		for _, test := range inputs {
+			if seen[test.Type] {
+				continue
+			}
+			seen[test.Type] = true
+			input := m.Convert(pkg.Scope().Lookup(test.Type).Type())
+			procs = append(procs, codegen.ProcEntry{Path: test.Type, ProcType: "query", InputTS: input, OutputTS: "string"})
+		}
+		for i := range procs {
+			procs[i].InputTS = m.Resolve(procs[i].InputTS)
+		}
+		checkGeneratedZodFile(t, func(path string) error {
+			var out bytes.Buffer
+			if err := codegen.WriteZodSchemas(&out, procs, m.Defs(), zodStyle(mini)); err != nil {
+				return err
+			}
+			return os.WriteFile(path, out.Bytes(), 0o644)
+		}, script)
+	})
 }

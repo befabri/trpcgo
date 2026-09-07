@@ -2,12 +2,6 @@ package trpcgo_test
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
-	"regexp"
-	"testing"
-
-	"github.com/befabri/trpcgo"
 )
 
 type GenPage[T any] struct {
@@ -375,51 +369,4 @@ type DriftPrivateUser struct {
 
 type DriftPublicUser struct {
 	ID string `json:"id"`
-}
-
-func generateTS(t *testing.T, r *trpcgo.Router) string {
-	t.Helper()
-	dir := t.TempDir()
-	out := filepath.Join(dir, "trpc.ts")
-	if err := r.GenerateTS(out); err != nil {
-		t.Fatalf("GenerateTS: %v", err)
-	}
-	data, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatalf("reading output: %v", err)
-	}
-	return string(data)
-}
-
-func generateZod(t *testing.T, r *trpcgo.Router) string {
-	t.Helper()
-	dir := t.TempDir()
-	out := filepath.Join(dir, "zod.ts")
-	if err := r.GenerateZod(out); err != nil {
-		t.Fatalf("GenerateZod: %v", err)
-	}
-	data, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatalf("reading output: %v", err)
-	}
-	return string(data)
-}
-
-func countPattern(s, pattern string) int {
-	re := regexp.MustCompile(pattern)
-	return len(re.FindAllStringIndex(s, -1))
-}
-
-func symlinkNodeModules(t *testing.T, dir string) {
-	t.Helper()
-	src, err := filepath.Abs(filepath.Join("examples", "start-trpc", "web", "node_modules"))
-	if err != nil {
-		t.Fatalf("abs path: %v", err)
-	}
-	if _, err := os.Stat(src); err != nil {
-		t.Skip("node_modules not installed in examples/start-trpc/web")
-	}
-	if err := os.Symlink(src, filepath.Join(dir, "node_modules")); err != nil {
-		t.Fatalf("symlink node_modules: %v", err)
-	}
 }

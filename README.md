@@ -85,7 +85,7 @@ func main() {
     validate := validator.New()
     router := trpcgo.NewRouter(
         trpcgo.WithDev(true),
-        trpcgo.WithValidator(validate.Struct),
+        trpcgo.WithValidator(trpcgo.StructValidator(validate.Struct)),
         trpcgo.WithTypeOutput("web/gen/trpc.ts"),
         trpcgo.WithZodOutput("web/gen/zod.ts"),
     )
@@ -110,7 +110,7 @@ func main() {
 }
 ```
 
-`WithValidator(validate.Struct)` enables server-side validation; the tags alone do not validate requests.
+`WithValidator(trpcgo.StructValidator(validate.Struct))` enables server-side validation for every struct in a request, including the elements of slice and map inputs; the tags alone do not validate requests.
 
 ### 2. Generate types and start the server
 
@@ -139,14 +139,16 @@ export interface User {
 export type AppRouter = { /* ... structural types matching @trpc/client */ };
 ```
 
-`web/gen/zod.ts` (validation schemas from Go `validate` tags):
+`web/gen/zod.ts` (the generated Go email helper is abbreviated here):
 
 ```typescript
 import { z } from "zod";
 
-export const CreateUserInputSchema = z.object({
-  name: z.string().min(1).max(100),
-  email: z.email().min(1),
+declare function $trpcgoEmail(value: string): boolean;
+
+export const CreateUserInputSchema = z.strictObject({
+  name: z.string().min(1).check(z.refine((value) => Array.from(value).length <= 100)),
+  email: z.string().check(z.refine($trpcgoEmail)),
 }).meta({ id: "CreateUserInput" });
 ```
 
@@ -175,7 +177,7 @@ const user = await client.user.create.mutate({
 });
 ```
 
-The Go handler above allows browser requests from `http://localhost:3000`. Use your frontend's origin if it runs elsewhere. Install `zod@4` if you also import the generated schemas.
+The Go handler above allows browser requests from `http://localhost:3000`. Use your frontend's origin if it runs elsewhere. Install `zod@^4.5.4` if you also import the generated schemas.
 
 ## Procedure Types
 
@@ -262,7 +264,7 @@ router := trpcgo.NewRouter(
     trpcgo.WithMaxBodySize(2 << 20),          // 2MB request limit (default 1MB)
 
     // Validation
-    trpcgo.WithValidator(validate.Struct),     // go-playground/validator compatible
+    trpcgo.WithValidator(trpcgo.StructValidator(validate.Struct)), // validates every struct in the input
 
     // SSE subscriptions
     trpcgo.WithSSEPingInterval(5 * time.Second),
@@ -440,19 +442,23 @@ When both are present, the output validator runs before the output parser. For s
 
 ### Validation
 
-The generator reads supported `validate` tags ([go-playground/validator](https://github.com/go-playground/validator)) to produce Zod schemas. Pass `WithValidator(validate.Struct)` to the router to apply validation on the server as well:
+The generator reads supported `validate` tags ([go-playground/validator](https://github.com/go-playground/validator)) to produce Zod schemas. Pass `WithValidator(trpcgo.StructValidator(validate.Struct))` to the router to apply validation on the server as well:
 
 ```go
 type Input struct {
-    Name  string   `json:"name" validate:"required,min=1,max=100"`    // z.string().min(1).max(100)
-    Email string   `json:"email" validate:"required,email"`           // z.email().min(1)
+    Name  string   `json:"name" validate:"required,min=1,max=100"`    // z.string().min(1).check(z.refine(...length <= 100))
+    Email string   `json:"email" validate:"required,email"`           // Go-compatible email predicate
     Role  string   `json:"role" validate:"oneof=admin editor viewer"` // z.enum([...])
-    Tags  []string `json:"tags" validate:"min=1,dive,min=1,max=50"`   // z.array(z.string().min(1).max(50)).min(1)
+    Tags  []string `json:"tags" validate:"min=1,dive,min=1,max=50"`   // z.array(z.string().min(1).check(...)).check(z.minLength(1))
     Age   int      `json:"age" validate:"gte=18,lte=150"`             // z.int().gte(18).lte(150)
-    URL   string   `json:"url" validate:"url"`                        // z.url()
-    UUID  string   `json:"uuid" validate:"uuid"`                      // z.uuidv4()
+    URL   string   `json:"url" validate:"url"`                        // Go-compatible URL predicate
+    UUID  string   `json:"uuid" validate:"uuid"`                      // validator's UUID grammar
 }
 ```
+
+Use `WithZodValidation(zodconfig.Config)` or CLI `--zod-config` for explicit
+aliases, alternate tags, and client predicates. These settings do not infer or
+execute Go callbacks; see [custom validation configuration](https://trpcgo.dev/zod-schemas/#custom-validation-configuration).
 
 ## CLI
 
@@ -467,6 +473,8 @@ go tool trpcgo generate [flags] [packages]
 | `-w, --watch` | Watch Go files, regenerate on change |
 | `--zod` | Zod schema output file |
 | `--zod-mini` | Use `zod/mini` functional syntax |
+| `--zod-config` | JSON file declaring validation aliases, rules, and imports |
+| `--zod-allow-unknown-fields` | Match `WithStrictInput(false)` in generated objects |
 | `--enums` | Runtime enum value object output file |
 
 ### With `go:generate`

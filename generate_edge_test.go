@@ -3,9 +3,6 @@ package trpcgo_test
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"testing"
 
 	"github.com/befabri/trpcgo"
@@ -62,8 +59,8 @@ type ZodMutualB struct {
 type ZodNestedContainersInput struct {
 	Matrix  [][]string                             `json:"matrix" validate:"min=1,dive,min=1,dive,min=2"`
 	Groups  map[string][]string                    `json:"groups"`
-	Buckets []map[string][]ZodContainerLeaf        `json:"buckets"`
-	Index   map[string]map[string]ZodContainerLeaf `json:"index"`
+	Buckets []map[string][]ZodContainerLeaf        `json:"buckets" validate:"dive,dive,dive"`
+	Index   map[string]map[string]ZodContainerLeaf `json:"index" validate:"dive,dive"`
 }
 
 type ZodContainerLeaf struct {
@@ -118,7 +115,8 @@ for (const input of [{}, { email: '' }, { email: 'alice@example.com' }, { code: 
 for (const input of [{ email: 'invalid' }, { code: 'AB' }, { count: 1 }, { count: '0' }]) {
   if (schema.safeParse({ count: 0, ...input }).success) throw new Error('invalid value was accepted');
 }
-if (schema.safeParse({}).success) throw new Error('required count became optional');
+// Go decodes a missing count as zero, which omitempty skips.
+if (!schema.safeParse({}).success) throw new Error('missing omitempty count was rejected');
 `)
 }
 
@@ -140,8 +138,12 @@ const parsed = schema.parse(input);
 const label: string = parsed.children[0].label;
 // @ts-expect-error recursive output must retain its string type
 const wrong: number = parsed.children[0].label;
-// @ts-expect-error omitted fields are absent from the schema output type
-const secret = parsed.secret;
+const secret: string | undefined = parsed.secret;
+// @ts-expect-error unvalidated fields keep their public type and may be absent
+const secretString: string = parsed.secret;
+if ('secret' in parsed) throw new Error('absent unvalidated field was materialized');
+const opaque = { arbitrary: true };
+if ((schema.parse({ ...input, secret: opaque } as unknown).secret as unknown) !== opaque) throw new Error('unvalidated field was not preserved');
 void [label, wrong, secret];
 `)
 		})
@@ -252,7 +254,8 @@ func TestGenerateRecursiveGenericContracts(t *testing.T) {
 			trpcgo.MustQuery(r, "text", func(_ context.Context, in GenRecursive[string]) (GenRecursive[string], error) { return in, nil })
 			checkGeneratedZod(t, r, `
 import * as schemas from './schemas.ts';
-const all = Object.values(schemas);
+// Private $go variants sit beside the public schemas; only public exports count.
+const all = Object.entries(schemas).filter(([name]) => !name.startsWith('$')).map(([, schema]) => schema);
 if (all.length !== 2) throw new Error('instantiations were not specialized');
 for (const value of [1, 'text']) {
   const input = { value, count: 1, children: [{ value, count: 2, children: [] }] };
@@ -298,78 +301,4 @@ const extendedValue: number = extended.value;
 const inlineValue: number = inline.value;
 void [value, extendedValue, inlineValue];
 `)
-}
-
-func zodStyleName(mini bool) string {
-	if mini {
-		return "mini"
-	}
-	return "standard"
-}
-
-// checkGeneratedZod compiles and runs script against the router's generated
-// schemas. Compilation catches unresolved names; execution catches values that
-// Zod's object type accepts but its parser rejects.
-func checkGeneratedZod(t *testing.T, r *trpcgo.Router, script string) {
-	t.Helper()
-	checkGeneratedZodFile(t, r.GenerateZod, script)
-}
-
-func checkGeneratedZodFile(t *testing.T, generate func(string) error, script string) {
-	t.Helper()
-	modules, err := filepath.Abs(filepath.Join("testdata", "zodruntime", "node_modules"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tsx := filepath.Join(modules, ".bin", "tsx")
-	if _, err := os.Stat(tsx); err != nil {
-		t.Skip("zodruntime node_modules not installed; run npm ci --prefix testdata/zodruntime")
-	}
-	dir := t.TempDir()
-	if err := os.Symlink(modules, filepath.Join(dir, "node_modules")); err != nil {
-		t.Fatal(err)
-	}
-	if err := generate(filepath.Join(dir, "schemas.ts")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "validate.ts"), []byte(script), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	assertTypeScriptCompiles(t, dir, "schemas.ts", "validate.ts")
-	cmd := exec.CommandContext(t.Context(), tsx, "validate.ts")
-	cmd.Dir = dir
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("generated schema failed at runtime: %v\n%s", err, output)
-	}
-}
-
-func checkGeneratedRouterContract(t *testing.T, r *trpcgo.Router, script string) {
-	t.Helper()
-	dir := t.TempDir()
-	symlinkNodeModules(t, dir)
-	if err := r.GenerateTS(filepath.Join(dir, "trpc.ts")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "client.ts"), []byte(script), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	assertTypeScriptCompiles(t, dir, "client.ts")
-}
-
-func assertTypeScriptCompiles(t *testing.T, dir string, files ...string) {
-	t.Helper()
-	tsc := filepath.Join(dir, "node_modules", ".bin", "tsc")
-	if _, err := os.Stat(tsc); err != nil {
-		t.Skip("TypeScript compiler not installed in the test's node_modules")
-	}
-	args := append([]string{
-		"--noEmit", "--strict", "--skipLibCheck", "--target", "ES2022",
-		"--allowImportingTsExtensions",
-		"--module", "ES2022", "--moduleResolution", "bundler",
-	}, files...)
-	cmd := exec.CommandContext(t.Context(), tsc, args...)
-	cmd.Dir = dir
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("generated TypeScript does not compile: %v\n%s", err, output)
-	}
 }

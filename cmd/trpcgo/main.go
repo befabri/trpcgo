@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"errors"
 	"flag"
@@ -15,18 +16,21 @@ import (
 	"github.com/befabri/trpcgo/internal/codegen"
 	"github.com/befabri/trpcgo/internal/fsutil"
 	"github.com/befabri/trpcgo/internal/typemap"
+	"github.com/befabri/trpcgo/zodconfig"
 	"github.com/fsnotify/fsnotify"
 )
 
 type generateOptions struct {
-	patterns []string
-	dir      string
-	output   string
-	zod      string
-	zodMini  bool
-	enums    string
-	stdout   io.Writer
-	stderr   io.Writer
+	patterns              []string
+	dir                   string
+	output                string
+	zod                   string
+	zodMini               bool
+	zodConfig             string
+	zodAllowUnknownFields bool
+	enums                 string
+	stdout                io.Writer
+	stderr                io.Writer
 }
 
 var writeOutputFile = fsutil.AtomicWriteFile
@@ -77,6 +81,8 @@ func runGenerate(args []string, stdout, stderr io.Writer) error {
 	fs.BoolVar(watch, "w", false, "watch Go files and regenerate on change")
 	zodOutput := fs.String("zod", "", "output path for Zod 4 validation schemas")
 	zodMini := fs.Bool("zod-mini", false, "generate zod/mini functional syntax")
+	zodConfig := fs.String("zod-config", "", "JSON file declaring validation aliases, rules and imports")
+	zodAllowUnknownFields := fs.Bool("zod-allow-unknown-fields", false, "allow unknown object properties, matching WithStrictInput(false)")
 	enumsOutput := fs.String("enums", "", "output path for runtime enum value objects")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -91,14 +97,16 @@ func runGenerate(args []string, stdout, stderr io.Writer) error {
 	}
 
 	opts := generateOptions{
-		patterns: patterns,
-		dir:      *dir,
-		output:   *output,
-		zod:      *zodOutput,
-		zodMini:  *zodMini,
-		enums:    *enumsOutput,
-		stdout:   stdout,
-		stderr:   stderr,
+		patterns:              patterns,
+		dir:                   *dir,
+		output:                *output,
+		zod:                   *zodOutput,
+		zodMini:               *zodMini,
+		zodConfig:             *zodConfig,
+		zodAllowUnknownFields: *zodAllowUnknownFields,
+		enums:                 *enumsOutput,
+		stdout:                stdout,
+		stderr:                stderr,
 	}
 
 	if err := generate(opts); err != nil {
@@ -127,6 +135,16 @@ func watchGenerate(opts generateOptions, dir string) error {
 		return fmt.Errorf("watching %s: %w", absDir, err)
 	}
 
+	if opts.zodConfig != "" {
+		configPath, err := filepath.Abs(opts.zodConfig)
+		if err != nil {
+			return fmt.Errorf("resolving Zod configuration path: %w", err)
+		}
+		if err := watcher.Add(filepath.Dir(configPath)); err != nil {
+			return fmt.Errorf("watching Zod configuration: %w", err)
+		}
+	}
+
 	log.Printf("Watching directories under %s...", absDir)
 	watchGenerateLoop(opts, watcher, nil, time.After, generate)
 	return nil
@@ -152,7 +170,7 @@ func watchGenerateLoop(opts generateOptions, watcher *fsnotify.Watcher, done <-c
 			}
 			fsutil.HandleDirEventWith(watcher, event, fsutil.WatchRecursive)
 
-			if !fsutil.IsGoWriteOrCreate(event) {
+			if !fsutil.IsGoWriteOrCreate(event) && !zodConfigChanged(event, opts.zodConfig) {
 				continue
 			}
 			debounce = after(fsutil.DebounceInterval)
@@ -175,53 +193,87 @@ func watchGenerateLoop(opts generateOptions, watcher *fsnotify.Watcher, done <-c
 	}
 }
 
+func zodConfigChanged(event fsnotify.Event, path string) bool {
+	if path == "" || event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
+		return false
+	}
+	want, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	got, err := filepath.Abs(event.Name)
+	return err == nil && filepath.Clean(got) == filepath.Clean(want)
+}
+
 func generate(opts generateOptions) error {
 	opts.stdout = cmp.Or(opts.stdout, io.Writer(os.Stdout))
 	opts.stderr = cmp.Or(opts.stderr, io.Writer(os.Stderr))
 
+	var config zodconfig.Config
+	if opts.zodConfig != "" {
+		file, err := os.Open(opts.zodConfig)
+		if err != nil {
+			return fmt.Errorf("reading Zod validation configuration: %w", err)
+		}
+		config, err = zodconfig.Decode(file)
+		_ = file.Close()
+		if err != nil {
+			return err
+		}
+	}
+	program, err := typemap.CompileValidation(config)
+	if err != nil {
+		return fmt.Errorf("compiling Zod validation: %w", err)
+	}
 	result, err := analysis.Analyze(opts.patterns, opts.dir)
 	if err != nil {
 		return fmt.Errorf("analysis: %w", err)
 	}
-
 	if len(result.Procedures) == 0 {
 		fmt.Fprintln(opts.stderr, "Warning: no tRPC procedure registrations found")
 	}
 
-	gen := codegen.Prepare(result, result.TypeMetas)
-	writeTypes := func(w io.Writer) error {
-		return codegen.WriteAppRouter(w, gen.Procs, gen.Defs)
+	gen := codegen.Prepare(result, result.TypeMetas, program)
+	var typesOutput, zodOutput, enumsOutput bytes.Buffer
+	if err := codegen.WriteAppRouter(&typesOutput, gen.Procs, gen.Defs); err != nil {
+		return fmt.Errorf("generating TypeScript output: %w", err)
 	}
-	if opts.output != "" {
-		if err := writeOutputFile(opts.output, 0o644, writeTypes); err != nil {
-			return fmt.Errorf("writing output file: %w", err)
-		}
-	} else {
-		if err := writeTypes(opts.stdout); err != nil {
-			return fmt.Errorf("writing TypeScript output: %w", err)
-		}
-	}
-
 	if opts.zod != "" {
 		style := typemap.ZodStandard
 		if opts.zodMini {
 			style = typemap.ZodMini
 		}
-
-		if err := writeOutputFile(opts.zod, 0o644, func(w io.Writer) error {
-			return codegen.WriteZodSchemas(w, gen.Procs, gen.Defs, style)
-		}); err != nil {
-			return fmt.Errorf("writing zod schemas: %w", err)
+		if err := codegen.WriteZodSchemas(&zodOutput, gen.Procs, gen.Defs, style, codegen.ZodOptions{AllowUnknownFields: opts.zodAllowUnknownFields, Validation: config}); err != nil {
+			return fmt.Errorf("generating Zod schemas: %w", err)
 		}
 	}
-
 	if opts.enums != "" {
-		if err := writeOutputFile(opts.enums, 0o644, func(w io.Writer) error {
-			return codegen.WriteEnums(w, gen.Defs)
-		}); err != nil {
-			return fmt.Errorf("writing enum values: %w", err)
+		if err := codegen.WriteEnums(&enumsOutput, gen.Defs); err != nil {
+			return fmt.Errorf("generating enum values: %w", err)
 		}
 	}
-
+	// Render all requested artifacts before writing any of them. A broken
+	// configuration or rule never replaces an otherwise valid output file.
+	writeTypes := func(w io.Writer) error { _, err := w.Write(typesOutput.Bytes()); return err }
+	if opts.output != "" {
+		if err := writeOutputFile(opts.output, 0o644, writeTypes); err != nil {
+			return fmt.Errorf("writing output file: %w", err)
+		}
+	} else if err := writeTypes(opts.stdout); err != nil {
+		return fmt.Errorf("writing TypeScript output: %w", err)
+	}
+	for _, artifact := range []struct {
+		path, label string
+		data        []byte
+	}{
+		{opts.zod, "zod schemas", zodOutput.Bytes()}, {opts.enums, "enum values", enumsOutput.Bytes()},
+	} {
+		if artifact.path == "" {
+			continue
+		}
+		if err := writeOutputFile(artifact.path, 0o644, func(w io.Writer) error { _, err := w.Write(artifact.data); return err }); err != nil {
+			return fmt.Errorf("writing %s: %w", artifact.label, err)
+		}
+	}
 	return nil
 }

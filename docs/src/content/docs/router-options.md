@@ -9,7 +9,7 @@ description: Configure the trpcgo runtime, serve procedures over HTTP, and merge
 router := trpcgo.NewRouter(
     trpcgo.WithBatching(true),
     trpcgo.WithStrictInput(true),
-    trpcgo.WithValidator(validate.Struct),
+    trpcgo.WithValidator(trpcgo.StructValidator(validate.Struct)),
 )
 defer router.Close()
 ```
@@ -79,15 +79,17 @@ Configured origins must be exact `http` or `https` scheme+host values with no pa
 
 ## Validation Option
 
-`WithValidator` runs after JSON decoding and before middleware. It validates struct inputs, including pointers to structs; primitive, slice, map, and void inputs are skipped.
+`WithValidator` runs once after JSON decoding and before middleware for every typed input, including primitives, slices, maps, pointers, and typed nil values. Procedures without an input skip the callback. Decoding failures return before validation.
 
 ```go
 validate := validator.New()
 
 router := trpcgo.NewRouter(
-    trpcgo.WithValidator(validate.Struct),
+    trpcgo.WithValidator(trpcgo.StructValidator(validate.Struct)),
 )
 ```
+
+`validator.Struct` accepts only structs and returns an error for any other root, so wrap it with `StructValidator`. The wrapper validates each struct reachable through pointers, slices, arrays, and map values, skips primitive roots, nil pointers, and self-decoding types such as `time.Time`, and prefixes joined errors with their path such as `[2]`. Pass a plain callback instead when scalar or collection roots need rules of their own, such as `validator.Var`.
 
 `validate` tags do not trigger server-side validation unless you configure this option. A validation failure returns `BAD_REQUEST` with the message `input validation failed`.
 
@@ -133,6 +135,7 @@ Use a positive ping interval; `0` uses the default of 10 seconds. For `WithSSEMa
 | `WithTypeOutput(path)` | Writes generated TypeScript in dev mode. |
 | `WithZodOutput(path)` | Writes generated Zod schemas in dev mode. |
 | `WithZodMini(bool)` | Uses `zod/mini` functional syntax. |
+| `WithZodValidation(config)` | Shares explicit validation counterparts with runtime generation and dev watch. |
 | `WithEnumsOutput(path)` | Writes runtime enum value objects in dev mode. |
 | `WithWatchPackages(patterns...)` | Restricts dev watcher analysis to package patterns like `./cmd/api` or `./internal/...`. |
 

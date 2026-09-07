@@ -70,7 +70,7 @@ func main() {
     router := trpcgo.NewRouter(
         trpcgo.WithDev(true),
         trpcgo.WithStrictInput(true),
-        trpcgo.WithValidator(validate.Struct),
+        trpcgo.WithValidator(trpcgo.StructValidator(validate.Struct)),
         trpcgo.WithTypeOutput("web/gen/trpc.ts"),
         trpcgo.WithZodOutput("web/gen/zod.ts"),
     )
@@ -94,7 +94,7 @@ func main() {
 }
 ```
 
-`WithValidator(validate.Struct)` is what makes `validate` tags run on the server. Without it, the tags still help Zod generation but runtime input validation is disabled.
+`WithValidator(trpcgo.StructValidator(validate.Struct))` is what makes `validate` tags run on the server, for struct inputs and for every struct inside slice and map inputs. Without it, the tags still help Zod generation but runtime input validation is disabled.
 
 The sample handler returns a user with a fixed ID and does not store it. Replace that return value with your persistence code when you add a database.
 
@@ -114,14 +114,16 @@ The server listens on `http://localhost:8080`. Keep it running while you try the
 
 The generated `trpc.ts` contains `AppRouter`, `RouterInputs`, `RouterOutputs`, and TypeScript definitions for reachable Go types.
 
-The generated `zod.ts` contains schemas for typed procedure inputs:
+The generated `zod.ts` contains schemas for typed procedure inputs (the Go email helper is abbreviated here):
 
 ```ts
 import { z } from 'zod';
 
-export const CreateUserInputSchema = z.object({
-  name: z.string().min(1).max(100),
-  email: z.email().min(1),
+declare function $trpcgoEmail(value: string): boolean;
+
+export const CreateUserInputSchema = z.strictObject({
+  name: z.string().min(1).check(z.refine((value) => Array.from(value).length <= 100)),
+  email: z.string().check(z.refine($trpcgoEmail)),
 }).meta({ id: 'CreateUserInput' });
 ```
 
