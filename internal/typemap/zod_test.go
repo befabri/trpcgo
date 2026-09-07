@@ -210,7 +210,7 @@ func TestZodTypeString(t *testing.T) {
 				Optional: true,
 				Validate: []ValidateRule{{Tag: "cidrv4"}},
 			},
-			want: "(((z.string().check(z.refine((value) => { const parts = value.split(\"/\"); if (parts.length !== 2 || !/^[0-9]+$(?![\\s\\S])/.test(parts[1]!)) return false; const ip = $trpcgoIPBytes(parts[0]!); if (!ip || !ip.v4) return false; let bits = Number(parts[1]); if (ip.bytes.length === 16) bits -= 96; if (bits < 0 || bits > 32) return false; const bytes = ip.bytes.slice(-4); return bytes.every((byte, index) => { const host = Math.max(0, Math.min(8, (index + 1) * 8 - bits)); return (byte & (2 ** host - 1)) === 0; }); })).safeParse(String((\"\")).replace(/\\p{Surrogate}/gu, \"\\uFFFD\")).success)) ? z.string().check(z.refine((value) => { const parts = value.split(\"/\"); if (parts.length !== 2 || !/^[0-9]+$(?![\\s\\S])/.test(parts[1]!)) return false; const ip = $trpcgoIPBytes(parts[0]!); if (!ip || !ip.v4) return false; let bits = Number(parts[1]); if (ip.bytes.length === 16) bits -= 96; if (bits < 0 || bits > 32) return false; const bytes = ip.bytes.slice(-4); return bytes.every((byte, index) => { const host = Math.max(0, Math.min(8, (index + 1) * 8 - bits)); return (byte & (2 ** host - 1)) === 0; }); })).optional() : z.string().check(z.refine((value) => { const parts = value.split(\"/\"); if (parts.length !== 2 || !/^[0-9]+$(?![\\s\\S])/.test(parts[1]!)) return false; const ip = $trpcgoIPBytes(parts[0]!); if (!ip || !ip.v4) return false; let bits = Number(parts[1]); if (ip.bytes.length === 16) bits -= 96; if (bits < 0 || bits > 32) return false; const bytes = ip.bytes.slice(-4); return bytes.every((byte, index) => { const host = Math.max(0, Math.min(8, (index + 1) * 8 - bits)); return (byte & (2 ** host - 1)) === 0; }); })))",
+			want: "z.string().check(z.refine((value) => { const parts = value.split(\"/\"); if (parts.length !== 2 || !/^[0-9]+$(?![\\s\\S])/.test(parts[1]!)) return false; const ip = $trpcgoIPBytes(parts[0]!); if (!ip || !ip.v4) return false; let bits = Number(parts[1]); if (ip.bytes.length === 16) bits -= 96; if (bits < 0 || bits > 32) return false; const bytes = ip.bytes.slice(-4); return bytes.every((byte, index) => { const host = Math.max(0, Math.min(8, (index + 1) * 8 - bits)); return (byte & (2 ** host - 1)) === 0; }); })).optional()",
 		},
 		// --- new constraint tags ---
 		{
@@ -427,7 +427,7 @@ func TestZodOneofEnum(t *testing.T) {
 					{Tag: "oneof", Param: "low high"},
 				},
 			},
-			want: "(((([\"low\", \"high\"] as readonly unknown[]).includes(String((\"\")).replace(/\\p{Surrogate}/gu, \"\\uFFFD\")))) ? z.enum([\"low\", \"high\"]).optional() : z.enum([\"low\", \"high\"]))",
+			want: "z.enum([\"low\", \"high\"]).optional()",
 		},
 		{
 			name: "int oneof optional",
@@ -440,7 +440,7 @@ func TestZodOneofEnum(t *testing.T) {
 					{Tag: "oneof", Param: "1 2 3"},
 				},
 			},
-			want: "(((([1, 2, 3] as readonly unknown[]).includes((0)))) ? z.union([z.literal(1), z.literal(2), z.literal(3)]).optional() : z.union([z.literal(1), z.literal(2), z.literal(3)]))",
+			want: "z.union([z.literal(1), z.literal(2), z.literal(3)]).optional()",
 		},
 	}
 
@@ -495,7 +495,7 @@ func TestZodOneofEnumMini(t *testing.T) {
 					{Tag: "oneof", Param: "1 2 3"},
 				},
 			},
-			want: "(((([1, 2, 3] as readonly unknown[]).includes((0)))) ? z.optional(z.union([z.literal(1), z.literal(2), z.literal(3)])) : z.union([z.literal(1), z.literal(2), z.literal(3)]))",
+			want: "z.optional(z.union([z.literal(1), z.literal(2), z.literal(3)]))",
 		},
 		{
 			name: "string oneof optional mini",
@@ -508,7 +508,7 @@ func TestZodOneofEnumMini(t *testing.T) {
 					{Tag: "oneof", Param: "low high"},
 				},
 			},
-			want: "(((([\"low\", \"high\"] as readonly unknown[]).includes(String((\"\")).replace(/\\p{Surrogate}/gu, \"\\uFFFD\")))) ? z.optional(z.enum([\"low\", \"high\"])) : z.enum([\"low\", \"high\"]))",
+			want: "z.optional(z.enum([\"low\", \"high\"]))",
 		},
 	}
 
@@ -1042,7 +1042,7 @@ func TestZodMiniStyle(t *testing.T) {
 				Optional: true,
 				Validate: []ValidateRule{{Tag: "hostname"}},
 			},
-			want: "(((z.string().check(z.regex(/^[a-zA-Z]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$(?![\\s\\S])/)).safeParse(String((\"\")).replace(/\\p{Surrogate}/gu, \"\\uFFFD\")).success)) ? z.optional(z.string().check(z.regex(/^[a-zA-Z]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$(?![\\s\\S])/))) : z.string().check(z.regex(/^[a-zA-Z]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$(?![\\s\\S])/)))",
+			want: "z.optional(z.string().check(z.regex(/^[a-zA-Z]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$(?![\\s\\S])/)))",
 		},
 	}
 

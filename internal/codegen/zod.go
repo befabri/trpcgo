@@ -255,7 +255,7 @@ func (e zodSchemaEmitter) writeObjectExpression(ew *errWriter, def typemap.TypeD
 
 	if !e.skipValidation {
 		writeZodEmbeddedPresence(ew, def.Fields, style)
-		writeZodMissingCustomChecks(ew, def.Fields)
+		writeZodMissingValueChecks(ew, def.Fields)
 		e.writeMissingArrayChecks(ew, def.Fields)
 	}
 
@@ -465,11 +465,6 @@ func (e zodSchemaEmitter) scopedFieldToZod(f typemap.Field, scope typemap.Valida
 			// Keep the dive boundary visible to the missing-value predicate: a
 			// nil pointer fails on dive itself when nothing omits it first.
 			field.Validate = append(slices.Clone(field.Validate), typemap.ValidateRule{Tag: "dive"})
-		}
-		if typemap.ZodFieldOptional(field) && typemap.HasCustomZodRule(field.Validate) {
-			// Object schemas intentionally ignore child errors for absent optional
-			// keys. The containing object emits this dynamic missing-value check.
-			return typemap.ZodOptional(e.arrayContextNullable(schema, field), style)
 		}
 		return typemap.ApplyZodOptional(e.arrayContextNullable(schema, field), field, style)
 	}

@@ -48,7 +48,7 @@ func TestFieldToZodComplexTypes(t *testing.T) {
 				{Tag: "len", Param: "2"},
 			}, Optional: true},
 			style: typemap.ZodMini,
-			want:  "(((([]).length >= 1) && (([]).length <= 3) && (([]).length === 2)) ? z.optional(z.array(z.int()).check(z.minLength(1), z.maxLength(3), z.length(2))) : z.array(z.int()).check(z.minLength(1), z.maxLength(3), z.length(2)))",
+			want:  "z.optional(z.array(z.int()).check(z.minLength(1), z.maxLength(3), z.length(2)))",
 		},
 		{
 			name: "array constraints normalize validator length params",

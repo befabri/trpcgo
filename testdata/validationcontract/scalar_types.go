@@ -86,6 +86,18 @@ type ScalarOptionalEmail struct {
 	Value string `json:"value,omitempty" validate:"email"`
 }
 
+// An absent property decodes to the zero value, which min rejects: the schema
+// has to refuse the omission that the json tag appears to allow.
+type ScalarOptionalMinLength struct {
+	Value string `json:"value,omitempty" validate:"min=1"`
+}
+
+// The mirror of ScalarOptionalMinLength: max accepts the zero value, so the
+// property may be omitted.
+type ScalarOptionalMaxLength struct {
+	Value string `json:"value,omitempty" validate:"max=8"`
+}
+
 type ScalarPointerMinimum struct {
 	Value *int `json:"value,omitempty" validate:"min=1"`
 }

@@ -80,16 +80,9 @@ func ZodOptionalField(base string, f Field, style ZodStyle) string {
 	if len(f.WhenAnyPresent) > 0 {
 		return result
 	}
-	predicate := ZodMissingValuePredicate(f)
-	if predicate != "true" {
-		if HasCustomZodRule(f.Validate) {
-			// Application predicates run at parse time, including for a missing
-			// field. Evaluating them while constructing the module caches a
-			// potentially stateful result and invokes user code before parsing.
-			return result + ".check(z.refine((value) => value !== undefined || (" + predicate + ")))"
-		}
-		return "((" + predicate + ") ? " + result + " : " + base + ")"
-	}
+	// The schema stays structurally optional so it agrees with the TypeScript
+	// type. Whether an absent value is acceptable is decided by the containing
+	// object, which is the only scope that still sees the missing key.
 	return result
 }
 

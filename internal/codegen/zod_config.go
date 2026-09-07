@@ -35,9 +35,12 @@ func validateZodConfiguredRules(f typemap.Field, strict bool) error {
 	return check(f.Validate)
 }
 
-func writeZodMissingCustomChecks(ew *errWriter, fields []typemap.Field) {
+// writeZodMissingValueChecks rejects an absent property whose Go zero value
+// fails the field's rules. An object ignores the checks on an absent optional
+// key, so the test belongs to the containing object rather than the field.
+func writeZodMissingValueChecks(ew *errWriter, fields []typemap.Field) {
 	for _, field := range fields {
-		if field.ZodOmit || len(field.WhenAnyPresent) > 0 || !typemap.ZodFieldOptional(field) || !typemap.HasCustomZodRule(field.Validate) {
+		if field.ZodOmit || len(field.WhenAnyPresent) > 0 || !typemap.ZodFieldOptional(field) {
 			continue
 		}
 		predicate := typemap.ZodMissingValuePredicate(field)
