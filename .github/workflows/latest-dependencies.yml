@@ -1,0 +1,51 @@
+name: Latest dependencies
+
+# CI pins every dependency through the lockfile and go.mod. This workflow runs
+# the same suites with the newest releases the declared ranges allow, and with
+# the newest go-playground/validator as the Go oracle. An upstream change to
+# Zod, TypeScript or validator then fails here, before a lockfile bump or a
+# user reports it. It never blocks a pull request.
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  test:
+    name: Test with latest dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 'lts/*'
+
+      # npm update resolves every package to the newest release its declared
+      # range allows and records the result in this checkout's lockfile, so
+      # the npm ls step below prints exactly what ran. Nothing is committed.
+      - name: Update Node packages to their newest allowed releases
+        run: npm update --prefix testdata/zodruntime
+
+      - run: npm ls --prefix testdata/zodruntime --depth=0
+
+      - run: go test -count=1 ./...
+
+      - name: Use the newest validator
+        working-directory: examples/start-trpc/server
+        run: go get github.com/go-playground/validator/v10@latest && go mod tidy
+
+      - name: Test example server and Go validation contracts
+        working-directory: examples/start-trpc/server
+        run: go test -count=1 ./...
