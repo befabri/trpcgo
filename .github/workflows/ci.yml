@@ -29,40 +29,115 @@ jobs:
         #         first instead of in a user's build.
         go: ['go.mod', 'stable']
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go == 'stable' && 'stable' || '' }}
           go-version-file: ${{ matrix.go == 'go.mod' && 'go.mod' || '' }}
 
       - run: go version
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 'lts/*'
           cache: npm
-          cache-dependency-path: |
-            testdata/zodruntime/package-lock.json
-            examples/start-trpc/web/package-lock.json
+          cache-dependency-path: testdata/zodruntime/package-lock.json
 
       - run: npm ci --prefix testdata/zodruntime
-      - run: npm ci --prefix examples/start-trpc/web
+
+      - run: testdata/zodruntime/node_modules/.bin/tsc --version
 
       - run: go test -race -count=1 ./...
+
+      # Generated schemas promise Zod 4.5.4 or newer while the lockfile may
+      # resolve to a later release. Rerunning the suite at the floor keeps the
+      # generator from depending on a later release unnoticed. Many tests
+      # compile against Zod without naming it, so the whole suite reruns. The
+      # floor does not depend on Go, so one leg is enough.
+      - name: Test at the supported Zod floor
+        if: matrix.go == 'go.mod'
+        run: |
+          npm install --prefix testdata/zodruntime --no-save zod@4.5.4
+          npm ls --prefix testdata/zodruntime zod
+          go test -count=1 ./...
+
+      - name: Test example server and Go validation contracts
+        working-directory: examples/start-trpc/server
+        run: go test -race -count=1 ./...
+
+  example:
+    name: Example app
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 'lts/*'
+          cache: npm
+          cache-dependency-path: examples/start-trpc/web/package-lock.json
+
+      # The committed generated files must be what the current generator
+      # writes, so the example always shows real output.
+      - name: Check generated files are current
+        working-directory: examples/start-trpc/server
+        run: |
+          go generate ./...
+          if [ -n "$(git status --porcelain -- ../web/gen)" ]; then
+            git status --short -- ../web/gen
+            git diff -- ../web/gen
+            echo "::error::examples/start-trpc/web/gen is stale; run go generate ./... in examples/start-trpc/server"
+            exit 1
+          fi
+
+      - run: npm ci --prefix examples/start-trpc/web
+
+      # Builds the app and type-checks it, generated files included.
+      - run: npm run --prefix examples/start-trpc/web build
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 'lts/*'
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+
+      - run: npm ci --prefix docs
+
+      # The build also fails when src/llms-txt.js does not link every page.
+      - run: npm run --prefix docs build
 
   lint:
     name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Lint on the go.mod floor so a new Go release cannot break this job;
       # bumping go.mod is the moment to check staticcheck compatibility.
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
+      - run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+
       - run: go vet ./...
-      - run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.1 && staticcheck ./...
+      - run: staticcheck ./...
+
+      # The example server is its own module, which ./... above skips.
+      - name: Lint the example server
+        working-directory: examples/start-trpc/server
+        run: go vet ./... && staticcheck ./...
