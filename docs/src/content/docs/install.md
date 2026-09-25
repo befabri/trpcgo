@@ -72,14 +72,14 @@ Keep your `@trpc/*` packages on matching versions. The generated router type imp
 Install Zod if you generate schemas:
 
 ```bash
-npm install zod@4
+npm install zod@^4.5.4
 ```
 
 ## Requirements
 
 - Go 1.26 or newer.
 - tRPC v11 client packages.
-- Zod 4 when using `--zod` or `WithZodOutput`.
+- Zod 4.5.4 or newer when using `--zod` or `WithZodOutput`; see [Compatibility](/reference/compatibility/#zod).
 
 ## Add Your Application Dependencies
 

@@ -31,31 +31,32 @@ trpcgo uses Go handlers, structs, and struct tags as the source of truth. It reg
 
 ## Runtime Docs
 
-- [Procedures](${href('/procedures/')}): queries, mutations, subscriptions, void procedures, metadata, middleware, and base procedures.
-- [Router & Options](${href('/router-options/')}): batching, strict input decoding, body limits, validators, dev generation, and hooks.
+- [Procedures](${href('/procedures/')}): queries, mutations, subscriptions, void procedures, procedure options, base procedures, and output hooks.
+- [Router & Options](${href('/router-options/')}): batching, strict input decoding, body limits, CORS, validation, SSE limits, dev generation, and router merging.
 - [HTTP Protocol](${href('/http-protocol/')}): request methods, input encoding, batching, JSONL streaming, SSE, and error envelopes.
-- [Middleware & Metadata](${href('/middleware/')}): global middleware, per-procedure middleware, typed metadata, and context derivation.
-- [Subscriptions](${href('/subscriptions/')}): SSE subscription handlers, lifecycle, limits, and client links.
-- [Response Metadata](${href('/response-metadata/')}): setting headers, status codes, cookies, and cache controls from handlers.
-- [Errors](${href('/errors/')}): tRPC-compatible error codes, sanitization, dev stacks, custom formatting, and logging hooks.
+- [Middleware & Metadata](${href('/middleware/')}): global middleware, per-procedure middleware, server-side calls, typed metadata, and context derivation.
+- [Subscriptions](${href('/subscriptions/')}): SSE subscription handlers, tracked events, reconnect input, final values, and limits.
+- [Response Metadata](${href('/response-metadata/')}): setting response headers and cookies from handlers and middleware.
+- [Errors](${href('/errors/')}): tRPC-compatible error codes, sanitization, dev stacks, custom formatting, logging hooks, and streaming errors.
 
 ## Type Generation Docs
 
 - [Code Generation](${href('/code-generation/')}): static analysis, CLI flags, runtime generation, dev watch mode, and generated exports.
 - [Frontend Setup](${href('/frontend-setup/')}): vanilla tRPC client, React Query, TanStack helpers, batching, subscriptions, and credentials.
-- [Struct Tags](${href('/struct-tags/')}): \`json\`, \`tstype\`, optional fields, readonly fields, aliases, enums, and comments.
-- [Zod Schemas](${href('/zod-schemas/')}): generated schemas from Go \`validate\` tags, \`zod\` vs \`zod/mini\`, and client validation.
+- [Struct Tags](${href('/struct-tags/')}): \`json\` and \`tstype\` tags, optional and readonly fields, doc comments, and embedded structs.
+- [Zod Schemas](${href('/zod-schemas/')}): generated schemas from Go \`validate\` tags, \`zod\` vs \`zod/mini\`, raw JSON decoding, and custom rules.
 
 ## Operations And Reference
 
-- [Security & Production](${href('/security-production/')}): strict decoding, body limits, CORS, auth, rate limits, SSE limits, and safe errors.
-- [CLI Reference](${href('/reference/cli/')}): \`trpcgo generate\` flags, examples, package patterns, watch mode, and exit behavior.
-- [Compatibility](${href('/reference/compatibility/')}): tRPC v11 compatibility, supported transports, Go type support, and known limits.
+- [Security & Production](${href('/security-production/')}): validation, strict decoding, request limits, CORS, cookie auth, SSE reconnect IDs, and safe errors.
+- [CLI Reference](${href('/reference/cli/')}): \`trpcgo generate\` flags, examples, detection rules, output paths, and watch mode.
+- [Compatibility](${href('/reference/compatibility/')}): Go, tRPC v11, and Zod requirements, subscription limitations, CORS, and serialization.
+- [Zod Validation](${href('/reference/zod-validation/')}): how generated schemas match validator and \`encoding/json\` in edge cases.
 
 ## Notes For LLMs
 
 - Go handlers and Go types are the source of truth. The frontend should consume generated TypeScript and Zod output instead of hand-written router contracts.
-- Server-side validation only runs when a validator is configured with \`WithValidator\`. Zod generation can still use Go \`validate\` tags for client-side schemas.
+- Server-side validation only runs when a validator is configured with \`WithValidator\`. Wrap go-playground/validator as \`WithValidator(trpcgo.StructValidator(validate.Struct))\`; \`validate.Struct\` alone rejects slice, map, and scalar inputs. Zod generation can still use Go \`validate\` tags for client-side schemas.
 - Prefer \`go generate ./...\` or \`go tool trpcgo generate\` in production. \`WithDev(true)\` and router output paths are for development workflows.
 - trpcgo provides the tRPC protocol handler, optional CORS handling, typing, generation, and validation hooks. Auth, persistence, and framework integration remain application concerns.
 `;

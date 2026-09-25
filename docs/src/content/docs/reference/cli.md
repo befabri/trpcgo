@@ -18,8 +18,10 @@ These examples assume the CLI is registered as a Go tool. See [Installation](/in
 | `-o`, `-output` | Write generated TypeScript router types to a file. Defaults to stdout. |
 | `-dir` | Working directory for Go package resolution. Defaults to `.`. |
 | `-w`, `-watch` | Watch Go files and regenerate on changes. |
-| `-zod` | Write generated Zod 4 schemas to a file. |
+| `-zod` | Write generated Zod schemas to a file. |
 | `-zod-mini` | Generate schemas using `zod/mini` functional syntax. |
+| `-zod-config` | Read custom validation rules from a JSON file. See [Custom Validation Rules](/zod-schemas/#custom-validation-rules). |
+| `-zod-allow-unknown-fields` | Generate objects that accept unknown keys, matching `WithStrictInput(false)`. |
 | `-enums` | Write runtime enum value objects to a file. |
 
 ## Examples

@@ -15,7 +15,7 @@ Create a router for the procedures you want to serve:
 router := trpcgo.NewRouter(
     trpcgo.WithBatching(true),
     trpcgo.WithStrictInput(true),
-    trpcgo.WithValidator(validate.Struct),
+    trpcgo.WithValidator(trpcgo.StructValidator(validate.Struct)),
 )
 defer router.Close()
 ```

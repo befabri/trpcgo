@@ -9,7 +9,7 @@ description: Configure the trpcgo runtime, serve procedures over HTTP, and merge
 router := trpcgo.NewRouter(
     trpcgo.WithBatching(true),
     trpcgo.WithStrictInput(true),
-    trpcgo.WithValidator(validate.Struct),
+    trpcgo.WithValidator(trpcgo.StructValidator(validate.Struct)),
 )
 defer router.Close()
 ```
@@ -79,15 +79,21 @@ Configured origins must be exact `http` or `https` scheme+host values with no pa
 
 ## Validation Option
 
-`WithValidator` runs after JSON decoding and before middleware. It validates struct inputs, including pointers to structs; primitive, slice, map, and void inputs are skipped.
+`WithValidator` runs after JSON decoding and before middleware. It receives every typed input, including primitives, slices, maps, and nil pointers; procedures without an input skip it.
 
 ```go
 validate := validator.New()
 
 router := trpcgo.NewRouter(
-    trpcgo.WithValidator(validate.Struct),
+    trpcgo.WithValidator(trpcgo.StructValidator(validate.Struct)),
 )
 ```
+
+`validate.Struct` returns an error for anything but a struct, so wrap it with `StructValidator`. The wrapper finds every struct in the input, through pointers, slices, arrays, and map values, and validates each one. Errors from several elements are joined, each prefixed with its path, such as `[2]`.
+
+`StructValidator` skips primitive values, `time.Time` values, and nil pointers inside collections. A nil pointer at the root, from a JSON `null` or a missing input, still reaches `validate.Struct`, which rejects it.
+
+Pass your own callback when a scalar or collection input needs rules of its own, for example through `validate.Var`.
 
 `validate` tags do not trigger server-side validation unless you configure this option. A validation failure returns `BAD_REQUEST` with the message `input validation failed`.
 
@@ -133,6 +139,7 @@ Use a positive ping interval; `0` uses the default of 10 seconds. For `WithSSEMa
 | `WithTypeOutput(path)` | Writes generated TypeScript in dev mode. |
 | `WithZodOutput(path)` | Writes generated Zod schemas in dev mode. |
 | `WithZodMini(bool)` | Uses `zod/mini` functional syntax. |
+| `WithZodValidation(config)` | Adds [custom validation rules](/zod-schemas/#custom-validation-rules) to generated schemas. |
 | `WithEnumsOutput(path)` | Writes runtime enum value objects in dev mode. |
 | `WithWatchPackages(patterns...)` | Restricts dev watcher analysis to package patterns like `./cmd/api` or `./internal/...`. |
 

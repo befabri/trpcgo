@@ -43,7 +43,15 @@ Global middleware runs first, followed by per-procedure middleware in the order 
 
 ## Server-Side Calls
 
-`Call` and `RawCall` run the same middleware as HTTP calls. They use the current router configuration; an HTTP handler keeps the configuration from when it was created. See [Handler Snapshot](/http-protocol/#handler-snapshot).
+Call a procedure from Go with `Call` for typed input and output, or `RawCall` for JSON input:
+
+```go
+user, err := trpcgo.Call[CreateUserInput, User](router, ctx, "user.create", input)
+
+result, err := router.RawCall(ctx, "user.create", json.RawMessage(`{"name":"Alice"}`))
+```
+
+Both support queries and mutations; to use a subscription from Go, call its handler directly. `Call` and `RawCall` run the same middleware as HTTP calls. They use the current router configuration; an HTTP handler keeps the configuration from when it was created. See [Handler Snapshot](/http-protocol/#handler-snapshot).
 
 ## Procedure Metadata
 

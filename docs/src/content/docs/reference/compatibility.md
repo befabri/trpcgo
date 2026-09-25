@@ -38,9 +38,15 @@ If you use `GenerateTS` or `GenerateZod`, regenerate both files after upgrading 
 
 ## Zod
 
-Generated schemas target Zod 4.
+Generated schemas need Zod 4.5.4 or newer. From 4.5 on, Zod counts code points in string `min`, `max`, and `len` checks, as validator counts runes. Earlier 4.x releases count string lengths differently from the server, and generated modules fail to type-check against them.
+
+```bash
+npm install zod@^4.5.4
+```
 
 Use `--zod-mini` or `WithZodMini(true)` to generate `zod/mini` functional syntax instead of standard chained syntax.
+
+See [Zod Validation](/reference/zod-validation/) for how generated schemas match validator and `encoding/json` in edge cases.
 
 ## HTTP
 

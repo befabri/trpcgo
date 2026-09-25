@@ -65,6 +65,7 @@ export default defineConfig({
 					items: [
 						{ label: 'CLI', slug: 'reference/cli' },
 						{ label: 'Compatibility', slug: 'reference/compatibility' },
+						{ label: 'Zod Validation', slug: 'reference/zod-validation' },
 					],
 				},
 			],

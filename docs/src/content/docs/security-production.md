@@ -19,11 +19,11 @@ import "github.com/go-playground/validator/v10"
 validate := validator.New()
 
 router := trpcgo.NewRouter(
-    trpcgo.WithValidator(validate.Struct),
+    trpcgo.WithValidator(trpcgo.StructValidator(validate.Struct)),
 )
 ```
 
-Validation runs after JSON decoding and only for struct inputs.
+`StructValidator` validates every struct in the input, including slice and map elements. See [Validation Option](/router-options/#validation-option) for what it skips and when to pass your own callback.
 
 ## Reject Unknown Fields
 

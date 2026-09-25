@@ -7,9 +7,9 @@ const (
 )
 
 type CreateUserInput struct {
-  Name  string `json:"name"`
-  Email string `json:"email" validate:"email"`
-  Role  Role   `json:"role"`
+  Name  string `json:"name" validate:"required,min=1,max=100"`
+  Email string `json:"email" validate:"required,email"`
+  Role  Role   `json:"role" validate:"oneof=admin editor"`
 }
 
 trpcgo.MustMutation(

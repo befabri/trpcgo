@@ -34,6 +34,8 @@ If no package pattern is provided, trpcgo analyzes `.`.
 | `-w`, `-watch` | Watch Go files and regenerate on write/create events. |
 | `-zod` | Zod schema output file. |
 | `-zod-mini` | Emit `zod/mini` functional syntax. |
+| `-zod-config` | JSON file with [custom validation rules](/zod-schemas/#custom-validation-rules). |
+| `-zod-allow-unknown-fields` | Generate objects that accept unknown keys, matching `WithStrictInput(false)`. |
 | `-enums` | Runtime enum value object output file. |
 
 Examples:
@@ -46,7 +48,7 @@ go tool trpcgo generate -o web/gen/trpc.ts --zod web/gen/zod.ts -w ./...
 ```
 
 :::caution
-Create parent directories before running the CLI. Output paths are relative to where you run the command, even when you set `-dir`.
+Create parent directories before running the CLI. Output and `--zod-config` paths are relative to where you run the command, even when you set `-dir`.
 :::
 
 ## Runtime And Dev Generation
@@ -98,7 +100,7 @@ trpcgo.WithWatchPackages("./cmd/api", "./internal/...")
 | generic struct declarations | Generic TypeScript interfaces | Concrete interfaces per instantiation |
 | source-level typed output parser discovery | Yes | Registered typed parsers only |
 
-Const groups generate unions for reachable named types declared in the analyzed packages or other packages in the same Go module. Standard-library and third-party constants are ignored, so types like `time.Duration` still generate as their normal primitive TypeScript shape.
+Const groups generate unions for reachable named types declared in the analyzed packages or other packages in the same Go module. The union stays open, because the server accepts any value of the underlying Go type: `type Role string` with `admin` and `editor` constants generates `"admin" | "editor" | (string & {})`, which still offers the constants in completions. Restrict a field to the constants with `validate:"oneof=admin editor"`, which narrows both the Zod schema and the parsed type. Standard-library and third-party constants are ignored, so types like `time.Duration` still generate as their normal primitive TypeScript shape.
 
 Use the CLI for generated files committed or built in CI. Use dev watch for a fast local feedback loop.
 
@@ -177,7 +179,7 @@ Pass `--zod` or configure `WithZodOutput` to generate schemas for typed procedur
 go tool trpcgo generate -o web/gen/trpc.ts --zod web/gen/zod.ts ./...
 ```
 
-If no procedures have typed inputs, runtime `GenerateZod` and dev watch remove stale Zod files. The CLI writes an empty file at the requested Zod path.
+If no procedure has an input that needs a schema, no Zod file is written. See [No Typed Inputs](/zod-schemas/#no-typed-inputs).
 
 See [Zod Schemas](/zod-schemas/) for validate tag mapping, `zod/mini`, `omitempty`, `dive`, cross-field rules, and frontend usage.
 

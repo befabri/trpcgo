@@ -19,6 +19,7 @@ const docOrder = [
 	'security-production',
 	'reference/cli',
 	'reference/compatibility',
+	'reference/zod-validation',
 ];
 
 export async function renderLlmsFullTxt() {

@@ -70,7 +70,7 @@ func main() {
     router := trpcgo.NewRouter(
         trpcgo.WithDev(true),
         trpcgo.WithStrictInput(true),
-        trpcgo.WithValidator(validate.Struct),
+        trpcgo.WithValidator(trpcgo.StructValidator(validate.Struct)),
         trpcgo.WithTypeOutput("web/gen/trpc.ts"),
         trpcgo.WithZodOutput("web/gen/zod.ts"),
     )
@@ -94,7 +94,7 @@ func main() {
 }
 ```
 
-`WithValidator(validate.Struct)` is what makes `validate` tags run on the server. Without it, the tags still help Zod generation but runtime input validation is disabled.
+`WithValidator(trpcgo.StructValidator(validate.Struct))` is what makes `validate` tags run on the server, including on structs inside slice and map inputs. Without it, the tags still help Zod generation but runtime input validation is disabled.
 
 The sample handler returns a user with a fixed ID and does not store it. Replace that return value with your persistence code when you add a database.
 
@@ -119,9 +119,13 @@ The generated `zod.ts` contains schemas for typed procedure inputs:
 ```ts
 import { z } from 'zod';
 
-export const CreateUserInputSchema = z.object({
+// Helpers defined earlier in the generated file.
+declare function $trpcgoEmail(value: string): boolean;
+declare function $trpcgoIssue(valid: (value: any) => boolean, issue: Record<string, unknown>): z.core.$ZodCheck;
+
+export const CreateUserInputSchema = z.strictObject({
   name: z.string().min(1).max(100),
-  email: z.email().min(1),
+  email: z.string().check($trpcgoIssue((value) => $trpcgoEmail(String(value).replace(/\p{Surrogate}/gu, '\uFFFD')), { code: 'invalid_format', format: 'email' })),
 }).meta({ id: 'CreateUserInput' });
 ```
 
@@ -130,7 +134,7 @@ export const CreateUserInputSchema = z.object({
 In your frontend project, install the client packages and Zod:
 
 ```bash
-npm install @trpc/client@11 @trpc/server@11 zod@4
+npm install @trpc/client@11 @trpc/server@11 zod@^4.5.4
 ```
 
 The following example assumes the calling file is `web/client.ts`, next to the `gen` directory. If your frontend lives elsewhere, adjust the Go output paths and these imports to match.
