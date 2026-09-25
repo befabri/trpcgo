@@ -177,3 +177,12 @@ func eventually(t *testing.T, timeout time.Duration, cond func() bool) bool {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// failOnPanic turns a panic into a test failure. Defer it directly in the
+// goroutine under test; recover only works in the deferred function itself.
+func failOnPanic(t *testing.T) {
+	t.Helper()
+	if recovered := recover(); recovered != nil {
+		t.Fatalf("unexpected panic for valid input: %v", recovered)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -246,6 +247,14 @@ func TestMethodValidation(t *testing.T) {
 
 func TestMethodOverride(t *testing.T) {
 	router := trpcgo.NewRouter(trpcgo.WithMethodOverride(true))
+	var seen trpcgo.ProcedureType
+	router.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		return func(ctx context.Context, input any) (any, error) {
+			meta, _ := trpcgo.GetProcedureMeta(ctx)
+			seen = meta.Type
+			return next(ctx, input)
+		}
+	})
 	trpcgo.VoidQuery(router, "hello", func(ctx context.Context) (string, error) {
 		return "hi", nil
 	})
@@ -261,6 +270,9 @@ func TestMethodOverride(t *testing.T) {
 	body := decodeJSON(t, resp)
 	if got := resultScalar(t, body); got != "hi" {
 		t.Fatalf("result.data = %v, want hi", got)
+	}
+	if seen != trpcgo.ProcedureQuery {
+		t.Fatalf("procedure type = %q, want %q", seen, trpcgo.ProcedureQuery)
 	}
 }
 
@@ -839,5 +851,57 @@ func TestWithOutputParserCodegenReflectionUsesUnknown(t *testing.T) {
 	}
 	if strings.Contains(ts, "name: string;") {
 		t.Errorf("untyped WithOutputParser should not expose handler output shape in generated TS:\n%s", ts)
+	}
+}
+
+func TestHTTPInterfaceInput(t *testing.T) {
+	for _, kind := range []string{"query", "mutation", "subscription", "subscriptionWithFinal"} {
+		for _, raw := range []string{"", "null", " \nnull\t", `"hello"`} {
+			t.Run(kind+"/"+raw, func(t *testing.T) {
+				defer failOnPanic(t)
+				r := trpcgo.NewRouter()
+				calls := 0
+				check := func(input any) {
+					calls++
+					var want any
+					if raw == `"hello"` {
+						want = "hello"
+					}
+					if input != want {
+						t.Errorf("input=%v, want %v", input, want)
+					}
+				}
+				handler := func(_ context.Context, input any) (string, error) { check(input); return "ok", nil }
+				stream := func(_ context.Context, input any) (<-chan string, error) {
+					check(input)
+					ch := make(chan string)
+					close(ch)
+					return ch, nil
+				}
+				switch kind {
+				case "query":
+					trpcgo.MustQuery(r, "check", handler)
+				case "mutation":
+					trpcgo.MustMutation(r, "check", handler)
+				case "subscription":
+					trpcgo.MustSubscribe(r, "check", stream)
+				case "subscriptionWithFinal":
+					trpcgo.MustSubscribeWithFinal(r, "check", func(ctx context.Context, input any) (<-chan string, func() any, error) {
+						ch, err := stream(ctx, input)
+						return ch, func() any { return "done" }, err
+					})
+				}
+				req := httptest.NewRequest(http.MethodGet, "/trpc/check?input="+url.QueryEscape(raw), nil)
+				if kind == "mutation" {
+					req = httptest.NewRequest(http.MethodPost, "/trpc/check", strings.NewReader(raw))
+					req.Header.Set("Content-Type", "application/json")
+				}
+				rec := httptest.NewRecorder()
+				trpc.NewHandler(r, "/trpc").ServeHTTP(rec, req)
+				if rec.Code != http.StatusOK || calls != 1 {
+					t.Fatalf("status=%d calls=%d body=%s", rec.Code, calls, rec.Body.String())
+				}
+			})
+		}
 	}
 }

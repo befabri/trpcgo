@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -171,54 +172,47 @@ func TestSSEEventIDCarriageReturnSanitized(t *testing.T) {
 
 // --- Internal Error Leaking ---
 
-// TestInternalErrorMessageNeverLeaked sends requests that trigger various
-// internal errors and verifies none of the internal details appear in responses.
 func TestInternalErrorMessageNeverLeaked(t *testing.T) {
 	secretMsg := "SECRET_DATABASE_CONNECTION_STRING_xyz123"
 
-	r := trpcgo.NewRouter()
-	trpcgo.VoidQuery(r, "boom", func(ctx context.Context) (string, error) {
-		return "", fmt.Errorf("%s", secretMsg)
-	})
-	trpcgo.Mutation(r, "boom-post", func(ctx context.Context, input string) (string, error) {
-		return "", fmt.Errorf("%s", secretMsg)
-	}, trpcgo.WithMeta("test"))
-
-	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
-
-	tests := []struct {
-		name string
-		path string
-	}{
-		{"query", "/trpc/boom"},
-		{"mutation", "/trpc/boom-post"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var resp *http.Response
-			if tc.name == "mutation" {
-				resp = mustPost(t, server, tc.path, `"input"`)
-			} else {
-				resp = mustGet(t, server, tc.path)
-			}
-			defer func() { _ = resp.Body.Close() }()
-
-			raw, _ := io.ReadAll(resp.Body)
-			body := string(raw)
-
-			if strings.Contains(body, secretMsg) {
-				t.Errorf("internal error leaked to client: %s", body)
-			}
-			if strings.Contains(body, "SECRET") {
-				t.Errorf("partial secret leaked to client: %s", body)
-			}
-
-			// Should contain the generic message.
-			if !strings.Contains(body, "internal server error") {
-				t.Errorf("expected generic error message, got: %s", body)
-			}
+	for _, isDev := range []bool{false, true} {
+		r := trpcgo.NewRouter(trpcgo.WithDev(isDev))
+		trpcgo.VoidQuery(r, "boom", func(ctx context.Context) (string, error) {
+			return "", fmt.Errorf("%s", secretMsg)
 		})
+		trpcgo.Mutation(r, "boom-post", func(ctx context.Context, input string) (string, error) {
+			return "", fmt.Errorf("%s", secretMsg)
+		}, trpcgo.WithMeta("test"))
+
+		server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
+
+		for _, tc := range []struct{ name, path string }{{"query", "/trpc/boom"}, {"mutation", "/trpc/boom-post"}} {
+			t.Run(fmt.Sprintf("isDev=%v/%s", isDev, tc.name), func(t *testing.T) {
+				var resp *http.Response
+				if tc.name == "mutation" {
+					resp = mustPost(t, server, tc.path, `"input"`)
+				} else {
+					resp = mustGet(t, server, tc.path)
+				}
+				defer func() { _ = resp.Body.Close() }()
+
+				raw, _ := io.ReadAll(resp.Body)
+				body := string(raw)
+
+				if strings.Contains(body, secretMsg) {
+					t.Errorf("internal error leaked to client: %s", body)
+				}
+				if strings.Contains(body, "SECRET") {
+					t.Errorf("partial secret leaked to client: %s", body)
+				}
+				if !strings.Contains(body, "internal server error") {
+					t.Errorf("expected generic error message, got: %s", body)
+				}
+				if isDev && !strings.Contains(body, ".go:") {
+					t.Error("dev mode should include a stack trace")
+				}
+			})
+		}
 	}
 }
 
@@ -464,6 +458,8 @@ func TestPathTraversalAttempts(t *testing.T) {
 
 	// Non-traversal invalid paths — 404 (just not found, no traversal).
 	otherPaths := []string{
+		"/trpc/%20",
+		"/trpc/%00",
 		"/trpc/safe%00injected",
 		"/trpc/" + strings.Repeat("a", 10000),
 	}
@@ -917,9 +913,17 @@ func TestSSEMaxConnectionsConcurrentRace(t *testing.T) {
 // TestConcurrentBatchAndSingleRequests fires many requests of different types
 // concurrently to detect race conditions (run with -race).
 func TestConcurrentBatchAndSingleRequests(t *testing.T) {
-	r := trpcgo.NewRouter(trpcgo.WithBatching(true))
+	r := trpcgo.NewRouter(trpcgo.WithBatching(true), trpcgo.WithSSEMaxDuration(300*time.Millisecond))
 	trpcgo.VoidQuery(r, "ping", func(ctx context.Context) (string, error) { return "pong", nil })
 	trpcgo.Mutation(r, "echo", func(ctx context.Context, in string) (string, error) { return in, nil })
+	trpcgo.VoidSubscribe(r, "stream", func(ctx context.Context) (<-chan string, error) {
+		ch := make(chan string, 3)
+		ch <- "a"
+		ch <- "b"
+		ch <- "c"
+		close(ch)
+		return ch, nil
+	})
 
 	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
@@ -929,9 +933,11 @@ func TestConcurrentBatchAndSingleRequests(t *testing.T) {
 			defer func() { done <- struct{}{} }()
 
 			var resp *http.Response
-			switch idx % 4 {
+			switch idx % 5 {
 			case 0:
 				resp = mustGet(t, server, "/trpc/ping")
+			case 4:
+				resp = mustGet(t, server, "/trpc/stream")
 			case 1:
 				resp = mustPost(t, server, "/trpc/echo", `"hello"`)
 			case 2:
@@ -1001,10 +1007,10 @@ func TestResponseMetadataConcurrentAccess(t *testing.T) {
 // gets the sanitized error (not the raw internal one) for non-*Error errors.
 func TestErrorFormatterReceivesWrappedInternalError(t *testing.T) {
 	secretMsg := "pg: connection reset by 10.0.0.5"
-	var formatterReceivedMessage string
+	var formatterError *trpcgo.Error
 
 	r := trpcgo.NewRouter(trpcgo.WithErrorFormatter(func(input trpcgo.ErrorFormatterInput) any {
-		formatterReceivedMessage = input.Error.Message
+		formatterError = input.Error
 		return input.Shape
 	}))
 	trpcgo.VoidQuery(r, "boom", func(ctx context.Context) (string, error) {
@@ -1015,12 +1021,14 @@ func TestErrorFormatterReceivesWrappedInternalError(t *testing.T) {
 	resp := mustGet(t, server, "/trpc/boom")
 	defer func() { _ = resp.Body.Close() }()
 
-	// The formatter should receive "internal server error", not the secret.
-	if formatterReceivedMessage == secretMsg {
-		t.Errorf("error formatter received raw internal error: %q", formatterReceivedMessage)
+	if formatterError == nil {
+		t.Fatal("error formatter was not called")
 	}
-	if formatterReceivedMessage != "internal server error" {
-		t.Errorf("expected 'internal server error', got %q", formatterReceivedMessage)
+	if formatterError.Message != "internal server error" {
+		t.Errorf("error formatter received %q, want the generic message", formatterError.Message)
+	}
+	if formatterError.Cause != nil && strings.Contains(formatterError.Cause.Error(), secretMsg) {
+		t.Error("error formatter received the internal cause")
 	}
 
 	// Client response should also be clean.
@@ -1079,16 +1087,26 @@ func TestBatchingDisabledRejectsBatchQuery(t *testing.T) {
 
 // --- JSONL Batch Size Limit ---
 
-// TestJSONLBatchRespectsSizeLimit verifies JSONL batch also respects the limit.
-func TestJSONLBatchRespectsSizeLimit(t *testing.T) {
-	r := trpcgo.NewRouter(trpcgo.WithBatching(true), trpcgo.WithMaxBatchSize(2))
-	trpcgo.VoidQuery(r, "a", func(ctx context.Context) (string, error) { return "a", nil })
-	trpcgo.VoidQuery(r, "b", func(ctx context.Context) (string, error) { return "b", nil })
-	trpcgo.VoidQuery(r, "c", func(ctx context.Context) (string, error) { return "c", nil })
+func TestJSONLBatchAmplification(t *testing.T) {
+	var handlerCalls atomic.Int64
+	r := trpcgo.NewRouter(
+		trpcgo.WithBatching(true),
+		trpcgo.WithMaxBatchSize(3),
+	)
+	trpcgo.VoidQuery(r, "ping", func(ctx context.Context) (string, error) {
+		handlerCalls.Add(1)
+		return "pong", nil
+	})
 
 	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
 
-	req, _ := http.NewRequest("GET", server.URL+"/trpc/a,b,c?batch=1", nil)
+	paths := make([]string, 100)
+	for i := range paths {
+		paths[i] = "ping"
+	}
+	url := server.URL + "/trpc/" + strings.Join(paths, ",") + "?batch=1"
+
+	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("trpc-accept", "application/jsonl")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -1097,7 +1115,12 @@ func TestJSONLBatchRespectsSizeLimit(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("JSONL batch over limit: expected 400, got %d", resp.StatusCode)
+		t.Errorf("JSONL batch should respect size limit, got status %d", resp.StatusCode)
+	}
+
+	calls := handlerCalls.Load()
+	if calls > 0 {
+		t.Errorf("VULNERABILITY: %d handlers called in oversized JSONL batch", calls)
 	}
 }
 
@@ -1148,10 +1171,8 @@ func TestNoProcedurePath(t *testing.T) {
 
 // --- Response Always Has Content-Type ---
 
-// TestErrorResponseAlwaysHasContentType verifies all error responses set JSON
-// content type, preventing browsers from sniffing the content.
-func TestErrorResponseAlwaysHasContentType(t *testing.T) {
-	r := trpcgo.NewRouter()
+func TestResponsesAlwaysSetContentType(t *testing.T) {
+	r := trpcgo.NewRouter(trpcgo.WithBatching(true))
 	trpcgo.VoidQuery(r, "hello", func(ctx context.Context) (string, error) {
 		return "hi", nil
 	})
@@ -1163,6 +1184,8 @@ func TestErrorResponseAlwaysHasContentType(t *testing.T) {
 		method string
 		path   string
 	}{
+		{"single query", "GET", "/trpc/hello"},
+		{"batch query", "GET", "/trpc/hello,hello?batch=1"},
 		{"not found", "GET", "/trpc/nonexistent"},
 		{"method not allowed", "PUT", "/trpc/hello"},
 		{"no path", "GET", "/trpc/"},
@@ -1175,7 +1198,7 @@ func TestErrorResponseAlwaysHasContentType(t *testing.T) {
 
 			ct := resp.Header.Get("Content-Type")
 			if !strings.HasPrefix(ct, "application/json") {
-				t.Errorf("error response Content-Type should be application/json, got %q", ct)
+				t.Errorf("Content-Type should be application/json, got %q", ct)
 			}
 		})
 	}
@@ -1203,17 +1226,258 @@ func TestRawCallDoesNotBypassValidation(t *testing.T) {
 	}
 }
 
-// --- Helpers (from trpcgo_test.go, needed for test file compilation) ---
-// Note: These are defined in trpcgo_test.go in the same package, so they
-// are accessible. If this file is compiled separately, these would need
-// to be duplicated. Since we're in the same package (trpcgo_test), they
-// are shared.
+// net/http recovers a panic only in the handler goroutine. JSONL batch calls
+// run in goroutines of their own, so the handler must recover there itself.
+func TestJSONLBatchPanicDoesNotCrashServer(t *testing.T) {
+	r := trpcgo.NewRouter(trpcgo.WithBatching(true))
+	trpcgo.VoidQuery(r, "safe", func(ctx context.Context) (string, error) {
+		return "ok", nil
+	})
+	trpcgo.VoidQuery(r, "boom", func(ctx context.Context) (string, error) {
+		panic("handler bug: nil pointer dereference")
+	})
 
-// Verify this file compiles by ensuring we reference the shared test helpers.
-var (
-	_ = newTestServer
-	_ = mustGet
-	_ = mustPost
-	_ = mustRequest
-	_ = decodeJSON
-)
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
+
+	req, _ := http.NewRequest("GET", server.URL+"/trpc/safe,boom?batch=1", nil)
+	req.Header.Set("trpc-accept", "application/jsonl")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Logf("connection error (acceptable, server survived): %v", err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.ReadAll(resp.Body)
+
+	resp2, err := http.Get(server.URL + "/trpc/safe")
+	if err != nil {
+		t.Fatalf("server died after JSONL panic: %v", err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("server unhealthy after JSONL panic: status %d", resp2.StatusCode)
+	}
+}
+
+func TestJSONLBatchAllPanicDoesNotCrashServer(t *testing.T) {
+	r := trpcgo.NewRouter(trpcgo.WithBatching(true))
+	trpcgo.VoidQuery(r, "boom", func(ctx context.Context) (string, error) {
+		panic("total explosion")
+	})
+	trpcgo.VoidQuery(r, "safe", func(ctx context.Context) (string, error) {
+		return "alive", nil
+	})
+
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
+
+	req, _ := http.NewRequest("GET", server.URL+"/trpc/boom,boom?batch=1", nil)
+	req.Header.Set("trpc-accept", "application/jsonl")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Logf("connection error (acceptable): %v", err)
+	} else {
+		_, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+	}
+
+	resp2, err := http.Get(server.URL + "/trpc/safe")
+	if err != nil {
+		t.Fatalf("server crashed after all-panic JSONL batch: %v", err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp2.StatusCode)
+	}
+}
+
+// A batch call that dies without sending its result must not block the loop
+// collecting results, or the connection hangs until the client gives up.
+func TestJSONLBatchPanicDoesNotHang(t *testing.T) {
+	r := trpcgo.NewRouter(trpcgo.WithBatching(true))
+	trpcgo.VoidQuery(r, "boom", func(ctx context.Context) (string, error) {
+		panic("nil pointer")
+	})
+
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
+
+	req, _ := http.NewRequest("GET", server.URL+"/trpc/boom?batch=1", nil)
+	req.Header.Set("trpc-accept", "application/jsonl")
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	start := time.Now()
+	resp, err := client.Do(req)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		_, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+	}
+
+	if elapsed > 2*time.Second {
+		t.Fatalf("JSONL batch hung for %v (expected instant error or response)", elapsed)
+	}
+}
+
+// tRPC clients read data.path from error envelopes to attribute batched
+// errors, so echoing the path is protocol, not a leak.
+func TestNotFoundIncludesPathPerProtocol(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.VoidQuery(r, "real", func(ctx context.Context) (string, error) { return "ok", nil })
+
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
+	resp := mustGet(t, server, "/trpc/nonexistent")
+	body := decodeJSON(t, resp)
+
+	errData := errorData(t, body)
+	path, _ := errData["path"].(string)
+	if path != "nonexistent" {
+		t.Errorf("tRPC protocol requires data.path in error envelope, got %q", path)
+	}
+}
+
+// net/http already percent-decodes r.URL.Path. Decoding it again would let a
+// double-encoded path reach a procedure that a proxy ACL had blocked.
+func TestDoubleURLDecodingBlocked(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.VoidQuery(r, "admin.secret", func(ctx context.Context) (string, error) {
+		return "you reached admin.secret", nil
+	})
+
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
+
+	// %252E decodes once to %2E, so the lookup key is "admin%2Esecret".
+	resp := mustGet(t, server, "/trpc/admin%252Esecret")
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("double-encoded path should NOT reach procedure 'admin.secret'")
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for double-encoded path, got %d", resp.StatusCode)
+	}
+
+	resp2 := mustGet(t, server, "/trpc/admin%2Esecret")
+	defer func() { _ = resp2.Body.Close() }()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("single-encoded path should still resolve, got %d", resp2.StatusCode)
+	}
+}
+
+// r.URL.Query already percent-decodes the input parameter. Decoding it again
+// would make input that a proxy or WAF saw as opaque text parse as JSON.
+func TestGETInputDoubleDecodeBlocked(t *testing.T) {
+	var receivedID string
+	r := trpcgo.NewRouter()
+	trpcgo.Query(r, "user", func(ctx context.Context, in struct {
+		ID string `json:"id"`
+	}) (string, error) {
+		receivedID = in.ID
+		return "found: " + in.ID, nil
+	})
+
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
+
+	// {"id":"1"} percent-encoded twice.
+	doubleEncoded := "%257B%2522id%2522%253A%25221%2522%257D"
+	resp := mustGet(t, server, "/trpc/user?input="+doubleEncoded)
+	defer func() { _ = resp.Body.Close() }()
+
+	if receivedID == "1" {
+		t.Fatal("double-encoded GET input was decoded twice and reached handler — " +
+			"attacker can bypass WAF/proxy input validation via double-encoding")
+	}
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("double-encoded GET input should not produce a 200 response")
+	}
+}
+
+func TestGETBatchInputDoubleDecodeBlocked(t *testing.T) {
+	var receivedID string
+	r := trpcgo.NewRouter(trpcgo.WithBatching(true))
+	trpcgo.Query(r, "user", func(ctx context.Context, in struct {
+		ID string `json:"id"`
+	}) (string, error) {
+		receivedID = in.ID
+		return "found: " + in.ID, nil
+	})
+
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
+
+	// {"0":{"id":"1"}} percent-encoded twice.
+	doubleEncoded := "%257B%25220%2522%253A%257B%2522id%2522%253A%25221%2522%257D%257D"
+	resp := mustGet(t, server, "/trpc/user?batch=1&input="+doubleEncoded)
+	defer func() { _ = resp.Body.Close() }()
+
+	if receivedID == "1" {
+		t.Fatal("double-encoded batch GET input was decoded twice and reached handler")
+	}
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("double-encoded batch GET input should not produce a 200 response")
+	}
+}
+
+// GET requests carry input in the query string, which MaxBodySize must limit
+// as it limits a POST body.
+func TestGETQueryInputSizeLimitEnforced(t *testing.T) {
+	r := trpcgo.NewRouter(trpcgo.WithMaxBodySize(256))
+	trpcgo.Query(r, "echo", func(ctx context.Context, in json.RawMessage) (string, error) {
+		return fmt.Sprintf("got %d bytes", len(in)), nil
+	})
+
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
+
+	bigInput := `"` + strings.Repeat("x", 2048) + `"`
+	resp := mustGet(t, server, "/trpc/echo?input="+url.QueryEscape(bigInput))
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET query input (%d bytes) bypassed body size limit (256 bytes): %s",
+			len(bigInput), raw)
+	}
+}
+
+func TestGETBatchQueryInputSizeLimitEnforced(t *testing.T) {
+	r := trpcgo.NewRouter(trpcgo.WithBatching(true), trpcgo.WithMaxBodySize(256))
+	trpcgo.Query(r, "echo", func(ctx context.Context, in json.RawMessage) (string, error) {
+		return fmt.Sprintf("got %d bytes", len(in)), nil
+	})
+
+	server := newTestServer(t, trpc.NewHandler(r, "/trpc"))
+
+	bigInput := `{"0":"` + strings.Repeat("x", 2048) + `"}`
+	resp := mustGet(t, server, "/trpc/echo?batch=1&input="+url.QueryEscape(bigInput))
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("batch GET query input bypassed body size limit")
+	}
+}
+
+// NewHandler must copy each procedure rather than mutate the pointer RawCall
+// reads. Only -race can fail this test.
+func TestHandlerAndRawCallConcurrentNoRace(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.VoidQuery(r, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	})
+
+	done := make(chan struct{})
+	for range 100 {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			_ = trpc.NewHandler(r, "/trpc")
+		}()
+		go func() {
+			defer func() { done <- struct{}{} }()
+			_, _ = r.RawCall(t.Context(), "ping", nil)
+		}()
+	}
+	for range 200 {
+		<-done
+	}
+}

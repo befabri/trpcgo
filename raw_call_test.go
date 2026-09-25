@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -407,5 +408,82 @@ func TestRawCallConcurrent(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Error(err)
+	}
+}
+
+func TestRawCallNullAnyInput(t *testing.T) {
+	for _, raw := range []string{"", "null", " \nnull\t"} {
+		t.Run(raw, func(t *testing.T) {
+			defer failOnPanic(t)
+			r := trpcgo.NewRouter()
+			called := false
+			trpcgo.MustQuery(r, "echo", func(_ context.Context, input any) (any, error) {
+				called = true
+				return input, nil
+			})
+
+			got, err := r.RawCall(t.Context(), "echo", json.RawMessage(raw))
+			if err != nil || got != nil || !called {
+				t.Fatalf("RawCall(%q) = (%v, %v), called=%v; want (nil, nil), called=true", raw, got, err, called)
+			}
+		})
+	}
+}
+
+// TestRawCallConcurrentUse is meaningful under -race: Use and RawCall must
+// share the router's synchronization, including the middleware slice.
+func TestRawCallConcurrentUse(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "ping", func(_ context.Context) (string, error) {
+		return "pong", nil
+	})
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 1000 {
+			r.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc { return next })
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 1000 {
+			got, err := r.RawCall(t.Context(), "ping", nil)
+			if err != nil || got != "pong" {
+				t.Errorf("RawCall = (%v, %v), want (pong, nil)", got, err)
+				return
+			}
+		}
+	}()
+	close(start)
+	wg.Wait()
+}
+
+func TestRawCallMiddlewareSnapshot(t *testing.T) {
+	r := trpcgo.NewRouter()
+	var order []string
+	mw := func(name string) trpcgo.Middleware {
+		return func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+			return func(ctx context.Context, input any) (any, error) {
+				order = append(order, name)
+				return next(ctx, input)
+			}
+		}
+	}
+	var once sync.Once
+	r.Use(func(next trpcgo.HandlerFunc) trpcgo.HandlerFunc {
+		once.Do(func() { r.Use(mw("later")) })
+		return mw("first")(next)
+	})
+	trpcgo.MustVoidQuery(r, "ping", func(context.Context) (string, error) { return "pong", nil }, trpcgo.Use(mw("local")))
+	for _, want := range []string{"first,local", "first,later,local"} {
+		order = nil
+		got, err := r.RawCall(t.Context(), "ping", nil)
+		if err != nil || got != "pong" || strings.Join(order, ",") != want {
+			t.Fatalf("RawCall=(%v,%v), order=%v, want %s", got, err, order, want)
+		}
 	}
 }

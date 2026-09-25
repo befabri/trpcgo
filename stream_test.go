@@ -5,9 +5,11 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
@@ -865,5 +867,93 @@ func TestLastEventIdNotMergedForQueries(t *testing.T) {
 	data, _ := json.Marshal(capturedInput)
 	if strings.Contains(string(data), "lastEventId") {
 		t.Errorf("lastEventId should not be merged for queries, got input: %s", data)
+	}
+}
+
+func TestSubscriptionNullAnyInput(t *testing.T) {
+	defer failOnPanic(t)
+	r := trpcgo.NewRouter()
+	called := false
+	trpcgo.MustSubscribe(r, "events", func(_ context.Context, input any) (<-chan string, error) {
+		called = true
+		if input != nil {
+			t.Errorf("input = %v, want nil", input)
+		}
+		ch := make(chan string)
+		close(ch)
+		return ch, nil
+	})
+
+	rec := httptest.NewRecorder()
+	trpc.NewHandler(r, "/trpc").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/trpc/events?input=null", nil))
+	if !called || rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "event: return\n") {
+		t.Fatalf("called=%v, status=%d, body=%s; want a completed subscription", called, rec.Code, rec.Body.String())
+	}
+}
+
+func TestSubscriptionReconnectPaddedNull(t *testing.T) {
+	for _, raw := range []string{"null", " null ", "\tnull\n"} {
+		t.Run(raw, func(t *testing.T) {
+			defer failOnPanic(t)
+			r := trpcgo.NewRouter()
+			var lastEventID any
+			trpcgo.MustSubscribe(r, "events", func(_ context.Context, input map[string]any) (<-chan string, error) {
+				lastEventID = input["lastEventId"]
+				ch := make(chan string)
+				close(ch)
+				return ch, nil
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "/trpc/events?input="+url.QueryEscape(raw), nil)
+			req.Header.Set("Last-Event-Id", "42")
+			rec := httptest.NewRecorder()
+			trpc.NewHandler(r, "/trpc").ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK || lastEventID != "42" {
+				t.Fatalf("status=%d, lastEventId=%v; want 200, 42; body=%s", rec.Code, lastEventID, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestSubscriptionNilItemsRunOutputHooks(t *testing.T) {
+	for _, hook := range []string{"parser", "validator"} {
+		t.Run(hook, func(t *testing.T) {
+			r := trpcgo.NewRouter()
+			calls := 0
+			var option trpcgo.ProcedureOption
+			if hook == "parser" {
+				option = trpcgo.OutputParser(func(input any) (string, error) {
+					calls++
+					return "normalized", nil
+				})
+			} else {
+				option = trpcgo.OutputValidator(func(input any) error {
+					calls++
+					return errors.New("nil output is invalid")
+				})
+			}
+			trpcgo.MustVoidSubscribe(r, "events", func(_ context.Context) (<-chan any, error) {
+				ch := make(chan any, 1)
+				ch <- nil
+				close(ch)
+				return ch, nil
+			}, option)
+
+			rec := httptest.NewRecorder()
+			trpc.NewHandler(r, "/trpc").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/trpc/events", nil))
+			if calls != 1 {
+				t.Errorf("hook called %d times; want once for the nil item and never for EOF", calls)
+			}
+			body := rec.Body.String()
+			if strings.Contains(body, "data: null\n") {
+				t.Errorf("unprocessed nil item reached the client: %s", body)
+			}
+			if hook == "parser" && !strings.Contains(body, "data: \"normalized\"\n") {
+				t.Errorf("missing parsed item: %s", body)
+			}
+			if hook == "validator" && !strings.Contains(body, "event: serialized-error\n") {
+				t.Errorf("missing validation error: %s", body)
+			}
+		})
 	}
 }

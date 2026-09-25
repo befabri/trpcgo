@@ -3,9 +3,12 @@ package trpcgo_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -300,6 +303,102 @@ func TestJSONLBatchConcurrency(t *testing.T) {
 		}
 		if ch.index == 1 && data["name"] != "Fast" {
 			t.Errorf("chunk[1] name = %v, want Fast", data["name"])
+		}
+	}
+}
+
+func TestJSONLSerializationFailureProducesErrorChunk(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "bad", func(_ context.Context) (float64, error) {
+		return math.NaN(), nil
+	})
+	trpcgo.MustVoidQuery(r, "good", func(_ context.Context) (string, error) {
+		return "ok", nil
+	})
+	req := httptest.NewRequest(http.MethodGet, "/trpc/bad,good?batch=1", nil)
+	req.Header.Set("trpc-accept", "application/jsonl")
+	rec := httptest.NewRecorder()
+	trpc.NewHandler(r, "/trpc").ServeHTTP(rec, req)
+	resp := rec.Result()
+	defer resp.Body.Close()
+	head, chunks := parseJSONLResponse(t, resp)
+	if len(head) != 2 || len(chunks) != 2 {
+		t.Fatalf("head promises %d results, got %d chunks; want two completed results: %s", len(head), len(chunks), rec.Body.String())
+	}
+	byIndex := make(map[int]map[string]any)
+	for _, chunk := range chunks {
+		byIndex[chunk.index] = chunk.envelope
+	}
+	bad, ok := byIndex[0]["error"].(map[string]any)
+	if !ok || bad["code"] != float64(trpcgo.CodeInternalServerError) {
+		t.Errorf("bad result = %v, want INTERNAL_SERVER_ERROR", byIndex[0])
+	}
+	good, ok := byIndex[1]["result"].(map[string]any)
+	if !ok || good["data"] != "ok" {
+		t.Errorf("good result = %v, want successful sibling result", byIndex[1])
+	}
+}
+
+type failingJSONLValue struct{}
+
+func (failingJSONLValue) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("private serialization detail")
+}
+
+func TestJSONLSerializationFallbacks(t *testing.T) {
+	for _, bad := range []any{math.Inf(1), func() {}, failingJSONLValue{}} {
+		for _, brokenFormatter := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%T/formatterBroken=%t", bad, brokenFormatter), func(t *testing.T) {
+				callbacks, formats := 0, 0
+				r := trpcgo.NewRouter(
+					trpcgo.WithOnError(func(_ context.Context, err *trpcgo.Error, path string) {
+						callbacks++
+						if path != "bad" || err.Cause == nil {
+							t.Errorf("serialization callback: path=%q, error=%v", path, err)
+						}
+					}),
+					trpcgo.WithErrorFormatter(func(in trpcgo.ErrorFormatterInput) any {
+						formats++
+						if in.Path != "bad" || in.Type != trpcgo.ProcedureQuery {
+							t.Errorf("formatter metadata: %+v", in)
+						}
+						if brokenFormatter {
+							return failingJSONLValue{}
+						}
+						return map[string]any{"error": in.Shape.Error, "custom": true}
+					}),
+				)
+				trpcgo.MustVoidQuery(r, "bad", func(context.Context) (any, error) { return bad, nil })
+				trpcgo.MustVoidQuery(r, "good", func(context.Context) (string, error) { return "ok", nil })
+				req := httptest.NewRequest(http.MethodGet, "/trpc/good,bad,good?batch=1", nil)
+				req.Header.Set("trpc-accept", "application/jsonl")
+				rec := httptest.NewRecorder()
+				trpc.NewHandler(r, "/trpc").ServeHTTP(rec, req)
+				resp := rec.Result()
+				defer resp.Body.Close()
+				head, chunks := parseJSONLResponse(t, resp)
+				if len(head) != 3 || len(chunks) != 3 || callbacks != 1 || formats != 1 {
+					t.Fatalf("head=%d chunks=%d callbacks=%d formats=%d", len(head), len(chunks), callbacks, formats)
+				}
+				seen := map[int]bool{}
+				for _, chunk := range chunks {
+					if seen[chunk.index] || chunk.status != 0 {
+						t.Fatalf("invalid or repeated chunk: %+v", chunk)
+					}
+					seen[chunk.index] = true
+					if chunk.index == 1 {
+						shape, ok := chunk.envelope["error"].(map[string]any)
+						if !ok || shape["code"] != float64(trpcgo.CodeInternalServerError) || shape["message"] != "internal server error" {
+							t.Errorf("invalid error envelope: %v", chunk.envelope)
+						}
+						if !brokenFormatter && chunk.envelope["custom"] != true {
+							t.Error("custom formatter was not preserved")
+						}
+					} else if result, ok := chunk.envelope["result"].(map[string]any); !ok || result["data"] != "ok" {
+						t.Errorf("successful sibling lost: %+v", chunk)
+					}
+				}
+			})
 		}
 	}
 }
