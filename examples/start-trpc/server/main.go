@@ -354,7 +354,7 @@ func main() {
 		trpcgo.WithBatching(true),
 		trpcgo.WithDev(true),
 		trpcgo.WithMethodOverride(true),
-		trpcgo.WithValidator(validate.Struct),
+		trpcgo.WithValidator(trpcgo.StructValidator(validate.Struct)),
 		trpcgo.WithTypeOutput("../web/gen/trpc.ts"),
 		trpcgo.WithZodOutput("../web/gen/zod.ts"),
 		trpcgo.WithEnumsOutput("../web/gen/enums.ts"),
