@@ -12,7 +12,7 @@ type Links = map[string]*Node
 type Node struct {
 	Child  *Node  `json:"child,omitempty"`
 	Date   string `json:"date" tstype:"Date"`
-	Tags   Tags   `json:"tags"`
+	Tags   Tags   `json:"tags" validate:"dive"`
 	Links  Links  `json:"links,omitempty"`
 	Secret string `json:"secret" zod_omit:"true"`
 	Inline struct {

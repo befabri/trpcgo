@@ -183,7 +183,7 @@ func TestContainerElementType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := containerElementType(tt.typ)
+			got := NewMapper(nil).typeField(tt.typ).Element
 			if tt.want == "" {
 				if got != nil {
 					t.Errorf("non-container has element metadata: %#v", got)
@@ -201,7 +201,7 @@ func TestContainerElementTypeStruct(t *testing.T) {
 	st := types.NewStruct([]*types.Var{nameField}, []string{`json:"name"`})
 	item := types.NewNamed(types.NewTypeName(0, pkg, "Item", nil), st, nil)
 
-	got := containerElementType(types.NewSlice(item))
+	got := NewMapper(nil).typeField(types.NewSlice(item)).Element
 	if got == nil || got.GoKind != "struct" {
 		t.Errorf("containerElementType([]Item) = %#v, want struct element", got)
 	}

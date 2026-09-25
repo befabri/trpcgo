@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/befabri/trpcgo/internal/tstest"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -354,4 +355,135 @@ func TestWatchGenerateLoopStopsWhenDoneCloses(t *testing.T) {
 		t.Fatal("generate should not be called after done is closed")
 		return nil
 	})
+}
+
+func TestGenerateLoadsValidationConfigurationOnEveryPass(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "validation.json")
+	typesPath, zodPath := filepath.Join(dir, "trpc.ts"), filepath.Join(dir, "schemas.ts")
+	args := []string{"generate", "--dir", filepath.Join(testRepoRoot(t), "testdata", "validationconfig"), "-o", typesPath, "--zod", zodPath, "--zod-config", configPath, "--zod-allow-unknown-fields"}
+	for _, minimum := range []string{"2", "5"} {
+		config := `{"tagName":"binding","aliases":{"requiredText":"required,min=` + minimum + `","afterStart":"gtfield=Start","nonemptyList":"min=1,dive,required"}}`
+		if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := run(args, new(bytes.Buffer), new(bytes.Buffer)); err != nil {
+			t.Fatal(err)
+		}
+		output, err := os.ReadFile(zodPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		contract, err := os.ReadFile(filepath.Join(testRepoRoot(t), "testdata", "validationconfig", "contract.ts"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tstest.Run(t, map[string]string{"schemas.ts": string(output), "minimum.ts": "export const minimum = " + minimum + ";\n", "contract.ts": string(contract)}, "contract.ts")
+		types, err := os.ReadFile(typesPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(types), "name?:") {
+			t.Fatalf("required alias applied after optionality binding:\n%s", types)
+		}
+	}
+	beforeTypes, _ := os.ReadFile(typesPath)
+	beforeZod, _ := os.ReadFile(zodPath)
+	if err := os.WriteFile(configPath, []byte(`{"aliases":{"a":"b","b":"a"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if err := run(args, &stdout, new(bytes.Buffer)); err == nil {
+		t.Fatal("cyclic aliases accepted")
+	}
+	afterTypes, _ := os.ReadFile(typesPath)
+	afterZod, _ := os.ReadFile(zodPath)
+	if !bytes.Equal(beforeTypes, afterTypes) || !bytes.Equal(beforeZod, afterZod) || stdout.Len() != 0 {
+		t.Fatal("invalid configuration replaced generated outputs")
+	}
+}
+
+func TestWatchGenerateLoopRegeneratesForConfigReplacement(t *testing.T) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+	path := filepath.Join(t.TempDir(), "validation.json")
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	generated := make(chan struct{}, 1)
+	go func() {
+		defer close(finished)
+		watchGenerateLoop(generateOptions{zodConfig: path}, watcher, done, func(time.Duration) <-chan time.Time {
+			ready := make(chan time.Time, 1)
+			ready <- time.Now()
+			return ready
+		}, func(generateOptions) error { generated <- struct{}{}; return nil })
+	}()
+	watcher.Events <- fsnotify.Event{Name: path, Op: fsnotify.Rename}
+	select {
+	case <-generated:
+	case <-time.After(5 * time.Second):
+		t.Error("config replacement did not trigger regeneration")
+	}
+	close(done)
+	<-finished
+}
+
+// A router whose inputs need no schema leaves no Zod module behind: the CLI
+// removes a stale file as the router and the watcher do, instead of writing
+// an empty script that isolatedModules rejects.
+func TestRunGenerateRemovesStaleZodWithoutSchemas(t *testing.T) {
+	dir := t.TempDir()
+	gomod := "module example.com/scalars\n\ngo 1.26.0\n\nrequire github.com/befabri/trpcgo v0.0.0\n\nreplace github.com/befabri/trpcgo => " + filepath.ToSlash(testRepoRoot(t)) + "\n"
+	source := `package scalars
+
+import (
+	"context"
+
+	"github.com/befabri/trpcgo"
+)
+
+func Setup() *trpcgo.Router {
+	r := trpcgo.NewRouter()
+	trpcgo.VoidQuery(r, "health", func(context.Context) (string, error) { return "ok", nil })
+	trpcgo.Query(r, "echo", func(_ context.Context, text string) (string, error) { return text, nil })
+	return r
+}
+`
+	for name, data := range map[string]string{"go.mod": gomod, "router.go": source} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	typesOut := filepath.Join(dir, "router.ts")
+	zodOut := filepath.Join(dir, "schemas.ts")
+	if err := os.WriteFile(zodOut, []byte("stale zod"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"generate", "--dir", dir, "-o", typesOut, "--zod", zodOut}
+
+	var stdout, stderr bytes.Buffer
+	if err := run(args, &stdout, &stderr); err != nil {
+		t.Fatalf("run generate: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if data, err := os.ReadFile(typesOut); err != nil || !strings.Contains(string(data), "$Query<string, string>") {
+		t.Fatalf("types output = %q, %v; want echo query", data, err)
+	}
+	if _, err := os.Stat(zodOut); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("zod file stat error = %v, want os.ErrNotExist", err)
+	}
+	if want := "Removed " + zodOut + " (no typed inputs)"; !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+
+	// A second run finds nothing to remove and stays quiet.
+	stderr.Reset()
+	if err := run(args, &stdout, &stderr); err != nil {
+		t.Fatalf("second run generate: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("stdout = %q, stderr = %q; want both empty without a stale file", stdout.String(), stderr.String())
+	}
 }

@@ -3,6 +3,8 @@ package typemap
 import (
 	"reflect"
 	"strings"
+
+	"github.com/befabri/trpcgo/zodconfig"
 )
 
 // TypeMeta carries AST-level metadata for a named Go type
@@ -17,36 +19,85 @@ type TypeMeta struct {
 
 // ValidateRule represents a single parsed rule from a `validate` struct tag.
 type ValidateRule struct {
-	Tag   string // "required", "min", "max", "len", "email", etc.
-	Param string // "3", "50", etc. (empty for parameterless rules)
+	Custom   *zodconfig.Rule // Explicit client counterpart; never inferred from a Go callback.
+	Tag      string          // "required", "min", "max", "len", "email", etc.
+	Param    string          // "3", "50", etc. (empty for parameterless rules)
+	HasParam bool            // An explicit '=' was present, including an empty parameter.
+	// Alternatives is an ordered OR group. Tag and Param are empty on groups.
+	// Splitting grammar before decoding escaped parameters keeps literal pipes
+	// distinguishable from the validator's OR operator.
+	Alternatives []ValidateRule
 }
 
 // ParseValidateTag parses a raw struct tag string for a `validate` tag.
 // Returns nil if no validate tag is present.
 //
 // Format: validate:"required,min=3,max=50,alphanum"
+//
+// Rules are split as validator splits them, on commas and pipes alone, so an
+// empty rule or one with surrounding whitespace survives for
+// ParseValidationScope to report instead of being repaired.
 func ParseValidateTag(rawTag string) []ValidateRule {
 	tag := reflect.StructTag(rawTag)
 	v, ok := tag.Lookup("validate")
-	if !ok || v == "" {
+	if !ok || v == "" || v == "-" {
 		return nil
 	}
 	var rules []ValidateRule
 	for p := range strings.SplitSeq(v, ",") {
-		p = strings.TrimSpace(p)
-		if p == "" || p == "-" {
-			continue
+		var alternatives []ValidateRule
+		for branch := range strings.SplitSeq(p, "|") {
+			name, param, hasParam := strings.Cut(branch, "=")
+			param = strings.ReplaceAll(strings.ReplaceAll(param, "0x2C", ","), "0x7C", "|")
+			alternatives = append(alternatives, ValidateRule{Tag: name, Param: param, HasParam: hasParam})
 		}
-		rule := ValidateRule{}
-		if before, after, ok := strings.Cut(p, "="); ok {
-			rule.Tag = before
-			rule.Param = after
+		if len(alternatives) == 1 {
+			rules = append(rules, alternatives[0])
 		} else {
-			rule.Tag = p
+			rules = append(rules, ValidateRule{Alternatives: alternatives})
 		}
-		rules = append(rules, rule)
 	}
 	return rules
+}
+
+// ValidateRuleText writes rule back in validate tag syntax, such as "min=3" or
+// "email|url", escaping commas and pipes in parameters as validator does.
+func ValidateRuleText(rule ValidateRule) string {
+	if len(rule.Alternatives) > 0 {
+		branches := make([]string, len(rule.Alternatives))
+		for i, branch := range rule.Alternatives {
+			branches[i] = ValidateRuleText(branch)
+		}
+		return strings.Join(branches, "|")
+	}
+	if !rule.HasParam && rule.Param == "" {
+		return rule.Tag
+	}
+	return rule.Tag + "=" + strings.NewReplacer(",", "0x2C", "|", "0x7C").Replace(rule.Param)
+}
+
+// ValidationRequiresPresence reports whether required is reached before an
+// omission directive can skip it. An OR group requires presence only when all
+// its branches do. Container element rules do not affect container presence.
+func ValidationRequiresPresence(rules []ValidateRule) bool {
+	for _, rule := range rules {
+		switch rule.Tag {
+		case "omitempty", "omitzero", "omitnil", "dive", "structonly", "nostructlevel":
+			return false
+		case "required":
+			return true
+		}
+		if len(rule.Alternatives) > 0 {
+			all := true
+			for _, branch := range rule.Alternatives {
+				all = all && ValidationRequiresPresence([]ValidateRule{branch})
+			}
+			if all {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // SplitAtDive splits validate rules at the "dive" boundary.
@@ -54,7 +105,7 @@ func ParseValidateTag(rawTag string) []ValidateRule {
 // If no dive tag is present, elementRules is nil.
 func SplitAtDive(rules []ValidateRule) (containerRules []ValidateRule, elementRules []ValidateRule) {
 	for i, r := range rules {
-		if r.Tag == "dive" {
+		if r.Tag == "dive" && !r.HasParam && r.Param == "" {
 			return rules[:i], rules[i+1:]
 		}
 	}

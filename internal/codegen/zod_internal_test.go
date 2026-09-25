@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"bytes"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -29,10 +30,10 @@ func TestFieldToZodComplexTypes(t *testing.T) {
 			want:  "z.optional(UserSchema)",
 		},
 		{
-			name:  "record with nested generic value",
-			field: typemap.Field{Type: "Record<string, Box<User>>"},
+			name:  "record with concrete generic schema metadata",
+			field: typemap.Field{Type: "Record<string, Box<User>>", Element: &typemap.ElementType{Type: "BoxUser"}},
 			style: typemap.ZodStandard,
-			want:  "z.record(z.string(), BoxSchema)",
+			want:  "z.record(z.string(), BoxUserSchema)",
 		},
 		{
 			name:  "optional record mini",
@@ -48,7 +49,7 @@ func TestFieldToZodComplexTypes(t *testing.T) {
 				{Tag: "len", Param: "2"},
 			}, Optional: true},
 			style: typemap.ZodMini,
-			want:  "z.optional(z.array(z.int()).check(z.minLength(1), z.maxLength(3), z.length(2)))",
+			want:  "(((([]).length >= 1) && (([]).length <= 3) && (([]).length === 2)) ? z.optional(z.array(z.int()).check(z.minLength(1), z.maxLength(3), z.length(2))) : z.array(z.int()).check(z.minLength(1), z.maxLength(3), z.length(2)))",
 		},
 		{
 			name: "array constraints normalize validator length params",
@@ -56,7 +57,7 @@ func TestFieldToZodComplexTypes(t *testing.T) {
 				{Tag: "min", Param: "0x10"},
 			}},
 			style: typemap.ZodStandard,
-			want:  "z.array(z.string()).min(16)",
+			want:  "z.array(z.string()).check(z.minLength(16))",
 		},
 		{
 			name: "pointer string element required does not imply non-empty",
@@ -113,13 +114,13 @@ func TestWriteZodAliasAndExtendedObjectPaths(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+	if err := WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard, ZodOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	output := buf.String()
 	for _, want := range []string{
 		"export const IDSchema = z.string().meta({ id: \"ID\" });",
-		"export const ChildSchema = z.object({\n  id: IDSchema,\n  createdAt: z.string().optional(),\n  name: z.string(),",
+		"export const ChildSchema = z.strictObject({\n  id: IDSchema,\n  createdAt: z.string().optional(),\n  name: z.string(),",
 		"id: IDSchema",
 		"name: z.string()",
 	} {
@@ -146,7 +147,7 @@ func TestWriteZodCrossFieldUsesSafePropertyAccess(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+	if err := WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard, ZodOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	output := buf.String()
@@ -171,7 +172,7 @@ func TestUnsupportedCommentEscapesCommentTerminators(t *testing.T) {
 	}
 }
 
-func TestWriteZodSingleNumericUnionUsesLiteral(t *testing.T) {
+func TestWriteZodSingleNumericConstantKeepsInputOpen(t *testing.T) {
 	procs := []ProcEntry{{Path: "create", ProcType: "mutation", InputTS: "Input", OutputTS: "void"}}
 	defs := []typemap.TypeDef{
 		{
@@ -187,14 +188,119 @@ func TestWriteZodSingleNumericUnionUsesLiteral(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard); err != nil {
+	if err := WriteZodSchemas(&buf, procs, defs, typemap.ZodStandard, ZodOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	output := buf.String()
-	if !strings.Contains(output, "export const PrioritySchema = z.literal(1)") {
-		t.Fatalf("single numeric union should use z.literal, got:\n%s", output)
+	if !strings.Contains(output, "export const PrioritySchema = z.number()") {
+		t.Fatalf("single Go constant must not restrict the numeric input, got:\n%s", output)
 	}
 	if strings.Contains(output, "z.union([z.literal(1)])") {
 		t.Fatalf("single numeric union emitted invalid one-option union:\n%s", output)
+	}
+}
+
+func TestWriteZodRejectsUnresolvedGenericWithoutPartialOutput(t *testing.T) {
+	for _, style := range []typemap.ZodStyle{typemap.ZodStandard, typemap.ZodMini} {
+		defs := []typemap.TypeDef{{Name: "Input", Kind: typemap.TypeDefInterface, Fields: []typemap.Field{{Name: "values", Type: "Record<string, Box<User>>"}}}}
+		var output bytes.Buffer
+		err := WriteZodSchemas(&output, []ProcEntry{{InputTS: "Input"}}, defs, style, ZodOptions{})
+		if err == nil || !strings.Contains(err.Error(), "Input.values[]") || !strings.Contains(err.Error(), "requires concrete Go type metadata") {
+			t.Fatalf("expected contextual unresolved generic error, got %v", err)
+		}
+		if output.Len() != 0 {
+			t.Fatalf("generation wrote a partial module before returning %v: %s", err, output.String())
+		}
+	}
+}
+
+func TestObjectUnknownFieldPolicyPreservesObjectAPI(t *testing.T) {
+	for _, style := range []typemap.ZodStyle{typemap.ZodStandard, typemap.ZodMini} {
+		for _, allow := range []bool{false, true} {
+			t.Run(fmt.Sprintf("style%d/allow%v", style, allow), func(t *testing.T) {
+				def := typemap.TypeDef{Name: "Input", Kind: typemap.TypeDefInterface, Fields: []typemap.Field{
+					{Name: "value", Type: "string", GoKind: "string"},
+					{Name: "supplied", Type: "string", GoKind: "string", ZodOmit: true},
+					{Name: "nested", Type: "{ value: string }", GoKind: "struct", Inline: &typemap.TypeDef{Fields: []typemap.Field{{Name: "value", Type: "string", GoKind: "string"}}}},
+				}}
+				var output bytes.Buffer
+				emitter := zodSchemaEmitter{style: style, allowUnknownFields: allow}
+				emitter.writeObject(newErrWriter(&output), def, nil)
+				imported := "zod"
+				if style == typemap.ZodMini {
+					imported = "zod/mini"
+				}
+				program := fmt.Sprintf(`import * as z from %q;
+%s
+const valid = {value:'ok',nested:{value:'ok'}};
+const supplied = InputSchema.parse({...valid,supplied:{by:'transport'}});
+if (!supplied.supplied || !InputSchema.shape.supplied) throw new Error('known omitted field was discarded');
+for (const input of [{...valid,extra:1},{...valid,nested:{value:'ok',extra:1}}]) {
+ const result = z.safeParse(InputSchema,input);
+ if(result.success !== Boolean(%t)) throw new Error('unknown field policy mismatch: '+JSON.stringify(input));
+ if(result.success && JSON.stringify(result.data)!==JSON.stringify(input)) throw new Error('unknown fields were discarded');
+}
+if (!InputSchema.shape.value) throw new Error('object shape API lost');
+`, imported, output.String(), allow)
+				if style == typemap.ZodStandard {
+					program += `if(!InputSchema.safeExtend({additional:z.string()}).safeParse({...valid,additional:'ok'}).success) throw new Error('safeExtend unavailable');`
+				}
+				runJSONHelperProgram(t, map[string]string{"main.ts": program})
+			})
+		}
+	}
+}
+
+func TestPublicGoConstantsRemainOpen(t *testing.T) {
+	for _, tc := range []struct{ kind, ts, literal string }{{"string", "string", `"known"`}, {"int8", "number", "1"}} {
+		def := typemap.TypeDef{Name: "Value", Kind: typemap.TypeDefUnion, UnionMembers: []string{tc.literal}, Underlying: &typemap.Field{Type: tc.ts, GoKind: tc.kind}}
+		var output bytes.Buffer
+		writeTypeDef(newErrWriter(&output), def)
+		open := tc.ts
+		if open == "string" {
+			open = "(string & {})"
+		}
+		expected := "export type Value = " + tc.literal + " | " + open + ";"
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("public type must admit unnamed Go values: %s", output.String())
+		}
+	}
+}
+
+func TestZodUnvalidatedTypesFollowValidatorTraversal(t *testing.T) {
+	profile := typemap.TypeDef{Name: "Profile", Kind: typemap.TypeDefInterface, Fields: []typemap.Field{
+		{Name: "name", Type: "string", GoKind: "string", Validate: []typemap.ValidateRule{{Tag: "required"}}},
+		{Name: "address", Type: "Address", GoKind: "struct"},
+	}}
+	address := typemap.TypeDef{Name: "Address", Kind: typemap.TypeDefInterface, Fields: []typemap.Field{{Name: "city", Type: "string", GoKind: "string"}}}
+	element := &typemap.ElementType{Type: "Profile", GoKind: "struct"}
+	for _, tc := range []struct {
+		name  string
+		field typemap.Field
+		want  map[string]bool
+	}{
+		{name: "slice without dive", field: typemap.Field{Name: "items", Type: "Profile[]", GoKind: "slice", Element: element, Validate: []typemap.ValidateRule{{Tag: "min", Param: "1"}}}, want: map[string]bool{"Profile": true, "Address": true}},
+		{name: "slice with dive", field: typemap.Field{Name: "items", Type: "Profile[]", GoKind: "slice", Element: element, ElementValidate: []typemap.ValidateRule{}}, want: map[string]bool{}},
+		{name: "map without dive", field: typemap.Field{Name: "items", Type: "Record<string, Profile>", GoKind: "map", Element: element, Key: &typemap.ElementType{Type: "string", GoKind: "string"}}, want: map[string]bool{"Profile": true, "Address": true}},
+		{name: "structonly field", field: typemap.Field{Name: "profile", Type: "Profile", GoKind: "struct", Validate: []typemap.ValidateRule{{Tag: "structonly"}}}, want: map[string]bool{"Profile": true, "Address": true}},
+		{name: "plain struct field", field: typemap.Field{Name: "profile", Type: "Profile", GoKind: "struct"}, want: map[string]bool{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defs := map[string]typemap.TypeDef{
+				"Input":   {Name: "Input", Kind: typemap.TypeDefInterface, Fields: []typemap.Field{tc.field}},
+				"Profile": profile,
+				"Address": address,
+			}
+			reachable := map[string]bool{"Input": true, "Profile": true, "Address": true}
+			got := zodUnvalidatedTypes(defs, reachable, zodRootCollections(defs, reachable))
+			if len(got) != len(tc.want) {
+				t.Fatalf("unvalidated = %v, want %v", got, tc.want)
+			}
+			for name := range tc.want {
+				if !got[name] {
+					t.Fatalf("unvalidated = %v, want %v", got, tc.want)
+				}
+			}
+		})
 	}
 }

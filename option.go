@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+
+	"github.com/befabri/trpcgo/zodconfig"
 )
 
 const defaultMaxBatchSize int = 10 //
@@ -32,6 +34,7 @@ type routerOptions struct {
 	zodOutput                     string
 	enumsOutput                   string
 	zodMini                       bool
+	zodValidation                 zodconfig.Config
 	watchPackages                 []string
 }
 
@@ -240,6 +243,17 @@ func WithZodOutput(path string) Option {
 func WithZodMini(enabled bool) Option {
 	return func(o *routerOptions) {
 		o.zodMini = enabled
+	}
+}
+
+// WithZodValidation declares client counterparts for configured Go validation.
+// It does not register or execute server validators. The same configuration can
+// be supplied to source generation using the CLI's --zod-config JSON file.
+// Configuration is copied so later caller mutations cannot affect generation.
+func WithZodValidation(config zodconfig.Config) Option {
+	config = config.Clone()
+	return func(o *routerOptions) {
+		o.zodValidation = config
 	}
 }
 

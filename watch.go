@@ -13,6 +13,7 @@ import (
 	"github.com/befabri/trpcgo/internal/codegen"
 	"github.com/befabri/trpcgo/internal/fsutil"
 	"github.com/befabri/trpcgo/internal/typemap"
+	"github.com/befabri/trpcgo/zodconfig"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -24,6 +25,10 @@ type watchOpts struct {
 	zodOutput   string
 	enumsOutput string
 	zodStyle    typemap.ZodStyle
+	// The configuration compiles on every regeneration, so an invalid one
+	// keeps the previous files and is reported each time.
+	zodValidation         zodconfig.Config
+	zodAllowUnknownFields bool
 }
 
 type watcherConfig struct {
@@ -68,12 +73,14 @@ func (r *Router) newWatcherConfig() (watcherConfig, error) {
 		done:            r.done,
 		handleDirCreate: handleDirCreate,
 		opts: watchOpts{
-			dir:         cwd,
-			patterns:    patterns,
-			output:      absPath(r.opts.typeOutput),
-			zodOutput:   absPath(r.opts.zodOutput),
-			enumsOutput: absPath(r.opts.enumsOutput),
-			zodStyle:    r.zodStyle(),
+			dir:                   cwd,
+			patterns:              patterns,
+			output:                absPath(r.opts.typeOutput),
+			zodOutput:             absPath(r.opts.zodOutput),
+			enumsOutput:           absPath(r.opts.enumsOutput),
+			zodStyle:              r.zodStyle(),
+			zodValidation:         r.opts.zodValidation.Clone(),
+			zodAllowUnknownFields: !r.opts.strictInput,
 		},
 	}, nil
 }
@@ -179,12 +186,17 @@ func absPath(p string) string {
 	return abs
 }
 
-// regenerateFromSource rewrites the generated files from static analysis,
-// keeping the previous files when the source has errors.
+// regenerateFromSource rewrites the generated files from static analysis. Any
+// failure keeps every previous file, so the types and schemas always match.
 func regenerateFromSource(opts watchOpts) {
+	program, err := typemap.CompileValidation(opts.zodValidation)
+	if err != nil {
+		log.Printf("trpcgo: invalid Zod validation configuration, keeping previous generated files: %v", err)
+		return
+	}
 	result, err := analysis.Analyze(opts.patterns, opts.dir)
 	if err != nil {
-		log.Printf("trpcgo: source has errors, keeping previous types")
+		log.Printf("trpcgo: source has errors, keeping previous generated files")
 		return
 	}
 
@@ -193,35 +205,42 @@ func regenerateFromSource(opts watchOpts) {
 	}
 
 	var buf bytes.Buffer
-	genResult, err := codegen.Generate(&buf, result, result.TypeMetas)
+	genResult, err := codegen.Generate(&buf, result, result.TypeMetas, program)
 	if err != nil {
-		log.Printf("trpcgo: codegen failed: %v", err)
+		log.Printf("trpcgo: codegen failed, keeping previous generated files: %v", err)
 		return
 	}
 
-	writeIfChanged(opts.output, buf.Bytes(), "types")
+	var zodBuf, enumsBuf bytes.Buffer
 
 	if opts.zodOutput != "" && genResult != nil {
-		var zodBuf bytes.Buffer
-		if err := codegen.WriteZodSchemas(&zodBuf, genResult.Procs, genResult.Defs, opts.zodStyle); err != nil {
-			log.Printf("trpcgo: zod codegen failed: %v", err)
+		if err := codegen.WriteZodSchemas(&zodBuf, genResult.Procs, genResult.Defs, opts.zodStyle, codegen.ZodOptions{AllowUnknownFields: opts.zodAllowUnknownFields, Validation: program}); err != nil {
+			log.Printf("trpcgo: zod codegen failed, keeping previous generated files: %v", err)
 			return
 		}
+	}
+
+	if opts.enumsOutput != "" && genResult != nil {
+		if err := codegen.WriteEnums(&enumsBuf, genResult.Defs); err != nil {
+			log.Printf("trpcgo: enums codegen failed, keeping previous generated files: %v", err)
+			return
+		}
+	}
+	// Complete every render before replacing files, so invalid configuration
+	// or validation metadata keeps all previous generated outputs together.
+	writeIfChanged(opts.output, buf.Bytes(), "types")
+	if opts.zodOutput != "" {
 		if zodBuf.Len() == 0 {
-			if err := os.Remove(opts.zodOutput); err == nil {
+			if removed, err := fsutil.RemoveIfExists(opts.zodOutput); err != nil {
+				log.Printf("trpcgo: removing stale %s failed: %v", opts.zodOutput, err)
+			} else if removed {
 				log.Printf("trpcgo: removed %s (no typed inputs)", opts.zodOutput)
 			}
 		} else {
 			writeIfChanged(opts.zodOutput, zodBuf.Bytes(), "zod schemas")
 		}
 	}
-
-	if opts.enumsOutput != "" && genResult != nil {
-		var enumsBuf bytes.Buffer
-		if err := codegen.WriteEnums(&enumsBuf, genResult.Defs); err != nil {
-			log.Printf("trpcgo: enums codegen failed: %v", err)
-			return
-		}
+	if opts.enumsOutput != "" {
 		writeIfChanged(opts.enumsOutput, enumsBuf.Bytes(), "enum values")
 	}
 }

@@ -2,73 +2,13 @@ package trpcgo
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/befabri/trpcgo/internal/typemap"
 	"github.com/befabri/trpcgo/internal/typemap/testdata/embedding"
 )
-
-func analysisFixtureDir(t *testing.T, name string) string {
-	t.Helper()
-	_, thisFile, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(thisFile), "internal", "analysis", "testdata", name)
-}
-
-func TestRegenerateFromSourceWritesTypesAndZod(t *testing.T) {
-	dir := t.TempDir()
-	typesOut := filepath.Join(dir, "router.ts")
-	zodOut := filepath.Join(dir, "schemas.ts")
-
-	regenerateFromSource(watchOpts{
-		dir:       analysisFixtureDir(t, "enhanced"),
-		patterns:  []string{"."},
-		output:    typesOut,
-		zodOutput: zodOut,
-		zodStyle:  0,
-	})
-
-	typesData, err := os.ReadFile(typesOut)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(typesData), "export type AppRouter") {
-		t.Fatalf("types output missing AppRouter:\n%s", typesData)
-	}
-	zodData, err := os.ReadFile(zodOut)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(zodData), "Schema") {
-		t.Fatalf("zod output missing schemas:\n%s", zodData)
-	}
-}
-
-func TestRegenerateFromSourcePreservesExistingOnAnalyzeError(t *testing.T) {
-	dir := t.TempDir()
-	out := filepath.Join(dir, "router.ts")
-	old := []byte("old content")
-	if err := os.WriteFile(out, old, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	regenerateFromSource(watchOpts{
-		dir:      filepath.Join(dir, "missing"),
-		patterns: []string{"."},
-		output:   out,
-	})
-
-	got, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(old) {
-		t.Fatalf("output changed on analyze error: %q", got)
-	}
-}
 
 func TestReflectGoKindAndTypeScriptMapping(t *testing.T) {
 	tests := []struct {
@@ -88,7 +28,7 @@ func TestReflectGoKindAndTypeScriptMapping(t *testing.T) {
 		{"map", reflect.TypeFor[map[string]int](), "map", "Record<string, number>"},
 		{"interface", reflect.TypeFor[any](), "interface", "unknown"},
 		{"raw message", reflect.TypeFor[json.RawMessage](), "json.RawMessage", "unknown"},
-		{"json number", reflect.TypeFor[json.Number](), "string", "number"},
+		{"json number", reflect.TypeFor[json.Number](), "json.Number", "number"},
 	}
 
 	for _, tt := range tests {
@@ -96,7 +36,7 @@ func TestReflectGoKindAndTypeScriptMapping(t *testing.T) {
 			if got := reflectGoKind(tt.typ); got != tt.kind {
 				t.Errorf("reflectGoKind(%v) = %q, want %q", tt.typ, got, tt.kind)
 			}
-			if got := goTypeToTS(tt.typ, map[string]*reflectDef{}); got != tt.ts {
+			if got := goTypeToTS(tt.typ, newReflectDefs(nil)); got != tt.ts {
 				t.Errorf("goTypeToTS(%v) = %q, want %q", tt.typ, got, tt.ts)
 			}
 		})
@@ -115,16 +55,91 @@ func TestReflectedJSONFieldDominance(t *testing.T) {
 			if err := json.Unmarshal(data, &encoded); err != nil {
 				t.Fatal(err)
 			}
-			fields, extends, _ := collectFieldsTS(typ, map[string]*reflectDef{})
+			fields, extends, _, _ := collectFieldsTS(typ, newReflectDefs(nil))
 			if len(extends) != 0 || len(fields) != len(encoded) {
 				t.Fatalf("fields=%+v extends=%v; JSON=%s", fields, extends, data)
 			}
 			for _, field := range fields {
 				v, ok := encoded[field.Name]
-				if !ok || goTypeToTS(reflect.TypeOf(v), map[string]*reflectDef{}) != field.Type {
+				if !ok || goTypeToTS(reflect.TypeOf(v), newReflectDefs(nil)) != field.Type {
 					t.Errorf("field=%+v disagrees with JSON=%s", field, data)
 				}
 			}
 		})
 	}
+}
+
+type recursiveMenu []struct {
+	Label    string        `json:"label"`
+	Children recursiveMenu `json:"children"`
+}
+
+type recursiveTree map[string]struct {
+	Kids recursiveTree `json:"kids"`
+}
+
+type recursiveChain []*struct {
+	Next recursiveChain `json:"next"`
+}
+
+type recursiveList[T any] []struct {
+	Value T                `json:"value"`
+	Next  recursiveList[T] `json:"next"`
+}
+
+type recursiveLink *struct {
+	Next recursiveLink `json:"next"`
+}
+
+// Reflection mirrors the static mapper: a cycle through an anonymous struct
+// stops at the named type, which the recursive field then references.
+func TestReflectRecursionThroughAnonymousStructsTerminates(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		typ   reflect.Type
+		alias string
+		field string
+	}{
+		{"slice", reflect.TypeFor[recursiveMenu](), "{ label: string; children: recursiveMenu }[]", "children"},
+		{"map", reflect.TypeFor[recursiveTree](), "Record<string, { kids: recursiveTree }>", "kids"},
+		{"pointer elements", reflect.TypeFor[recursiveChain](), "{ next: recursiveChain }[]", "next"},
+		{"generic", reflect.TypeFor[recursiveList[int8]](), "{ value: number; next: %s }[]", "next"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defs := newReflectDefs(nil)
+			goTypeToTS(tc.typ, defs)
+			key := tc.typ.PkgPath() + "." + tc.typ.Name()
+			def := defs.byKey[key]
+			if def == nil || def.underlying == nil {
+				t.Fatalf("no definition for %s in %v", key, defs.byKey)
+			}
+			display := resolveDisplayNames(defs)
+			alias := strings.Replace(tc.alias, "%s", display[key], 1)
+			if got := typemap.ResolveTokens(def.aliasOf, display); got != alias {
+				t.Fatalf("alias = %q, want %q", got, alias)
+			}
+			if field := reflectInlineField(t, def.underlying.Element, tc.field); field.Element != nil || field.Inline != nil {
+				t.Fatalf("recursive field was expanded past its named reference: %#v", field)
+			}
+		})
+	}
+	t.Run("named pointer", func(t *testing.T) {
+		if got := goTypeToTS(reflect.TypeFor[recursiveLink](), newReflectDefs(nil)); !strings.Contains(got, "next") || !strings.HasSuffix(got, ": unknown }") {
+			t.Fatalf("recursive named pointer = %q, want its recursive field untyped", got)
+		}
+	})
+}
+
+func reflectInlineField(t *testing.T, element *typemap.ElementType, name string) typemap.Field {
+	t.Helper()
+	if element == nil || element.Inline == nil {
+		t.Fatalf("element %#v has no anonymous metadata", element)
+	}
+	for _, f := range element.Inline.Fields {
+		if f.Name == name {
+			return f
+		}
+	}
+	t.Fatalf("anonymous object %#v has no field %s", element.Inline, name)
+	return typemap.Field{}
 }

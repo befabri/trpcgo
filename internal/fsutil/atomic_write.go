@@ -249,3 +249,17 @@ func closeAtomicTemp(file io.Closer, path string) error {
 	}
 	return nil
 }
+
+// RemoveIfExists deletes the file at path and reports whether one was there.
+// A missing file is not an error, so a generated output that no longer
+// applies is cleared without a prior check.
+func RemoveIfExists(path string) (bool, error) {
+	err := os.Remove(path)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	}
+	return false, err
+}

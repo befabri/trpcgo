@@ -24,7 +24,7 @@ func TestSSETrackedClientTypes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := codegen.Generate(&static, result, result.TypeMetas); err != nil {
+	if _, err := codegen.Generate(&static, result, result.TypeMetas, nil); err != nil {
 		t.Fatal(err)
 	}
 	for name, generated := range map[string]string{
@@ -76,7 +76,7 @@ const intEvent: RouterOutputs['bInt'] = { ID: '43', Retry: 5000, Data: 99 };
 					t.Fatal(err)
 				}
 			}
-			cmd := exec.CommandContext(t.Context(), filepath.Join(dir, "node_modules", ".bin", "tsc"), "-p", dir)
+			cmd := exec.CommandContext(t.Context(), typeScriptCompiler(t), "-p", dir)
 			if output, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("client types do not match SSE data: %v\n%s", err, output)
 			}

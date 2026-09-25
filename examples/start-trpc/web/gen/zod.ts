@@ -2,27 +2,415 @@
 
 import { z } from "zod";
 
+// Generated schemas need Zod 4.5.4 or newer: from 4.5 on Zod counts code
+// points in string length checks, as validator counts runes. An older Zod
+// fails to type-check here.
+type $ZodOutdated = typeof z.core.version extends { major: 4; minor: 0 | 1 | 2 | 3 | 4 } ? "trpcgo: generated schemas need zod 4.5.4 or newer" : never;
+type $ZodSupported<Outdated extends never> = Outdated;
+export type $ZodVersionCheck = $ZodSupported<$ZodOutdated>;
+
+const $trpcgoIssue = (valid: (value: any) => boolean, issue: Record<string, unknown>) => z.superRefine((value: any, ctx) => { if (!valid(value)) ctx.addIssue({ ...issue, input: value } as z.core.$ZodRawIssue); });
+const $trpcgoValid = (schema: () => z.core.$ZodType) => { let built: z.core.$ZodType | undefined; const parse = (value: unknown) => { if (built === undefined) built = schema(); return z.safeParse(built, value); }; return Object.assign((value: unknown): boolean => parse(value).success, { issues: (value: unknown): readonly object[] => parse(value).error?.issues ?? [] }); };
+const $trpcgoEmail = (value: string): boolean => {
+  const at = value.lastIndexOf("@");
+  if (at <= 0) return false;
+  const local = value.slice(0, at), domain = value.slice(at + 1);
+  // The anchored validator pattern only admits bare addr-specs. Within that
+  // language, these are net/mail's additional quoted-string/dot-atom checks.
+  if (domain.startsWith(".") || domain.endsWith(".") || domain.includes("..")) return false;
+  if (local.startsWith('"')) {
+    if (!local.endsWith('"')) return false;
+    let escaped = false, count = 0;
+    for (const rune of local.slice(1, -1)) {
+      const point = rune.codePointAt(0)!;
+      if (!(point >= 33 && point <= 126 || point >= 128 || point === 32 || point === 9)) return false;
+      if (escaped) { escaped = false; count++; }
+      else if (rune === "\\") escaped = true;
+      else if (rune === '"') return false;
+      else count++;
+    }
+    if (escaped || count === 0) return false;
+  }
+  const machine: readonly (readonly [number, number, number, readonly number[]])[] = [[5,0,0,[]],[3,32,4,[]],[0,3,0,[33,33,35,39,42,43,45,45,47,57,61,61,63,63,65,90,94,126,160,55295,63744,64975,65008,65519]],[1,2,9,[]],[0,5,0,[46,46]],[2,6,2,[]],[0,7,0,[33,33,35,39,42,43,45,45,47,57,61,61,63,63,65,90,94,126,160,55295,63744,64975,65008,65519]],[2,8,3,[]],[1,5,9,[]],[1,4,33,[]],[0,20,0,[34,34]],[0,12,0,[9,9,32,32]],[1,11,13,[]],[0,14,0,[13,13]],[0,16,0,[10,10]],[1,12,16,[]],[0,17,0,[9,9,32,32]],[1,16,19,[]],[1,15,19,[]],[0,20,0,[1,9,11,127,160,55295,63744,64975,65008,65519]],[1,18,30,[]],[0,22,0,[9,9,32,32]],[1,21,23,[]],[0,24,0,[13,13]],[0,26,0,[10,10]],[1,22,26,[]],[2,27,4,[]],[0,28,0,[9,9,32,32]],[2,29,5,[]],[1,26,31,[]],[1,25,31,[]],[0,33,0,[34,34]],[1,2,10,[]],[0,34,0,[64,64]],[0,39,0,[48,57,65,90,97,122,160,55295,63744,64975,65008,65519]],[2,40,0,[]],[0,37,0,[45,46,48,57,65,90,97,122,126,126,160,55295,63744,64975,65008,65519]],[1,36,38,[]],[0,40,0,[48,57,65,90,97,122,160,55295,63744,64975,65008,65519]],[1,35,37,[]],[0,41,0,[46,46]],[1,34,42,[]],[0,47,0,[65,90,97,122,160,55295,63744,64975,65008,65519]],[2,49,0,[]],[0,45,0,[45,46,48,57,65,90,97,122,126,126,160,55295,63744,64975,65008,65519]],[1,44,46,[]],[0,49,0,[65,90,97,122,160,55295,63744,64975,65008,65519]],[1,43,45,[]],[0,50,0,[46,46]],[1,48,50,[]],[3,51,8,[]],[4,0,0,[]]];
+  const symbols = Array.from(value);
+  const add = (start: number, position: number, states: Set<number>): void => {
+    const pending = [start];
+    while (pending.length) {
+      const index = pending.pop()!;
+      if (states.has(index)) continue;
+      states.add(index);
+      const [operation, out, arg] = machine[index]!;
+      if (operation === 1) pending.push(out, arg);
+      else if (operation === 2) pending.push(out);
+      else if (operation === 3 && (!(arg & 4) || position === 0) && (!(arg & 8) || position === symbols.length)) pending.push(out);
+    }
+  };
+  let active = new Set<number>();
+  add(1, 0, active);
+  for (let position = 0; position < symbols.length; position++) {
+    const point = symbols[position]!.codePointAt(0)!;
+    const next = new Set<number>();
+    for (const index of active) {
+      const [operation, out, , ranges] = machine[index]!;
+      if (operation !== 0) continue;
+      for (let i = 0; i < ranges.length; i += 2) {
+        if (point >= ranges[i]! && point <= ranges[i + 1]!) { add(out, position + 1, next); break; }
+      }
+    }
+    if (next.size === 0) return false;
+    active = next;
+  }
+  return Array.from(active).some((index) => machine[index]![0] === 4);
+ };
+const $goCheck0 = /* @__PURE__ */ $trpcgoValid(() => z.string());
+const $goCheck1 = /* @__PURE__ */ $trpcgoValid(() => z.int());
+
+const $goJSONMetadataKey = /* @__PURE__ */ Symbol("trpcgo.go-json.entries");
+
+type $GoJSONEntries = readonly (readonly [string, unknown])[];
+
+function $goJSONObject(entries: $GoJSONEntries): { [key: string]: unknown } {
+  const object: { [key: string]: unknown } = {};
+  const freeze = (pairs: $GoJSONEntries): $GoJSONEntries =>
+    Object.freeze(pairs.map(([name, value]) => Object.freeze([name, value] as const)));
+  for (const [name, value] of entries) {
+    Object.defineProperty(object, name, { value, enumerable: true, writable: true, configurable: true });
+  }
+  Object.defineProperty(object, $goJSONMetadataKey, {
+    value: Object.freeze({ entries: freeze(entries), snapshot: freeze(Object.entries(object)) }),
+  });
+  return object;
+}
+
+function $goJSONEntries(value: object): $GoJSONEntries | undefined {
+  try {
+    const metadata = Object.getOwnPropertyDescriptor(value, $goJSONMetadataKey)?.value;
+    if (metadata === null || typeof metadata !== "object" || !Object.isFrozen(metadata)) return undefined;
+    const entries = Object.getOwnPropertyDescriptor(metadata, "entries")?.value;
+    const snapshot = Object.getOwnPropertyDescriptor(metadata, "snapshot")?.value;
+    if (!Array.isArray(entries) || !Object.isFrozen(entries) || !Array.isArray(snapshot) || !Object.isFrozen(snapshot)) return undefined;
+    const pair = (item: unknown): readonly [string, unknown] | undefined => {
+      if (!Array.isArray(item) || item.length !== 2 || !Object.isFrozen(item)) return undefined;
+      const key = Object.getOwnPropertyDescriptor(item, "0");
+      const value = Object.getOwnPropertyDescriptor(item, "1");
+      if (!key || !("value" in key) || typeof key.value !== "string" || !value || !("value" in value)) return undefined;
+      return [key.value, value.value];
+    };
+    const latest = new Map<string, unknown>();
+    for (const item of entries) {
+      const entry = pair(item);
+      if (!entry) return undefined;
+      latest.set(entry[0], entry[1]);
+    }
+    const keys = Object.keys(value);
+    if (snapshot.length !== keys.length || latest.size !== keys.length) return undefined;
+    for (let i = 0; i < keys.length; i++) {
+      const entry = pair(snapshot[i]);
+      if (!entry || entry[0] !== keys[i] || !latest.has(entry[0]) || !Object.is(latest.get(entry[0]), entry[1])) return undefined;
+      const current = Object.getOwnPropertyDescriptor(value, entry[0]);
+      if (!current || !("value" in current) || !current.enumerable || !Object.is(current.value, entry[1])) return undefined;
+    }
+    return entries as $GoJSONEntries;
+  } catch {
+    // Ordinary objects may carry an unrelated symbol or hostile accessors.
+    return undefined;
+  }
+}
+
+// Parse raw JSON while retaining ordered object entries for Go decoding.
+function $goParseJSON(raw: string): unknown {
+  // encoding/json rejects arrays and objects nested more than 10000 deep as a
+  // syntax error. Counting without recursion also keeps such input from
+  // overflowing the recursive scanner below.
+  let depth = 0;
+  for (let index = 0, quoted = false; index < raw.length; index++) {
+    const code = raw.charCodeAt(index);
+    if (quoted) {
+      if (code === 92) index++;
+      else if (code === 34) quoted = false;
+    } else if (code === 34) quoted = true;
+    else if (code === 91 || code === 123) {
+      if (++depth > 10000) throw new SyntaxError("JSON nests arrays and objects more than 10000 deep");
+    } else if (code === 93 || code === 125) depth--;
+  }
+  // Native parsing validates the complete grammar before the scanner reads it.
+  JSON.parse(raw);
+  let position = 0;
+  const whitespace = () => {
+    while (position < raw.length && raw.charCodeAt(position) <= 32) position++;
+  };
+  const string = (): string => {
+    const start = position++;
+    while (position < raw.length) {
+      const character = raw[position++];
+      if (character === "\\") position++;
+      else if (character === '"') break;
+    }
+    // encoding/json replaces an unpaired surrogate escape with U+FFFD, in
+    // object keys as well as values, so such keys name one Go map entry.
+    return (JSON.parse(raw.slice(start, position)) as string).replace(/\p{Surrogate}/gu, "\uFFFD");
+  };
+  // Containers being read, innermost last, so nesting as deep as Go accepts
+  // needs no recursion. An object keeps the key of the value being read.
+  type Container = { array: unknown[] } | { entries: [string, unknown][]; key: string };
+  const open: Container[] = [];
+  while (true) {
+    whitespace();
+    let value: unknown;
+    const character = raw[position];
+    if (character === "{" || character === "[") {
+      position++;
+      whitespace();
+      if (raw[position] === (character === "{" ? "}" : "]")) {
+        position++;
+        value = character === "{" ? $goJSONObject([]) : [];
+      } else if (character === "[") {
+        open.push({ array: [] });
+        continue;
+      } else {
+        const key = string();
+        whitespace();
+        position++; // colon
+        open.push({ entries: [], key });
+        continue;
+      }
+    } else if (character === '"') {
+      value = string();
+    } else {
+      const start = position;
+      while (position < raw.length && !/[\s,\]}]/.test(raw[position]!)) position++;
+      value = JSON.parse(raw.slice(start, position));
+    }
+    // Add the value to its container, closing each container it completes.
+    while (true) {
+      const container = open[open.length - 1];
+      if (container === undefined) return value;
+      whitespace();
+      const end = raw[position++];
+      if ("array" in container) {
+        container.array.push(value);
+        if (end !== "]") break;
+        value = container.array;
+      } else {
+        container.entries.push([container.key, value]);
+        if (end !== "}") {
+          whitespace();
+          container.key = string();
+          whitespace();
+          position++; // colon
+          break;
+        }
+        value = $goJSONObject(container.entries);
+      }
+      open.pop();
+    }
+  }
+}
+
+type $GoCheck = ((value: unknown) => boolean) & { issues(value: unknown): readonly object[] };
+type $GoWireFailure = { path: readonly PropertyKey[]; issues: readonly object[] };
+type $GoWire = (value: unknown, path: readonly PropertyKey[]) => $GoWireFailure | undefined;
+
+// Issues keep the codes and fields Zod gives them, so a failure reads like
+// Zod's own validation error at the failing value's path.
+function $goWireIssues(failure: $GoWireFailure): z.core.$ZodRawIssue[] {
+  return failure.issues.map((issue) => ({ ...issue, path: [...failure.path, ...((issue as { path?: PropertyKey[] }).path ?? [])] }) as z.core.$ZodRawIssue);
+}
+function $goWireValue(check: $GoCheck, value: unknown, path: readonly PropertyKey[]): $GoWireFailure | undefined {
+  return check(value) ? undefined : { path, issues: check.issues(value) };
+}
+function $goWireKind(expected: string, value: unknown, path: readonly PropertyKey[]): $GoWireFailure {
+  return { path, issues: [{ code: "invalid_type", expected, input: value }] };
+}
+function $goWireObject(value: unknown, path: readonly PropertyKey[], fields: Record<string, $GoWire>): $GoWireFailure | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return $goWireKind("object", value, path);
+  for (const [name, item] of $goJSONEntries(value) ?? Object.entries(value)) {
+    const field = $goJSONFieldName(name, Object.keys(fields));
+    if (field === undefined) return { path, issues: [{ code: "unrecognized_keys", keys: [name], input: value }] };
+    const failure = fields[field]!(item, [...path, field]);
+    if (failure) return failure;
+  }
+  return undefined;
+}
+function $goWireMap(value: unknown, path: readonly PropertyKey[], key: $GoCheck | undefined, element: $GoWire): $GoWireFailure | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return $goWireKind("record", value, path);
+  for (const [name, item] of $goJSONEntries(value) ?? Object.entries(value)) {
+    if (key !== undefined && !key(name)) return { path: [...path, name], issues: [{ code: "invalid_key", origin: "record", issues: key.issues(name), input: name }] };
+    const failure = element(item, [...path, name]);
+    if (failure) return failure;
+  }
+  return undefined;
+}
+// encoding/json skips the elements beyond a fixed array's length.
+function $goWireArray(value: unknown, path: readonly PropertyKey[], length: number | undefined, element: $GoWire): $GoWireFailure | undefined {
+  if (!Array.isArray(value)) return $goWireKind("array", value, path);
+  const count = length === undefined ? value.length : Math.min(length, value.length);
+  for (let index = 0; index < count; index++) {
+    const failure = element(value[index], [...path, index]);
+    if (failure) return failure;
+  }
+  return undefined;
+}
+function $goWireEmail(value: unknown, path: readonly PropertyKey[]): $GoWireFailure | undefined { return (value == null ? undefined : $goWireValue($goCheck0, value, path)); }
+function $goWireRole(value: unknown, path: readonly PropertyKey[]): $GoWireFailure | undefined { return (value == null ? undefined : $goWireValue($goCheck0, value, path)); }
+function $goWireCreateUserInput(value: unknown, path: readonly PropertyKey[]): $GoWireFailure | undefined { return value == null ? undefined : $goWireObject(value, path, {["name"]: (item: unknown, path: readonly PropertyKey[]) => (item == null ? undefined : $goWireValue($goCheck0, item, path)), ["email"]: (item: unknown, path: readonly PropertyKey[]) => (item == null ? undefined : $goWireValue($goCheck0, item, path)), ["role"]: (item: unknown, path: readonly PropertyKey[]) => (item == null ? undefined : $goWireValue($goCheck0, item, path)), ["bio"]: (item: unknown, path: readonly PropertyKey[]) => (item == null ? undefined : $goWireValue($goCheck0, item, path))}); }
+function $goWireDeleteUserInput(value: unknown, path: readonly PropertyKey[]): $GoWireFailure | undefined { return value == null ? undefined : $goWireObject(value, path, {["id"]: (item: unknown, path: readonly PropertyKey[]) => (item == null ? undefined : $goWireValue($goCheck0, item, path))}); }
+function $goWireGetUserInput(value: unknown, path: readonly PropertyKey[]): $GoWireFailure | undefined { return value == null ? undefined : $goWireObject(value, path, {["id"]: (item: unknown, path: readonly PropertyKey[]) => (item == null ? undefined : $goWireValue($goCheck0, item, path))}); }
+function $goWireListUsersInput(value: unknown, path: readonly PropertyKey[]): $GoWireFailure | undefined { return value == null ? undefined : $goWireObject(value, path, {["page"]: (item: unknown, path: readonly PropertyKey[]) => (item == null ? undefined : $goWireValue($goCheck1, item, path)), ["perPage"]: (item: unknown, path: readonly PropertyKey[]) => (item == null ? undefined : $goWireValue($goCheck1, item, path))}); }
+
+type $GoJSONDecoder = (value: unknown, previous: unknown) => unknown;
+
+function $goJSONFieldName(name: string, names: readonly string[]): string | undefined {
+  if (names.includes(name)) return name;
+  // Unicode simple case folding matches Go's field lookup without expanding
+  // characters such as sharp s into multiple letters. The end check is strict.
+  return names.find(candidate => new RegExp("^" + candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![\\s\\S])", "iu").test(name));
+}
+
+// A fixed-array element decodes into its Go zero value, so an element object
+// is merged onto that value before its schema validates it.
+function $goDecodeStruct<S extends z.core.$ZodType>(schema: S, wire: $GoWire, decode: (value: unknown) => unknown) {
+  return z.pipe(z.transform<z.core.input<S>, unknown>((input, ctx) => {
+    if (input === null || typeof input !== "object") return input;
+    const failure = wire(input, []);
+    if (failure) {
+      ctx.issues.push(...$goWireIssues(failure));
+      return input;
+    }
+    return decode(input);
+  }), schema);
+}
+
+function $goMergeObject(raw: unknown, previous: unknown, fields: readonly (readonly [string, $GoJSONDecoder])[]): unknown {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const entries = $goJSONEntries(raw);
+  if (!entries && previous === undefined) return raw;
+  const values = new Map<string, unknown>(previous !== null && typeof previous === "object" && !Array.isArray(previous) ? Object.entries(previous) : []);
+  const names = fields.map(([name]) => name);
+  for (const [name, value] of entries ?? Object.entries(raw)) {
+    const field = $goJSONFieldName(name, names);
+    if (field === undefined) values.set(name, value);
+    else {
+      const decode = fields.find(([name]) => name === field)![1];
+      values.set(field, decode(value, values.get(field)));
+    }
+  }
+  return entries ? $goJSONObject(Array.from(values)) : Object.fromEntries(values);
+}
+
+// Go decodes every map entry into a fresh zero value, so an entry never merges
+// with an earlier entry for the same key, but its own value still decodes.
+function $goMergeMap(raw: unknown, previous: unknown, decode?: (value: unknown) => unknown): unknown {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const source = $goJSONEntries(raw);
+  if (!source) return raw;
+  const entries = decode === undefined ? source : source.map(([name, value]) => [name, decode(value)] as const);
+  if (previous === null || typeof previous !== "object" || Array.isArray(previous)) return $goJSONObject(entries);
+  const prior = $goJSONEntries(previous);
+  if (prior) return $goJSONObject([...prior, ...entries]);
+  // Stale or ordinary objects cannot grant trustworthy alias ordering to a
+  // combined map. Keep it ordinary so the map schema retains its ambiguity policy.
+  const merged: { [key: string]: unknown } = {};
+  for (const [name, value] of [...Object.entries(previous), ...entries]) {
+    Object.defineProperty(merged, name, { value, enumerable: true, writable: true, configurable: true });
+  }
+  return merged;
+}
+
+// encoding/json reuses a slice's element storage while resetting its length.
+// Keep truncated elements privately until a later occurrence grows the slice;
+// an explicit empty array creates new zero-capacity storage in Go.
+const $goArrayStorage = /* @__PURE__ */ new WeakMap<unknown[], unknown[]>();
+function $goMergeArray(raw: unknown, previous: unknown, decode: $GoJSONDecoder): unknown {
+  if (!Array.isArray(raw)) return raw;
+  if (raw.length === 0) return [];
+  const prior = Array.isArray(previous) ? ($goArrayStorage.get(previous) ?? previous) : [];
+  const storage = prior.slice();
+  const result = raw.map((item, index) => {
+    const value = decode(item, prior[index]);
+    storage[index] = value;
+    return value;
+  });
+  $goArrayStorage.set(result, storage);
+  return result;
+}
+
+function $goMergeEmail(value: unknown, previous: unknown): unknown { return (value === null && previous !== undefined ? previous : value); }
+function $goMergeRole(value: unknown, previous: unknown): unknown { return value === null && previous !== undefined ? previous : value; }
+function $goMergeCreateUserInput(value: unknown, previous: unknown): unknown { return $goMergeObject(value, previous, [["name", (item: unknown, prior: unknown) => (item === null && prior !== undefined ? prior : item)], ["email", (item: unknown, prior: unknown) => (item === null && prior !== undefined ? prior : $goMergeEmail(item, prior))], ["role", (item: unknown, prior: unknown) => (item === null && prior !== undefined ? prior : $goMergeRole(item, prior))], ["bio", (item: unknown, prior: unknown) => (item === null ? item : item)]]); }
+function $goMergeDeleteUserInput(value: unknown, previous: unknown): unknown { return $goMergeObject(value, previous, [["id", (item: unknown, prior: unknown) => (item === null && prior !== undefined ? prior : item)]]); }
+function $goMergeGetUserInput(value: unknown, previous: unknown): unknown { return $goMergeObject(value, previous, [["id", (item: unknown, prior: unknown) => (item === null && prior !== undefined ? prior : item)]]); }
+function $goMergeListUsersInput(value: unknown, previous: unknown): unknown { return $goMergeObject(value, previous, [["page", (item: unknown, prior: unknown) => (item === null && prior !== undefined ? prior : item)], ["perPage", (item: unknown, prior: unknown) => (item === null && prior !== undefined ? prior : item)]]); }
+
 export const EmailSchema = z.string().meta({ id: "Email" });
 
-export const RoleSchema = z.enum(["admin", "editor", "viewer"]).meta({ id: "Role" });
+export const RoleSchema = z.string().meta({ id: "Role" });
 
-export const CreateUserInputSchema = z.object({
+export const CreateUserInputSchema = z.strictObject({
   name: z.string().min(1).max(100),
-  email: z.email(),
-  role: z.enum(["admin", "editor", "viewer"]).or(z.literal("")).optional(),
-  bio: z.string().max(500).or(z.literal("")).optional(),
+  email: EmailSchema.check($trpcgoIssue((value) => $trpcgoEmail(String(value).replace(/\p{Surrogate}/gu, "\uFFFD")), { code: "invalid_format", format: "email" })),
+  role: z.enum(["", "admin", "editor", "viewer"]).optional(),
+  bio: z.string().max(500).optional(),
 }).meta({ id: "CreateUserInput" });
 
-export const DeleteUserInputSchema = z.object({
-  id: z.string(),
+export const DeleteUserInputSchema = z.strictObject({
+  id: z.string().min(1),
 }).meta({ id: "DeleteUserInput" });
 
-export const GetUserInputSchema = z.object({
-  id: z.string(),
+export const GetUserInputSchema = z.strictObject({
+  id: z.string().min(1),
 }).meta({ id: "GetUserInput" });
 
-export const ListUsersInputSchema = z.object({
+export const ListUsersInputSchema = z.strictObject({
   page: z.int().gte(1),
   perPage: z.int().gte(1).lte(100),
 }).meta({ id: "ListUsersInput" });
 
+const $goJSONDecoders = /* @__PURE__ */ new Map<unknown, readonly [$GoWire, $GoJSONDecoder]>([
+  [EmailSchema, [$goWireEmail, $goMergeEmail]],
+  [RoleSchema, [$goWireRole, $goMergeRole]],
+  [CreateUserInputSchema, [$goWireCreateUserInput, $goMergeCreateUserInput]],
+  [DeleteUserInputSchema, [$goWireDeleteUserInput, $goMergeDeleteUserInput]],
+  [GetUserInputSchema, [$goWireGetUserInput, $goMergeGetUserInput]],
+  [ListUsersInputSchema, [$goWireListUsersInput, $goMergeListUsersInput]],
+]);
+
+// Raw JSON that never reaches the schema fails through this one, which
+// reports the issues found while decoding it. It is built on first use.
+let $goJSONFailureSchema: z.core.$ZodType | undefined;
+function $goJSONFailure(failure: $GoWireFailure) {
+  if ($goJSONFailureSchema === undefined) {
+    $goJSONFailureSchema = z.custom<$GoWireFailure>().check(z.superRefine((failure: $GoWireFailure, ctx) => {
+      for (const issue of $goWireIssues(failure)) ctx.addIssue(issue);
+    }));
+  }
+  return z.safeParse($goJSONFailureSchema, failure);
+}
+
+/**
+ * Validates raw JSON text as Go's encoding/json decodes it. Repeated fields
+ * merge or overwrite in source order, field names match case-insensitively,
+ * integer map keys resolve in source order, and every overwritten value must
+ * still decode. JSON.parse discards all of these, so validate raw request
+ * bodies with this function rather than with schema.safeParse(JSON.parse(raw)).
+ * Malformed JSON, including JSON nested deeper than Go accepts, fails
+ * validation instead of throwing. Every failure reports Zod's issues at the
+ * path of the failing value.
+ */
+export function decodeGoJSON<S extends z.core.$ZodType>(schema: S & (typeof EmailSchema | typeof RoleSchema | typeof CreateUserInputSchema | typeof DeleteUserInputSchema | typeof GetUserInputSchema | typeof ListUsersInputSchema), raw: string) {
+  const decoder = $goJSONDecoders.get(schema);
+  if (decoder === undefined) throw new TypeError("decodeGoJSON needs a schema exported by this module");
+  let value: unknown;
+  try {
+    value = $goParseJSON(raw);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    return $goJSONFailure({ path: [], issues: [{ code: "invalid_format", format: "json_string", input: raw }] }) as ReturnType<typeof z.safeParse<S>>;
+  }
+  const result = z.safeParse<S>(schema, decoder[1](value, undefined));
+  if (!result.success) return result;
+  // The decoded value is valid, but a value it no longer contains, such as an
+  // overwritten occurrence of a field, can still fail Go decoding.
+  const failure = decoder[0](value, []);
+  return failure === undefined ? result : $goJSONFailure(failure) as ReturnType<typeof z.safeParse<S>>;
+}

@@ -1,7 +1,6 @@
 package codegen
 
 import (
-	"fmt"
 	"io"
 	"strconv"
 
@@ -46,7 +45,7 @@ func enumKey(member string) string {
 	}
 	if raw == "__proto__" {
 		// In object literals, __proto__ is a setter unless it is computed.
-		return fmt.Sprintf("[%q]", raw)
+		return "[" + typemap.ZodStringLiteral(raw) + "]"
 	}
 	return typemap.QuotePropName(raw)
 }

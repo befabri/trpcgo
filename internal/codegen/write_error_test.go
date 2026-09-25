@@ -133,7 +133,7 @@ func TestWriteZodSchemasPropagatesEveryWriteError(t *testing.T) {
 	for _, tt := range styles {
 		t.Run(tt.name, func(t *testing.T) {
 			requireEveryWriteErrorPropagates(t, func(w io.Writer) error {
-				return codegen.WriteZodSchemas(w, procs, defs, tt.style)
+				return codegen.WriteZodSchemas(w, procs, defs, tt.style, codegen.ZodOptions{})
 			})
 		})
 	}

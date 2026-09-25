@@ -35,7 +35,7 @@ func TestWriteEnumsEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	var trpcBuf bytes.Buffer
-	gen, err := codegen.Generate(&trpcBuf, result, result.TypeMetas)
+	gen, err := codegen.Generate(&trpcBuf, result, result.TypeMetas, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

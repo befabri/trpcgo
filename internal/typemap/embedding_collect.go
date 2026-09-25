@@ -23,6 +23,10 @@ type FieldAdapter[T comparable] struct {
 	TypeName func(T) string
 	Map      func(owner T, index int, name string, omitted bool, tag TSTypeTag, hasTag bool) Field
 	Lookup   func(T, string) ([]int, bool)
+	// Describe returns the Go kind metadata of a field JSON never sets, such
+	// as an unexported field or one tagged json:"-", so a cross-field rule can
+	// compare against the zero value it always holds. Optional.
+	Describe func(owner T, index int) Field
 }
 
 // CollectJSONFields collects the JSON-visible fields of root using
@@ -30,7 +34,7 @@ type FieldAdapter[T comparable] struct {
 // contributes its direct fields twice, making them ambiguous, but its embedded
 // children are enqueued once; duplicating whole subtrees would wrongly drop
 // deeper diamonds.
-func CollectJSONFields[T comparable](root T, a FieldAdapter[T], allowExtends bool) ([]Field, []string, []Refinement) {
+func CollectJSONFields[T comparable](root T, a FieldAdapter[T], allowExtends bool) ([]Field, []string, []int, []Refinement) {
 	type node struct {
 		typ                 T
 		path, scope         string
@@ -41,7 +45,7 @@ func CollectJSONFields[T comparable](root T, a FieldAdapter[T], allowExtends boo
 	nextCount := map[T]int{root: 1}
 	visited := make(map[T]bool)
 	var candidates []FieldCandidate
-	var extends []string
+	var extends []ExtendsCandidate
 	recursive := false
 	for len(next) > 0 {
 		current, count := next, nextCount
@@ -55,16 +59,25 @@ func CollectJSONFields[T comparable](root T, a FieldAdapter[T], allowExtends boo
 			visited[parent.typ] = true
 			for index, f := range a.Fields(parent.typ) {
 				base, isStruct, pointer := a.Struct(f.Type)
+				path := FieldIndexPath(parent.path, index)
+				hide := func() {
+					if a.Describe != nil {
+						field := a.Describe(parent.typ, index)
+						field.GoName = f.Name
+						candidates = append(candidates, FieldCandidate{Field: field, Hidden: true, Path: path})
+					}
+				}
 				if !f.Exported && (!f.Embedded || !isStruct) {
+					hide()
 					continue
 				}
 				name, omitted, skip := ParseJSONTag(f.Tag)
 				if skip {
+					hide()
 					continue
 				}
 				tag, hasTag := ParseTSTypeTag(f.Tag)
 				excluded := parent.excluded || tag.Type == "-"
-				path := FieldIndexPath(parent.path, index)
 				if f.Embedded && name == "" && isStruct {
 					if visited[base] {
 						recursive = true
@@ -79,7 +92,7 @@ func CollectJSONFields[T comparable](root T, a FieldAdapter[T], allowExtends boo
 						if pointer && !tag.Required {
 							ts = "Partial<" + ts + ">"
 						}
-						extends = append(extends, ts)
+						extends = append(extends, ExtendsCandidate{Type: ts, Path: path})
 						child.inherited = true
 					}
 					nextCount[base]++

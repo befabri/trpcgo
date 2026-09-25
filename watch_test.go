@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/befabri/trpcgo/internal/tstest"
 	"github.com/befabri/trpcgo/internal/typemap"
+	"github.com/befabri/trpcgo/zodconfig"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -320,11 +322,14 @@ func TestRegenerateFromSourceWritesMiniZodWithTypedInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`import * as z from "zod/mini"`, "CreateUserInputSchema", "z.email()"} {
-		if !strings.Contains(string(zodData), want) {
-			t.Fatalf("zod output missing %q:\n%s", want, string(zodData))
-		}
+	if !strings.Contains(string(zodData), `import * as z from "zod/mini"`) {
+		t.Fatalf("zod output is not Zod Mini:\n%s", zodData)
 	}
+	tstest.Run(t, map[string]string{"schemas.ts": string(zodData), "check.ts": `import { CreateUserInputSchema } from "./schemas";
+const valid = { name: "Ada", email: "ada@example.com", tags: ["x"] };
+CreateUserInputSchema.parse(valid);
+if (CreateUserInputSchema.safeParse({ ...valid, email: "ada" }).success) throw new Error("invalid email accepted");
+`}, "check.ts")
 }
 
 func TestRegenerateFromSourceWritesEnums(t *testing.T) {
@@ -407,6 +412,7 @@ func TestRegenerateFromSourceSkipsEnumsWhenOutputUnset(t *testing.T) {
 }
 
 func TestRegenerateFromSourcePreservesFilesOnAnalysisError(t *testing.T) {
+	logs := captureLog(t)
 	dir := t.TempDir()
 	typesOut := filepath.Join(dir, "router.ts")
 	zodOut := filepath.Join(dir, "schemas.ts")
@@ -430,6 +436,52 @@ func TestRegenerateFromSourcePreservesFilesOnAnalysisError(t *testing.T) {
 	}
 	if got, err := os.ReadFile(zodOut); err != nil || string(got) != "existing zod" {
 		t.Fatalf("zod output = %q, %v; want preserved", got, err)
+	}
+	if !strings.Contains(logs.String(), "source has errors, keeping previous generated files") {
+		t.Fatalf("preserved files were not logged, logs:\n%s", logs.String())
+	}
+}
+
+// A schema that fails to render holds back the types too: new types beside the
+// previous schemas would type-check an app that validates with stale rules.
+func TestRegenerateFromSourceKeepsTypesWhenZodFails(t *testing.T) {
+	logs := captureLog(t)
+	moduleDir := writeWatchAnalysisModule(t, `package watched
+
+import (
+	"context"
+
+	"github.com/befabri/trpcgo"
+)
+
+type Input struct {
+	Name string `+"`json:\"name\" validate:\"dive\"`"+`
+}
+
+func Setup() *trpcgo.Router {
+	r := trpcgo.NewRouter()
+	trpcgo.MustQuery(r, "named", func(context.Context, Input) (string, error) { return "ok", nil })
+	return r
+}
+`)
+	outDir := t.TempDir()
+	typesOut := filepath.Join(outDir, "router.ts")
+	zodOut := filepath.Join(outDir, "schemas.ts")
+	for path, data := range map[string]string{typesOut: "existing types", zodOut: "existing zod"} {
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	regenerateFromSource(watchOpts{dir: moduleDir, patterns: []string{"."}, output: typesOut, zodOutput: zodOut, zodStyle: typemap.ZodStandard})
+
+	for path, want := range map[string]string{typesOut: "existing types", zodOut: "existing zod"} {
+		if got, err := os.ReadFile(path); err != nil || string(got) != want {
+			t.Fatalf("%s = %q, %v; want %q preserved", path, got, err, want)
+		}
+	}
+	if !strings.Contains(logs.String(), "zod codegen failed, keeping previous generated files") || !strings.Contains(logs.String(), "Input.name") {
+		t.Fatalf("failed render was not logged with its field, logs:\n%s", logs.String())
 	}
 }
 
@@ -491,5 +543,99 @@ func Setup() *trpcgo.Router {
 	}
 	if !strings.Contains(logs.String(), "removed "+zodOut+" (no typed inputs)") {
 		t.Fatalf("stale zod removal was not logged, logs:\n%s", logs.String())
+	}
+}
+
+func TestWatcherPreservesValidationConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	config := zodconfig.Config{TagName: "binding", Aliases: map[string]string{"name": "required"}}
+	r := NewRouter(WithTypeOutput("router.ts"), WithZodOutput("schemas.ts"), WithStrictInput(false), WithZodValidation(config))
+	cfg, err := r.newWatcherConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cfg.watcher.Close()
+	config.Aliases["name"] = "max=1"
+	if !cfg.opts.zodAllowUnknownFields || cfg.opts.zodValidation.TagName != "binding" || cfg.opts.zodValidation.Aliases["name"] != "required" {
+		t.Fatalf("watch options lost or shared configuration: %#v", cfg.opts.zodValidation)
+	}
+}
+
+func TestRegenerateFromSourceUsesValidationConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	opts := watchOpts{dir: filepath.Join(watchAnalysisFixtureDir(t, "basic"), "..", "..", "..", "..", "testdata", "validationconfig"), patterns: []string{"."}, output: filepath.Join(dir, "trpc.ts"), zodOutput: filepath.Join(dir, "schemas.ts"), zodAllowUnknownFields: true, zodValidation: zodconfig.Config{TagName: "binding", Aliases: map[string]string{"requiredText": "required,min=2", "afterStart": "gtfield=Start", "nonemptyList": "min=1,dive,required"}}}
+	regenerateFromSource(opts)
+	output, err := os.ReadFile(opts.zodOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := os.ReadFile(filepath.Join("testdata", "validationconfig", "contract.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tstest.Run(t, map[string]string{"schemas.ts": string(output), "minimum.ts": "export const minimum = 2;\n", "contract.ts": string(contract)}, "contract.ts")
+	beforeTypes, err := os.ReadFile(opts.output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.zodValidation.Aliases = map[string]string{"cycle": "cycle"}
+	regenerateFromSource(opts)
+	afterTypes, _ := os.ReadFile(opts.output)
+	afterZod, _ := os.ReadFile(opts.zodOutput)
+	if string(beforeTypes) != string(afterTypes) || string(output) != string(afterZod) {
+		t.Fatal("invalid config replaced previous generated outputs")
+	}
+}
+
+func TestRegenerateFromSourceWritesTypesAndZod(t *testing.T) {
+	dir := t.TempDir()
+	typesOut := filepath.Join(dir, "router.ts")
+	zodOut := filepath.Join(dir, "schemas.ts")
+
+	regenerateFromSource(watchOpts{
+		dir:       watchAnalysisFixtureDir(t, "enhanced"),
+		patterns:  []string{"."},
+		output:    typesOut,
+		zodOutput: zodOut,
+		zodStyle:  0,
+	})
+
+	typesData, err := os.ReadFile(typesOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(typesData), "export type AppRouter") {
+		t.Fatalf("types output missing AppRouter:\n%s", typesData)
+	}
+	zodData, err := os.ReadFile(zodOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(zodData), "Schema") {
+		t.Fatalf("zod output missing schemas:\n%s", zodData)
+	}
+}
+
+func TestRegenerateFromSourcePreservesExistingOnAnalyzeError(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "router.ts")
+	old := []byte("old content")
+	if err := os.WriteFile(out, old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	regenerateFromSource(watchOpts{
+		dir:      filepath.Join(dir, "missing"),
+		patterns: []string{"."},
+		output:   out,
+	})
+
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(old) {
+		t.Fatalf("output changed on analyze error: %q", got)
 	}
 }

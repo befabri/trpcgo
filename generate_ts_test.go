@@ -1,16 +1,108 @@
 package trpcgo_test
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/befabri/trpcgo"
+	"github.com/befabri/trpcgo/internal/codegen"
+	"github.com/befabri/trpcgo/internal/typemap"
 	"github.com/befabri/trpcgo/trpc"
 )
+
+type GenEmbeddedBase struct {
+	Value string `json:"value"`
+}
+
+type GenShadowedInput struct {
+	GenEmbeddedBase
+	Value int `json:"value"`
+}
+
+type GenExtendedShadow struct {
+	GenEmbeddedBase `tstype:",extends"`
+	Value           int `json:"value"`
+}
+
+func TestGenerateTSGenericConcreteFields(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverse=%t", reverse), func(t *testing.T) {
+			r := trpcgo.NewRouter()
+			// Registration order decides which instantiation is reflected first;
+			// Total and Page must stay int either way.
+			intPath, stringPath := "a.ints", "b.strings"
+			if reverse {
+				intPath, stringPath = "b.ints", "a.strings"
+			}
+			trpcgo.MustVoidQuery(r, intPath, func(_ context.Context) (GenPage[int], error) {
+				return GenPage[int]{}, nil
+			})
+			trpcgo.MustVoidQuery(r, stringPath, func(_ context.Context) (GenPage[string], error) {
+				return GenPage[string]{}, nil
+			})
+			trpcgo.MustVoidQuery(r, "pair.same", func(context.Context) (GenPair[int, int], error) { return GenPair[int, int]{}, nil })
+			trpcgo.MustVoidQuery(r, "pair.different", func(context.Context) (GenPair[string, bool], error) { return GenPair[string, bool]{}, nil })
+			trpcgo.MustVoidQuery(r, "nested", func(context.Context) (GenPage[GenPair[string, int]], error) {
+				return GenPage[GenPair[string, int]]{}, nil
+			})
+			checkGeneratedRouterContract(t, r, fmt.Sprintf(`
+import type { RouterOutputs } from './trpc';
+declare const response: RouterOutputs['%s']['strings'];
+const total: number = response.total;
+const page: number = response.page;
+const items: string[] = response.items;
+declare const same: RouterOutputs['pair']['same'];
+declare const different: RouterOutputs['pair']['different'];
+declare const nested: RouterOutputs['nested'];
+const first: number = same.first;
+const second: number = same.second;
+const text: string = different.first;
+const flag: boolean = different.second;
+const nestedFirst: string = nested.items[0].first;
+const nestedSecond: number = nested.items[0].second;
+const nestedTotal: number = nested.total;
+void [total, page, items, first, second, text, flag, nestedFirst, nestedSecond, nestedTotal];
+`, stringPath[:1]))
+		})
+	}
+}
+
+func TestGenerateTSShadowedEmbeddedField(t *testing.T) {
+	r := trpcgo.NewRouter()
+	trpcgo.MustVoidQuery(r, "shadow", func(_ context.Context) (GenShadowedInput, error) {
+		return GenShadowedInput{}, nil
+	})
+	trpcgo.MustVoidQuery(r, "extended", func(context.Context) (GenExtendedShadow, error) { return GenExtendedShadow{}, nil })
+	trpcgo.MustVoidQuery(r, "inline", func(context.Context) (struct {
+		GenEmbeddedBase
+		Value int `json:"value"`
+	}, error) {
+		return struct {
+			GenEmbeddedBase
+			Value int `json:"value"`
+		}{}, nil
+	})
+	checkGeneratedRouterContract(t, r, `
+import type { RouterOutputs } from './trpc';
+declare const response: RouterOutputs['shadow'];
+declare const extended: RouterOutputs['extended'];
+declare const inline: RouterOutputs['inline'];
+const value: number = response.value;
+const extendedValue: number = extended.value;
+const inlineValue: number = inline.value;
+void [value, extendedValue, inlineValue];
+`)
+}
 
 func TestOutputParserTransformTypegenDriftTS(t *testing.T) {
 	r := trpcgo.NewRouter()
@@ -1235,4 +1327,568 @@ func TestGenerateTSTsDoc(t *testing.T) {
 	if strings.Contains(ts, "/** name") {
 		t.Errorf("name field should not have JSDoc:\n%s", ts)
 	}
+}
+
+func TestGenerateTSTsc(t *testing.T) {
+	tscPath := typeScriptCompiler(t)
+
+	// Build a router exercising many type paths.
+	r := trpcgo.NewRouter()
+	trpcgo.Query(r, "addr.get", func(_ context.Context, _ CgAddress) (CgAddress, error) {
+		return CgAddress{}, nil
+	})
+	trpcgo.VoidQuery(r, "nums.get", func(_ context.Context) (AllNumerics, error) {
+		return AllNumerics{}, nil
+	})
+	trpcgo.Mutation(r, "tree.create", func(_ context.Context, _ WithNested) (TreeNode, error) {
+		return TreeNode{}, nil
+	})
+	trpcgo.VoidMutation(r, "bool.toggle", func(_ context.Context) (WithBool, error) {
+		return WithBool{}, nil
+	})
+	trpcgo.Subscribe(r, "bytes.stream", func(_ context.Context, _ WithIntKeyMap) (<-chan WithBytes, error) {
+		return nil, nil
+	})
+	trpcgo.VoidSubscribe(r, "ro.events", func(_ context.Context) (<-chan WithReadonly, error) {
+		return nil, nil
+	})
+	trpcgo.VoidQuery(r, "raw.get", func(_ context.Context) (WithRawJSON, error) {
+		return WithRawJSON{}, nil
+	})
+	trpcgo.VoidQuery(r, "any.get", func(_ context.Context) (WithAnyField, error) {
+		return WithAnyField{}, nil
+	})
+	trpcgo.VoidQuery(r, "deep.get", func(_ context.Context) (CgOuter, error) {
+		return CgOuter{}, nil
+	})
+	trpcgo.Query(r, "skip.get", func(_ context.Context, _ WithRequired) (WithTSOverride, error) {
+		return WithTSOverride{}, nil
+	})
+
+	ts := generateTS(t, r)
+
+	// Write generated TS and tsconfig to temp dir.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "trpc.ts"), []byte(ts), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	symlinkNodeModules(t, dir)
+	tsconfig := `{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true
+  },
+  "include": ["trpc.ts"]
+}`
+	if err := os.WriteFile(filepath.Join(dir, "tsconfig.json"), []byte(tsconfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(tscPath, "--noEmit", "--project", dir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tsc compilation failed:\n%s", string(output))
+	}
+}
+
+func TestGenerateEnumsTsc(t *testing.T) {
+	tscPath := typeScriptCompiler(t)
+
+	// Covers awkward enum values that still need to compile as TypeScript.
+	defs := []typemap.TypeDef{
+		{Name: "Role", Kind: typemap.TypeDefUnion, UnionMembers: []string{`"viewer"`, `"admin"`}},
+		{Name: "Word", Kind: typemap.TypeDefUnion, UnionMembers: []string{`"default"`, `"in"`, `"class"`}},
+		{Name: "Weird", Kind: typemap.TypeDefUnion, UnionMembers: []string{`"3d"`, `"a.b"`, `"a-b"`, `""`, `"__proto__"`}},
+		{Name: "Escaped", Kind: typemap.TypeDefUnion, UnionMembers: []string{`"a\"b"`, `"c\\d"`, `"e\tf"`}},
+		{Name: "Dup", Kind: typemap.TypeDefUnion, UnionMembers: []string{`"x"`, `"x"`, `"y"`}},
+		{Name: "Priority", Kind: typemap.TypeDefUnion, UnionMembers: []string{"1", "2"}},
+	}
+
+	var buf bytes.Buffer
+	if err := codegen.WriteEnums(&buf, defs); err != nil {
+		t.Fatal(err)
+	}
+	enumsTS := buf.String()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "enums.ts"), []byte(enumsTS), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	symlinkNodeModules(t, dir)
+	tsconfig := `{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true
+  },
+  "include": ["enums.ts"]
+}`
+	if err := os.WriteFile(filepath.Join(dir, "tsconfig.json"), []byte(tsconfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(tscPath, "--noEmit", "--project", dir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tsc compilation failed:\n%s\n\nGenerated enums.ts:\n%s", string(output), enumsTS)
+	}
+
+	if strings.Contains(enumsTS, "PriorityEnum") {
+		t.Errorf("numeric union should be skipped:\n%s", enumsTS)
+	}
+	if n := strings.Count(enumsTS, `x: "x"`); n != 1 {
+		t.Errorf("duplicate value should dedup to one key, found %d:\n%s", n, enumsTS)
+	}
+}
+
+func TestGenerateTSTscExtended(t *testing.T) {
+	// Extended tsc validation covering all new patterns from typescriptify/tygo.
+	tscPath := typeScriptCompiler(t)
+
+	r := trpcgo.NewRouter()
+
+	// Nested collections.
+	trpcgo.VoidQuery(r, "nested.mapmap", func(_ context.Context) (NestedMapConfig, error) {
+		return NestedMapConfig{}, nil
+	})
+	trpcgo.VoidQuery(r, "nested.keyboard", func(_ context.Context) (Keyboard, error) {
+		return Keyboard{}, nil
+	})
+	trpcgo.VoidQuery(r, "nested.apiconfig", func(_ context.Context) (APIConfig, error) {
+		return APIConfig{}, nil
+	})
+	trpcgo.VoidQuery(r, "nested.batch", func(_ context.Context) (BatchResult, error) {
+		return BatchResult{}, nil
+	})
+	trpcgo.VoidQuery(r, "nested.grouped", func(_ context.Context) (GroupedTags, error) {
+		return GroupedTags{}, nil
+	})
+	trpcgo.VoidQuery(r, "nested.deep", func(_ context.Context) (DeeplyNestedMap, error) {
+		return DeeplyNestedMap{}, nil
+	})
+
+	// Optional strategies.
+	trpcgo.VoidQuery(r, "opt.omitzero", func(_ context.Context) (WithOmitzero, error) {
+		return WithOmitzero{}, nil
+	})
+	trpcgo.VoidQuery(r, "opt.variants", func(_ context.Context) (OptionalVariants, error) {
+		return OptionalVariants{}, nil
+	})
+
+	// Multiple embedded.
+	trpcgo.VoidQuery(r, "entity.full", func(_ context.Context) (FullEntity, error) {
+		return FullEntity{}, nil
+	})
+
+	// Fields without JSON tags.
+	trpcgo.VoidQuery(r, "raw.nojson", func(_ context.Context) (NoJSONTags, error) {
+		return NoJSONTags{}, nil
+	})
+
+	// Recursive.
+	trpcgo.VoidQuery(r, "tree.get", func(_ context.Context) (TreeNode, error) {
+		return TreeNode{}, nil
+	})
+
+	// Top-level complex types.
+	trpcgo.VoidQuery(r, "complex.sliceslice", func(_ context.Context) ([][]CgAddress, error) {
+		return nil, nil
+	})
+	trpcgo.VoidQuery(r, "complex.slicemap", func(_ context.Context) ([]map[string]string, error) {
+		return nil, nil
+	})
+
+	// Tags: readonly, required, override, skip.
+	trpcgo.VoidQuery(r, "tags.readonly", func(_ context.Context) (WithReadonly, error) {
+		return WithReadonly{}, nil
+	})
+	trpcgo.VoidQuery(r, "tags.required", func(_ context.Context) (WithRequired, error) {
+		return WithRequired{}, nil
+	})
+	trpcgo.VoidQuery(r, "tags.override", func(_ context.Context) (WithTSOverride, error) {
+		return WithTSOverride{}, nil
+	})
+	trpcgo.VoidQuery(r, "tags.skip", func(_ context.Context) (WithTSSkip, error) {
+		return WithTSSkip{}, nil
+	})
+
+	ts := generateTS(t, r)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "trpc.ts"), []byte(ts), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	symlinkNodeModules(t, dir)
+	tsconfig := `{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true
+  },
+  "include": ["trpc.ts"]
+}`
+	if err := os.WriteFile(filepath.Join(dir, "tsconfig.json"), []byte(tsconfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(tscPath, "--noEmit", "--project", dir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tsc compilation failed:\n%s\n\nGenerated TypeScript:\n%s", string(output), ts)
+	}
+}
+
+func TestGenerateTSNodeExecution(t *testing.T) {
+	tscPath := typeScriptCompiler(t)
+
+	r := trpcgo.NewRouter()
+	trpcgo.Query(r, "addr.get", func(_ context.Context, _ CgAddress) (CgAddress, error) {
+		return CgAddress{}, nil
+	})
+	trpcgo.VoidQuery(r, "nums.get", func(_ context.Context) (AllNumerics, error) {
+		return AllNumerics{}, nil
+	})
+	trpcgo.VoidQuery(r, "tree.get", func(_ context.Context) (TreeNode, error) {
+		return TreeNode{}, nil
+	})
+	trpcgo.VoidQuery(r, "bool.get", func(_ context.Context) (WithBool, error) {
+		return WithBool{}, nil
+	})
+	trpcgo.VoidQuery(r, "ext.get", func(_ context.Context) (ExUser, error) {
+		return ExUser{}, nil
+	})
+	trpcgo.VoidQuery(r, "doc.get", func(_ context.Context) (WithTSDoc, error) {
+		return WithTSDoc{}, nil
+	})
+
+	ts := generateTS(t, r)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "trpc.ts"), []byte(ts), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	symlinkNodeModules(t, dir)
+
+	// Write a structural check file that validates types via satisfies.
+	check := `import type { CgAddress, AllNumerics, TreeNode, WithBool, ExUser, ExBase, WithTSDoc } from "./trpc.js";
+
+// Structural validation — these fail at compile time if types are wrong.
+const addr = { street: "Main St", city: "NYC" } satisfies CgAddress;
+const nums = {
+  i: 1, i8: 2, i16: 3, i32: 4, i64: 5,
+  u: 6, u8: 7, u16: 8, u32: 9, u64: 10,
+  f32: 1.1, f64: 2.2,
+} satisfies AllNumerics;
+const tree: TreeNode = { label: "root", children: [{ label: "child", children: [] }] };
+const bools = { active: true } satisfies WithBool;
+const base = { id: "1" } satisfies ExBase;
+const user = { id: "1", name: "Alice" } satisfies ExUser;
+const doc = { host: "localhost", port: 8080, name: "test" } satisfies WithTSDoc;
+
+// Suppress unused variable warnings.
+void addr; void nums; void tree; void bools; void base; void user; void doc;
+`
+	if err := os.WriteFile(filepath.Join(dir, "check.ts"), []byte(check), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tsconfig := `{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true
+  },
+  "include": ["trpc.ts", "check.ts"]
+}`
+	if err := os.WriteFile(filepath.Join(dir, "tsconfig.json"), []byte(tsconfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(tscPath, "--noEmit", "--project", dir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tsc structural check failed:\n%s\n\nGenerated TypeScript:\n%s", string(output), ts)
+	}
+}
+
+func TestGenerateTS(t *testing.T) {
+	type Base struct {
+		ID        string     `json:"id"`
+		CreatedAt time.Time  `json:"createdAt"`
+		DeletedAt *time.Time `json:"deletedAt,omitempty"`
+	}
+	type UserInput struct {
+		Name  string   `json:"name"`
+		Email string   `json:"email"`
+		Tags  []string `json:"tags,omitempty"`
+	}
+	type UserOutput struct {
+		Base
+		Name  string            `json:"name"`
+		Email string            `json:"email"`
+		Meta  map[string]string `json:"meta,omitempty"`
+	}
+
+	router := trpcgo.NewRouter()
+	trpcgo.Query(router, "user.getById", func(ctx context.Context, input struct {
+		ID string `json:"id"`
+	}) (UserOutput, error) {
+		return UserOutput{}, nil
+	})
+	trpcgo.VoidQuery(router, "user.list", func(ctx context.Context) ([]UserOutput, error) {
+		return nil, nil
+	})
+	trpcgo.Mutation(router, "user.create", func(ctx context.Context, input UserInput) (UserOutput, error) {
+		return UserOutput{}, nil
+	})
+	trpcgo.VoidSubscribe(router, "user.events", func(ctx context.Context) (<-chan UserOutput, error) {
+		return nil, nil
+	})
+
+	outputPath := filepath.Join(t.TempDir(), "trpc.ts")
+	if err := router.GenerateTS(outputPath); err != nil {
+		t.Fatalf("GenerateTS failed: %v", err)
+	}
+
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	output := string(data)
+
+	t.Run("header", func(t *testing.T) {
+		if !strings.HasPrefix(output, "// Code generated by trpcgo. DO NOT EDIT.") {
+			t.Errorf("missing or wrong header")
+		}
+	})
+
+	t.Run("UserOutput interface fields", func(t *testing.T) {
+		// Must contain the interface with correct field types.
+		mustContain := []string{
+			"export interface UserOutput {",
+			"name: string;",
+			"email: string;",
+		}
+		for _, s := range mustContain {
+			if !strings.Contains(output, s) {
+				t.Errorf("missing %q in output:\n%s", s, output)
+			}
+		}
+	})
+
+	t.Run("embedded struct fields flattened", func(t *testing.T) {
+		// Base fields should appear in UserOutput, not as a separate Base type.
+		if !strings.Contains(output, "id: string;") {
+			t.Errorf("embedded Base.ID field missing from UserOutput:\n%s", output)
+		}
+		if !strings.Contains(output, "createdAt: string;") {
+			t.Errorf("time.Time should map to string:\n%s", output)
+		}
+	})
+
+	t.Run("optional fields", func(t *testing.T) {
+		// Pointer field and omitempty field should be optional.
+		if !strings.Contains(output, "deletedAt?:") {
+			t.Errorf("pointer field should be optional:\n%s", output)
+		}
+		if !strings.Contains(output, "meta?:") {
+			t.Errorf("omitempty field should be optional:\n%s", output)
+		}
+		if !strings.Contains(output, "tags?:") {
+			t.Errorf("omitempty tags should be optional:\n%s", output)
+		}
+	})
+
+	t.Run("UserInput interface", func(t *testing.T) {
+		if !strings.Contains(output, "export interface UserInput {") {
+			t.Errorf("missing UserInput interface:\n%s", output)
+		}
+	})
+
+	t.Run("type mappings", func(t *testing.T) {
+		// []string → string[]
+		if !strings.Contains(output, "string[]") {
+			t.Errorf("[]string should map to string[]:\n%s", output)
+		}
+		// map[string]string → Record<string, string>
+		if !strings.Contains(output, "Record<string, string>") {
+			t.Errorf("map[string]string should map to Record<string, string>:\n%s", output)
+		}
+	})
+
+	t.Run("procedure types", func(t *testing.T) {
+		if !strings.Contains(output, "$Mutation<UserInput, UserOutput>") {
+			t.Errorf("missing mutation type:\n%s", output)
+		}
+		if !strings.Contains(output, "$Subscription<void, UserOutput>") {
+			t.Errorf("missing subscription type:\n%s", output)
+		}
+	})
+
+	t.Run("nested namespace", func(t *testing.T) {
+		if !strings.Contains(output, "user: {") {
+			t.Errorf("missing user namespace:\n%s", output)
+		}
+	})
+
+	t.Run("list returns array type", func(t *testing.T) {
+		if !strings.Contains(output, "$Query<void, UserOutput[]>") {
+			t.Errorf("list query should return UserOutput[]:\n%s", output)
+		}
+	})
+
+	t.Run("AppRouter structure", func(t *testing.T) {
+		for _, s := range []string{
+			"export type AppRouter =",
+			"type AppRouterRecord =",
+			"TRPCRouterDef<$RootTypes, AppRouterRecord>",
+			"TRPCRouterCaller<$RootTypes, AppRouterRecord>",
+		} {
+			if !strings.Contains(output, s) {
+				t.Errorf("missing %q:\n%s", s, output)
+			}
+		}
+	})
+}
+
+func TestGenerateTSNoProcedures(t *testing.T) {
+	router := trpcgo.NewRouter()
+
+	outputPath := filepath.Join(t.TempDir(), "trpc.ts")
+	if err := router.GenerateTS(outputPath); err != nil {
+		t.Fatalf("GenerateTS failed: %v", err)
+	}
+
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	output := string(data)
+
+	// Should still produce valid TypeScript with empty router record.
+	if !strings.Contains(output, "export type AppRouter =") {
+		t.Errorf("empty router should still produce AppRouter type:\n%s", output)
+	}
+	// Should not contain any interfaces.
+	if strings.Contains(output, "export interface") {
+		t.Errorf("empty router should not produce interfaces:\n%s", output)
+	}
+}
+
+func TestGenerateTSVoidInput(t *testing.T) {
+	router := trpcgo.NewRouter()
+	trpcgo.VoidQuery(router, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	})
+
+	outputPath := filepath.Join(t.TempDir(), "trpc.ts")
+	if err := router.GenerateTS(outputPath); err != nil {
+		t.Fatalf("GenerateTS failed: %v", err)
+	}
+
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	output := string(data)
+
+	if !strings.Contains(output, "$Query<void, string>") {
+		t.Errorf("expected $Query<void, string>, got:\n%s", output)
+	}
+	// Should have no interfaces for primitive types.
+	if strings.Contains(output, "export interface") {
+		t.Errorf("primitive-only procedures should not generate interfaces:\n%s", output)
+	}
+}
+
+func TestGenerateTSIdempotent(t *testing.T) {
+	router := trpcgo.NewRouter()
+	trpcgo.VoidQuery(router, "ping", func(ctx context.Context) (string, error) {
+		return "pong", nil
+	})
+
+	dir := t.TempDir()
+	path1 := filepath.Join(dir, "first.ts")
+	path2 := filepath.Join(dir, "second.ts")
+
+	if err := router.GenerateTS(path1); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.GenerateTS(path2); err != nil {
+		t.Fatal(err)
+	}
+
+	data1, _ := os.ReadFile(path1)
+	data2, _ := os.ReadFile(path2)
+
+	if string(data1) != string(data2) {
+		t.Errorf("GenerateTS is not idempotent:\nfirst:\n%s\nsecond:\n%s", data1, data2)
+	}
+}
+
+func TestGenerateTSTrackedEventWrapper(t *testing.T) {
+	type Notification struct {
+		Message string `json:"message"`
+	}
+
+	router := trpcgo.NewRouter()
+	trpcgo.VoidSubscribe(router, "notifications", func(ctx context.Context) (<-chan trpcgo.TrackedEvent[Notification], error) {
+		return nil, nil
+	})
+
+	outputPath := filepath.Join(t.TempDir(), "trpc.ts")
+	if err := router.GenerateTS(outputPath); err != nil {
+		t.Fatalf("GenerateTS failed: %v", err)
+	}
+
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	output := string(data)
+
+	// The subscription output must match httpSubscriptionLink's onData value.
+	if !strings.Contains(output, "$Subscription<void, { id: string; data: Notification }>") {
+		t.Errorf("TrackedEvent should expose the client tracking wrapper:\n%s", output)
+	}
+	if strings.Contains(output, "TrackedEvent") {
+		t.Errorf("TrackedEvent should not appear in output:\n%s", output)
+	}
+	if !strings.Contains(output, "export interface Notification") {
+		t.Errorf("Notification interface should be emitted:\n%s", output)
+	}
+}
+
+// A generic map declaration constrains its key parameter to what TypeScript
+// accepts as a mapped-type key, so the static mapper's generic declarations
+// type-check for every instantiation. The reflection mapper emits concrete
+// declarations and must agree on the parsed shapes.
+func TestGenerateTSGenericMapKeyConstraints(t *testing.T) {
+	script := `
+import { GenericMapInputSchema } from './schemas';
+import type { GenericMapInput } from './trpc';
+const input: GenericMapInput = { names: { a: 1 }, regions: { north: true }, counts: { 3: 'x' }, lookup: { k: 2 }, ids: { 7: 'y' }, listed: ['north'] };
+const parsed = GenericMapInputSchema.parse(input);
+const count: number = parsed.names.a;
+const flag: boolean = parsed.regions.north;
+const label: string = parsed.counts[3];
+const id: number = parsed.lookup.k;
+const name: string = parsed.ids[7];
+const listed: string[] = parsed.listed;
+if (count !== 1 || flag !== true || label !== 'x' || id !== 2 || name !== 'y' || listed[0] !== 'north') throw new Error('generic maps lost values: ' + JSON.stringify(parsed));
+`
+	runTypeGraphContract(t, []string{"GenericMapInput"}, script)
 }

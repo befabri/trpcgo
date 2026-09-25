@@ -758,3 +758,23 @@ func TestIsDirSyncUnsupported(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoveIfExists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "schemas.ts")
+	if removed, err := RemoveIfExists(path); err != nil || removed {
+		t.Fatalf("RemoveIfExists(missing) = %t, %v; want false, nil", removed, err)
+	}
+	if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := RemoveIfExists(path); err != nil || !removed {
+		t.Fatalf("RemoveIfExists(existing) = %t, %v; want true, nil", removed, err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("stat after removal = %v, want fs.ErrNotExist", err)
+	}
+	inaccessible := filepath.Join(path, "child.ts")
+	if removed, err := RemoveIfExists(inaccessible); err != nil || removed {
+		t.Fatalf("RemoveIfExists(under missing directory) = %t, %v; want false, nil", removed, err)
+	}
+}
