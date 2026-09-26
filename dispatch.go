@@ -7,9 +7,11 @@ import (
 	"errors"
 	"io"
 	"iter"
+	"log"
 	"maps"
 	"net/http"
 	"reflect"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"time"
@@ -19,6 +21,7 @@ import (
 // a pre-computed middleware chain. Obtained from [ProcedureMap].
 // Safe for concurrent use.
 type ProcedureEntry struct {
+	path            string
 	typ             ProcedureType
 	meta            any
 	inputType       reflect.Type
@@ -95,6 +98,7 @@ func (r *Router) BuildProcedureMap() *ProcedureMap {
 	entries := make(map[string]*ProcedureEntry, len(procedures))
 	for path, proc := range procedures {
 		entries[path] = &ProcedureEntry{
+			path:            path,
 			typ:             proc.typ,
 			meta:            proc.meta,
 			inputType:       proc.inputType,
@@ -124,7 +128,24 @@ func (r *Router) BuildProcedureMap() *ProcedureMap {
 //
 // The returned result may be a stream (for subscription procedures).
 // Use [IsStreamResult] to check and [ConsumeStream] to read items.
-func (r *Router) ExecuteEntry(ctx context.Context, entry *ProcedureEntry, raw json.RawMessage) (any, error) {
+//
+// A panic in the call becomes INTERNAL_SERVER_ERROR with a [PanicError]
+// cause. Callers report it through [Router.ErrorCallback] before sanitizing;
+// without a callback it is logged to the standard logger.
+func (r *Router) ExecuteEntry(ctx context.Context, entry *ProcedureEntry, raw json.RawMessage) (result any, err error) {
+	defer func() {
+		if value := recover(); value != nil {
+			cause := &PanicError{Value: value, Stack: debug.Stack()}
+			result, err = nil, WrapError(CodeInternalServerError, "internal server error", cause)
+			if r.opts.onError == nil {
+				path := ""
+				if entry != nil {
+					path = entry.path
+				}
+				log.Printf("trpcgo: procedure %q: %v", path, cause)
+			}
+		}
+	}()
 	return r.executeCommon(ctx, entry, raw)
 }
 

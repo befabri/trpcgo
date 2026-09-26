@@ -11,6 +11,24 @@ type Error struct {
 	Cause   error
 }
 
+// PanicError is the cause of an error recovered from a procedure panic.
+// WithOnError receives it; sanitized errors do not carry it. Error includes
+// the panic value and stack.
+type PanicError struct {
+	Value any
+	Stack []byte
+}
+
+func (e *PanicError) Error() string {
+	return fmt.Sprintf("panic: %v\n%s", e.Value, e.Stack)
+}
+
+// Unwrap returns the panic value when it is an error.
+func (e *PanicError) Unwrap() error {
+	err, _ := e.Value.(error)
+	return err
+}
+
 func (e *Error) Error() string {
 	if e.Cause != nil {
 		return fmt.Sprintf("trpc error %s: %s: %v", NameFromCode(e.Code), e.Message, e.Cause)

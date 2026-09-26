@@ -3,12 +3,15 @@ package trpcgo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 )
 
 // RawCall invokes a procedure by path, running the full middleware chain.
 // This is the server-side equivalent of an HTTP call — no network involved.
 //
 // Subscriptions are not supported via RawCall; use the subscription handler directly.
+// A recovered panic is reported to WithOnError, or logged without one, and
+// returned as a sanitized INTERNAL_SERVER_ERROR.
 func (r *Router) RawCall(ctx context.Context, path string, input json.RawMessage) (any, error) {
 	proc, ok := r.BuildProcedureMap().Lookup(path)
 
@@ -33,6 +36,11 @@ func (r *Router) RawCall(ctx context.Context, path string, input json.RawMessage
 
 	result, err := r.ExecuteEntry(ctx, proc, input)
 	if err != nil {
+		if trpcErr, ok := errors.AsType[*Error](err); ok && r.opts.onError != nil {
+			if _, recovered := trpcErr.Cause.(*PanicError); recovered {
+				r.opts.onError(ctx, trpcErr, path)
+			}
+		}
 		return nil, SanitizeError(err)
 	}
 	return result, nil

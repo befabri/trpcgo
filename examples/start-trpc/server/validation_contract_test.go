@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -284,6 +285,38 @@ func TestOrderedValidatorKindsAcceptDefinedTime(t *testing.T) {
 				t.Errorf("%s on defined time: panic=%v (%v), want both Go and generator to support the kind", rule, panicked, panicValue)
 			}
 		}
+	}
+}
+
+// Generation rejects this tag, but a running server still needs to handle
+// callers that never generated a schema or are using an older client. The
+// root suite covers recovery itself; this checks the real validator's panic
+// reaches the error hook with its diagnostics.
+func TestValidatorKindPanicReachesErrorHook(t *testing.T) {
+	type choiceInput struct {
+		Value float64 `json:"value" validate:"oneof=1 2"`
+	}
+	reported := make(chan *trpcgo.Error, 1)
+	r := trpcgo.NewRouter(
+		trpcgo.WithValidator(trpcgo.StructValidator(validator.New().Struct)),
+		trpcgo.WithOnError(func(_ context.Context, err *trpcgo.Error, _ string) { reported <- err }),
+	)
+	t.Cleanup(func() { _ = r.Close() })
+	trpcgo.MustMutation(r, "choice", func(context.Context, choiceInput) (string, error) {
+		t.Error("handler ran after validator panicked")
+		return "", nil
+	})
+	result, err := r.RawCall(t.Context(), "choice", []byte(`{"value":1}`))
+	trpcErr, ok := errors.AsType[*trpcgo.Error](err)
+	if result != nil || !ok || trpcErr.Code != trpcgo.CodeInternalServerError || trpcErr.Cause != nil || trpcErr.Message != "internal server error" {
+		t.Fatalf("RawCall = (%v, %v), want sanitized internal error", result, err)
+	}
+	if len(reported) != 1 {
+		t.Fatalf("reported %d errors, want the panic", len(reported))
+	}
+	cause, ok := errors.AsType[*trpcgo.PanicError](<-reported)
+	if !ok || !strings.Contains(cause.Error(), "Bad field type float64") || !strings.Contains(string(cause.Stack), "isOneOf") {
+		t.Fatalf("lost validator panic diagnostics: %v", cause)
 	}
 }
 

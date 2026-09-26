@@ -3,6 +3,7 @@ package trpcgo_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -485,5 +486,26 @@ func TestRawCallMiddlewareSnapshot(t *testing.T) {
 		if err != nil || got != "pong" || strings.Join(order, ",") != want {
 			t.Fatalf("RawCall=(%v,%v), order=%v, want %s", got, err, order, want)
 		}
+	}
+}
+
+func TestRawCallReturnedErrorsStillBypassHooks(t *testing.T) {
+	r := trpcgo.NewRouter(
+		trpcgo.WithOnError(func(context.Context, *trpcgo.Error, string) { t.Error("ordinary RawCall error invoked the error hook") }),
+		trpcgo.WithErrorFormatter(func(trpcgo.ErrorFormatterInput) any {
+			t.Error("RawCall invoked the HTTP error formatter")
+			return nil
+		}),
+	)
+	t.Cleanup(func() { _ = r.Close() })
+	trpcgo.MustVoidQuery(r, "failed", func(context.Context) (string, error) { return "", errors.New("private failure") })
+	trpcgo.MustVoidQuery(r, "invalid", func(context.Context) (string, error) {
+		return "", trpcgo.NewError(trpcgo.CodeBadRequest, "invalid input")
+	})
+	_, err := r.RawCall(t.Context(), "failed", nil)
+	assertSanitizedInternalError(t, err)
+	_, err = r.RawCall(t.Context(), "invalid", nil)
+	if trpcErr, ok := errors.AsType[*trpcgo.Error](err); !ok || trpcErr.Code != trpcgo.CodeBadRequest {
+		t.Fatalf("ordinary typed error changed: %v", err)
 	}
 }

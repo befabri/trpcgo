@@ -70,6 +70,9 @@ func WithMethodOverride(enabled bool) Option {
 }
 
 // WithOnError sets a callback invoked when a procedure returns an error.
+// A recovered panic arrives with a [PanicError] cause, also from RawCall and
+// Call, whose other errors bypass the hook. Without a hook, panics are logged
+// to the standard logger.
 func WithOnError(fn func(ctx context.Context, err *Error, path string)) Option {
 	return func(o *routerOptions) {
 		o.onError = fn

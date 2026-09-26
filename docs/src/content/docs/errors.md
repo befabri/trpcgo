@@ -78,11 +78,19 @@ router := trpcgo.NewRouter(
 
 Use `GetProcedureMeta(input.Ctx)` to read the procedure's metadata.
 
-Requests rejected before context creation, such as malformed batch input or a failed origin check, use the default error shape and bypass both the custom formatter and `WithOnError`. Server-side `RawCall` and `Call` also bypass these hooks; they return sanitized errors directly.
+Requests rejected before context creation, such as malformed batch input or a failed origin check, use the default error shape and bypass both the custom formatter and `WithOnError`. Server-side `RawCall` and `Call` bypass these hooks and return sanitized errors. A recovered panic still reaches `WithOnError`.
 
 :::caution
 The context may contain credentials or other sensitive values. Do not blindly serialize context values into error responses.
 :::
+
+## Panics
+
+A panic in a procedure becomes `INTERNAL_SERVER_ERROR`. Clients see only `internal server error`, and the other calls in a batch complete. This covers decoding, validation, middleware, the handler, output hooks, subscription setup, and server-side `RawCall` and `Call`.
+
+`WithOnError` receives the panic as a `*trpcgo.PanicError` cause. Its `Value` and `Stack` fields hold the panic value and stack, and `%v` prints both. Without `WithOnError`, trpcgo logs the panic with the standard logger.
+
+Goroutines your handler starts are not covered.
 
 ## Output Hook Errors
 
