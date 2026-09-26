@@ -113,7 +113,7 @@ func TestRefinementWrapsOnlyThrowingOperands(t *testing.T) {
 		{"quoted integer decodes with BigInt", typemap.Field{GoKind: "int64", JSONString: true}, typemap.Field{GoKind: "int64", JSONString: true}, true},
 		{"plain integer converted to meet a quoted one", typemap.Field{GoKind: "int64"}, typemap.Field{GoKind: "int64", JSONString: true}, true},
 		{"quoted string decodes with JSON.parse", typemap.Field{GoKind: "string", JSONString: true}, typemap.Field{GoKind: "string", JSONString: true}, true},
-		{"quoted float decoder returns NaN instead", typemap.Field{GoKind: "float64", JSONString: true}, typemap.Field{GoKind: "float64", JSONString: true}, false},
+		{"quoted float decoder throws on invalid syntax", typemap.Field{GoKind: "float64", JSONString: true}, typemap.Field{GoKind: "float64", JSONString: true}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fields := map[string]typemap.Field{"a": tc.right, "b": tc.left}

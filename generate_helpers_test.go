@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -197,8 +198,69 @@ func assertGoValue(t *testing.T, tc validationcontract.Case, output json.RawMess
 	if err := json.Unmarshal(output, after); err != nil {
 		t.Fatalf("Zod parsed output cannot be decoded by Go: %v; output=%s", err, output)
 	}
-	if !reflect.DeepEqual(before, after) {
+	if !sameGoValue(reflect.ValueOf(before), reflect.ValueOf(after)) {
 		t.Fatalf("Zod changed Go field values: before=%#v, after=%#v; input=%s, output=%s", before, after, tc.JSON, output)
+	}
+}
+
+// sameGoValue is reflect.DeepEqual, except that NaN matches NaN: a quoted
+// "NaN" decodes to the same Go value each time, but compares unequal to it.
+func sameGoValue(a, b reflect.Value) bool {
+	if a.Type() != b.Type() {
+		return false
+	}
+	switch a.Kind() {
+	case reflect.Float32, reflect.Float64:
+		x, y := a.Float(), b.Float()
+		return x == y || math.IsNaN(x) && math.IsNaN(y)
+	case reflect.Pointer, reflect.Interface:
+		if a.IsNil() || b.IsNil() {
+			return a.IsNil() == b.IsNil()
+		}
+		return sameGoValue(a.Elem(), b.Elem())
+	case reflect.Struct:
+		for i := range a.NumField() {
+			if !sameGoValue(a.Field(i), b.Field(i)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Slice:
+		if a.IsNil() != b.IsNil() {
+			return false
+		}
+		fallthrough
+	case reflect.Array:
+		if a.Len() != b.Len() {
+			return false
+		}
+		for i := range a.Len() {
+			if !sameGoValue(a.Index(i), b.Index(i)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Map:
+		if a.IsNil() != b.IsNil() || a.Len() != b.Len() {
+			return false
+		}
+		for _, key := range a.MapKeys() {
+			other := b.MapIndex(key)
+			if !other.IsValid() || !sameGoValue(a.MapIndex(key), other) {
+				return false
+			}
+		}
+		return true
+	case reflect.Bool:
+		return a.Bool() == b.Bool()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return a.Int() == b.Int()
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return a.Uint() == b.Uint()
+	case reflect.String:
+		return a.String() == b.String()
+	default:
+		return reflect.DeepEqual(a.Interface(), b.Interface())
 	}
 }
 

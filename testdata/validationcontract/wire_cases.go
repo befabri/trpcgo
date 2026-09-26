@@ -2,8 +2,13 @@ package validationcontract
 
 import (
 	"slices"
+	"strings"
+
+	"github.com/befabri/trpcgo/internal/gojson"
 )
 
+// Cases whose result depends on the running encoding/json compute Valid from
+// the gojson probes, so the suite holds on every decoder Go ships.
 var WireCases = []Case{
 	{Name: "wire/integer-lower-bound", Type: "WireNumbers", JSON: `{"tiny":-128,"small":0,"big":0,"unsigned":0}`, Valid: true},
 	{Name: "wire/integer-upper-bound", Type: "WireNumbers", JSON: `{"tiny":127,"small":65535,"big":1,"unsigned":1}`, Valid: true},
@@ -46,7 +51,7 @@ var WireCases = []Case{
 	{Name: "wire/WireQuotedInt64/negative-zero", Type: "WireQuotedInt64", JSON: `{"value":"-0"}`, Valid: true},
 	{Name: "wire/WireQuotedInt64/quoted-null", Type: "WireQuotedInt64", JSON: `{"value":"null"}`, Valid: true},
 	{Name: "wire/WireQuotedInt64/leading-zero", Type: "WireQuotedInt64", JSON: `{"value":"001"}`, Valid: true},
-	{Name: "wire/WireQuotedInt64/leading-plus", Type: "WireQuotedInt64", JSON: `{"value":"+1"}`, Valid: false},
+	{Name: "wire/WireQuotedInt64/leading-plus", Type: "WireQuotedInt64", JSON: `{"value":"+1"}`, Valid: !gojson.QuotedNumberPrefix},
 	{Name: "wire/WireQuotedInt64/newline", Type: "WireQuotedInt64", JSON: `{"value":"1\n"}`, Valid: false},
 	{Name: "wire/WireQuotedInt64/decimal", Type: "WireQuotedInt64", JSON: `{"value":"1.0"}`, Valid: false},
 	{Name: "wire/WireQuotedInt64/unquoted", Type: "WireQuotedInt64", JSON: `{"value":1}`, Valid: false},
@@ -93,10 +98,17 @@ var WireCases = []Case{
 	{Name: "wire/WireQuotedString/escape", Type: "WireQuotedString", JSON: `{"value":"\"admin\\u0040example.com\""}`, Valid: true},
 	{Name: "wire/WireQuotedJSONNumber/integer", Type: "WireQuotedJSONNumber", JSON: `{"value":"42"}`, Valid: true},
 	{Name: "wire/WireQuotedJSONNumber/exponent", Type: "WireQuotedJSONNumber", JSON: `{"value":"-1.5e3"}`, Valid: true},
-	{Name: "wire/WireQuotedJSONNumber/quoted-null", Type: "WireQuotedJSONNumber", JSON: `{"value":"null"}`, Valid: true},
-	{Name: "wire/WireQuotedJSONNumber/trailing-text", Type: "WireQuotedJSONNumber", JSON: `{"value":"4abc"}`, Valid: true},
-	{Name: "wire/WireQuotedJSONNumber/dash", Type: "WireQuotedJSONNumber", JSON: `{"value":"-"}`, Valid: true},
-	{Name: "wire/WireQuotedJSONNumber/nested-literal", Type: "WireQuotedJSONNumber", JSON: `{"value":"\"42\""}`, Valid: true},
+	{Name: "wire/WireQuotedJSONNumber/negative-zero", Type: "WireQuotedJSONNumber", JSON: `{"value":"-0"}`, Valid: true},
+	{Name: "wire/WireQuotedJSONNumber/capital-exponent", Type: "WireQuotedJSONNumber", JSON: `{"value":"1E+5"}`, Valid: true},
+	{Name: "wire/WireQuotedJSONNumber/quoted-null", Type: "WireQuotedJSONNumber", JSON: `{"value":"null"}`, Valid: gojson.LenientQuotedNumber},
+	{Name: "wire/WireQuotedJSONNumber/trailing-text", Type: "WireQuotedJSONNumber", JSON: `{"value":"4abc"}`, Valid: gojson.LenientQuotedNumber},
+	{Name: "wire/WireQuotedJSONNumber/trailing-space", Type: "WireQuotedJSONNumber", JSON: `{"value":"42 "}`, Valid: gojson.LenientQuotedNumber},
+	{Name: "wire/WireQuotedJSONNumber/trailing-point", Type: "WireQuotedJSONNumber", JSON: `{"value":"1."}`, Valid: gojson.LenientQuotedNumber},
+	{Name: "wire/WireQuotedJSONNumber/leading-zero", Type: "WireQuotedJSONNumber", JSON: `{"value":"01"}`, Valid: gojson.LenientQuotedNumber},
+	{Name: "wire/WireQuotedJSONNumber/dash", Type: "WireQuotedJSONNumber", JSON: `{"value":"-"}`, Valid: gojson.LenientQuotedNumber},
+	{Name: "wire/WireQuotedJSONNumber/nested-literal", Type: "WireQuotedJSONNumber", JSON: `{"value":"\"42\""}`, Valid: gojson.LenientQuotedNumber},
+	{Name: "wire/WireQuotedJSONNumber/leading-plus", Type: "WireQuotedJSONNumber", JSON: `{"value":"+1"}`},
+	{Name: "wire/WireQuotedJSONNumber/leading-point", Type: "WireQuotedJSONNumber", JSON: `{"value":".5"}`},
 	{Name: "wire/WireQuotedJSONNumber/nested-literal-invalid", Type: "WireQuotedJSONNumber", JSON: `{"value":"\"4abc\""}`},
 	{Name: "wire/WireQuotedJSONNumber/nested-literal-unterminated", Type: "WireQuotedJSONNumber", JSON: `{"value":"\"42"}`},
 	{Name: "wire/WireQuotedJSONNumber/unquoted", Type: "WireQuotedJSONNumber", JSON: `{"value":42}`},
@@ -106,12 +118,12 @@ var WireCases = []Case{
 	{Name: "wire/WireQuotedJSONNumber/quoted-nul", Type: "WireQuotedJSONNumber", JSON: `{"value":"nul"}`},
 	{Name: "wire/WireQuotedJSONNumber/leading-space", Type: "WireQuotedJSONNumber", JSON: `{"value":" 42"}`},
 	{Name: "wire/WireQuotedJSONNumberRules/valid", Type: "WireQuotedJSONNumberRules", JSON: `{"value":"42"}`, Valid: true},
-	{Name: "wire/WireQuotedJSONNumberRules/nested-literal", Type: "WireQuotedJSONNumberRules", JSON: `{"value":"\"42\""}`, Valid: true},
+	{Name: "wire/WireQuotedJSONNumberRules/nested-literal", Type: "WireQuotedJSONNumberRules", JSON: `{"value":"\"42\""}`, Valid: gojson.LenientQuotedNumber},
 	{Name: "wire/WireQuotedJSONNumberRules/zero-required", Type: "WireQuotedJSONNumberRules", JSON: `{"value":"null"}`},
 	{Name: "wire/WireQuotedJSONNumberRules/short", Type: "WireQuotedJSONNumberRules", JSON: `{"value":"4"}`},
 	{Name: "wire/WireQuotedJSONNumberRules/nonnumeric-text", Type: "WireQuotedJSONNumberRules", JSON: `{"value":"4abc"}`},
 	{Name: "wire/WireQuotedJSONNumberPointer/missing", Type: "WireQuotedJSONNumberPointer", JSON: `{}`, Valid: true},
-	{Name: "wire/WireQuotedJSONNumberPointer/quoted-null", Type: "WireQuotedJSONNumberPointer", JSON: `{"value":"null"}`, Valid: true},
+	{Name: "wire/WireQuotedJSONNumberPointer/quoted-null", Type: "WireQuotedJSONNumberPointer", JSON: `{"value":"null"}`, Valid: gojson.LenientQuotedNumber},
 	{Name: "wire/WireQuotedJSONNumberPointer/valid", Type: "WireQuotedJSONNumberPointer", JSON: `{"value":"42"}`, Valid: true},
 	{Name: "wire/WireQuotedJSONNumberPointer/short", Type: "WireQuotedJSONNumberPointer", JSON: `{"value":"4"}`},
 	{Name: "wire/WireQuotedJSONNumberPointer/unquoted", Type: "WireQuotedJSONNumberPointer", JSON: `{"value":42}`},
@@ -156,6 +168,23 @@ var RepeatedFieldCases = []Case{
 	{Name: "duplicate-fields/scalar-earlier-overflow", Type: "DuplicateScalar", JSON: `{"value":128,"value":1}`, Valid: false, Raw: true},
 	{Name: "duplicate-fields/scalar-earlier-type-error", Type: "DuplicateScalar", JSON: `{"value":"bad","value":1}`, Valid: false, Raw: true},
 	{Name: "duplicate-fields/scalar-case-insensitive-overwrite", Type: "DuplicateScalar", JSON: `{"VALUE":1,"value":2}`, Valid: true, Raw: true},
+	// Folded keys match by the running Go's tables, not the JavaScript engine's.
+	{Name: "fold/exact", Type: "WireFoldedNames", JSON: `{"kilo":1}`, Valid: true},
+	{Name: "fold/kelvin-sign", Type: "WireFoldedNames", JSON: `{"\u212ailo":1}`, Valid: true, Raw: true},
+	{Name: "fold/long-s", Type: "WireFoldedNames", JSON: `{"e\u017f":1}`, Valid: true, Raw: true},
+	{Name: "fold/final-sigma", Type: "WireFoldedNames", JSON: `{"ς":1}`, Valid: true, Raw: true},
+	{Name: "fold/capital-sigma", Type: "WireFoldedNames", JSON: `{"Σ":1}`, Valid: true, Raw: true},
+	{Name: "fold/unicode16-capital", Type: "WireFoldedNames", JSON: `{"Ɤ":1}`, Valid: strings.EqualFold("ɤ", "Ɤ"), Raw: true},
+	{Name: "fold/unicode17-capital", Type: "WireFoldedNames", JSON: `{"꟒":1}`, Valid: strings.EqualFold("ꟓ", "꟒"), Raw: true},
+	{Name: "fold/ligature", Type: "WireFoldedNames", JSON: `{"ﬆ":1}`, Valid: strings.EqualFold("ﬅ", "ﬆ"), Raw: true},
+	{Name: "fold/delimiter", Type: "WireFoldedNames", JSON: `{"ki_lo":1}`, Raw: true},
+	{Name: "tag-names/symbol", Type: "WireTagNames", JSON: `{"😀":1}`, Valid: decodesKey("Emoji", "😀,omitempty", "😀")},
+	{Name: "tag-names/symbol-go-name", Type: "WireTagNames", JSON: `{"Emoji":1}`, Valid: decodesKey("Emoji", "😀,omitempty", "Emoji")},
+	{Name: "tag-names/copyright", Type: "WireTagNames", JSON: `{"a©b":1}`, Valid: decodesKey("Sign", "a©b,omitempty", "a©b")},
+	{Name: "tag-names/unicode16-letter", Type: "WireTagNames", JSON: `{"ᲊ":1}`, Valid: decodesKey("Tje", "ᲊ,omitempty", "ᲊ")},
+	{Name: "tag-names/unicode16-go-name", Type: "WireTagNames", JSON: `{"Tje":1}`, Valid: decodesKey("Tje", "ᲊ,omitempty", "Tje")},
+	{Name: "tag-names/quote", Type: "WireTagNames", JSON: `{"a'b":1}`, Valid: decodesKey("Quote", "a'b,omitempty", "a'b")},
+	{Name: "tag-names/quote-go-name", Type: "WireTagNames", JSON: `{"Quote":1}`, Valid: decodesKey("Quote", "a'b,omitempty", "Quote")},
 	{Name: "duplicate-fields/entry-struct-replaced-not-merged", Type: "DuplicateStructMap", JSON: `{"values":{"01":{"a":1,"b":2},"1":{"a":3}}}`, Valid: false},
 	{Name: "duplicate-fields/entry-struct-partials-stay-invalid", Type: "DuplicateStructMap", JSON: `{"values":{"01":{"a":1},"1":{"b":2}}}`, Valid: false},
 	{Name: "duplicate-fields/entry-struct-complete-replacement", Type: "DuplicateStructMap", JSON: `{"values":{"01":{"a":0,"b":0},"1":{"a":1,"b":2}}}`, Valid: true, Raw: true},
@@ -180,14 +209,14 @@ var RepeatedFieldCases = []Case{
 	{Name: "duplicate-fields/quoted-float-null-before-value", Type: "DuplicateQuotedFloat", JSON: `{"value":"null","value":"1"}`, Valid: true},
 	{Name: "duplicate-fields/quoted-float-null-keeps-failed-rule", Type: "DuplicateQuotedFloat", JSON: `{"value":"2","value":"null"}`, Valid: false},
 	{Name: "duplicate-fields/quoted-float-hexadecimal-then-null", Type: "DuplicateQuotedFloat", JSON: `{"value":"0x1p0","value":"null"}`, Valid: true, Raw: true},
-	{Name: "duplicate-fields/quoted-float-earlier-grammar-error", Type: "DuplicateQuotedFloat", JSON: `{"value":".1","value":"1"}`, Valid: false, Raw: true},
+	{Name: "duplicate-fields/quoted-float-earlier-grammar-error", Type: "DuplicateQuotedFloat", JSON: `{"value":"1_","value":"1"}`, Valid: false, Raw: true},
 	{Name: "duplicate-fields/quoted-float-overwritten-rule", Type: "DuplicateQuotedFloat", JSON: `{"value":"2","value":"1"}`, Valid: true},
 	{Name: "duplicate-fields/quoted-float-pointer-null-resets", Type: "DuplicateQuotedFloatPointer", JSON: `{"value":"1","value":"null"}`, Valid: true},
 	{Name: "duplicate-fields/quoted-float-pointer-lone-null", Type: "DuplicateQuotedFloatPointer", JSON: `{"value":"null"}`, Valid: true},
 	{Name: "duplicate-fields/quoted-float-pointer-null-clears-failed-rule", Type: "DuplicateQuotedFloatPointer", JSON: `{"value":"2","value":"null"}`, Valid: true},
 	{Name: "duplicate-fields/quoted-float-pointer-null-then-valid", Type: "DuplicateQuotedFloatPointer", JSON: `{"value":"null","value":"1"}`, Valid: true},
 	{Name: "duplicate-fields/quoted-float-pointer-null-then-invalid", Type: "DuplicateQuotedFloatPointer", JSON: `{"value":"null","value":"2"}`, Valid: false},
-	{Name: "duplicate-fields/quoted-float-pointer-null-retains-decode-error", Type: "DuplicateQuotedFloatPointer", JSON: `{"value":".1","value":"null"}`, Valid: false, Raw: true},
+	{Name: "duplicate-fields/quoted-float-pointer-null-retains-decode-error", Type: "DuplicateQuotedFloatPointer", JSON: `{"value":"1_","value":"null"}`, Valid: false, Raw: true},
 	{Name: "duplicate-fields/slice-struct-elements-reuse", Type: "DuplicateStructSlice", JSON: `{"values":[{"a":1,"b":2}],"values":[{"a":3}]}`, Valid: true, Raw: true},
 	{Name: "duplicate-fields/slice-struct-partials-merge", Type: "DuplicateStructSlice", JSON: `{"values":[{"a":1}],"values":[{"b":2}]}`, Valid: true, Raw: true},
 	{Name: "duplicate-fields/slice-struct-null-retains-element", Type: "DuplicateStructSlice", JSON: `{"values":[{"a":1,"b":2}],"values":[null]}`, Valid: true, Raw: true},
@@ -211,7 +240,9 @@ func init() {
 		inputFixture[DuplicateScalarSlice](),
 		inputFixture[DuplicateStructMap](),
 		inputFixture[DuplicateStructSlice](),
+		inputFixture[WireFoldedNames](),
 		inputFixture[WireInt32](),
+		inputFixture[WireTagNames](),
 		inputFixture[WireNumbers](),
 		inputFixture[WireQuotedBool](),
 		inputFixture[WireQuotedInt64](),
@@ -231,4 +262,14 @@ func init() {
 		inputFixture[WireTimestamp](),
 		inputFixture[WireUint32](),
 	)
+}
+
+// decodesKey reports whether encoding/json decodes key into a field with this
+// Go name and json tag.
+func decodesKey(goName, tag, key string) bool {
+	name, dropped := gojson.FieldName(tag)
+	if name == "" {
+		name = goName
+	}
+	return !dropped && name == key
 }

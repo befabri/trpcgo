@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+
+	"github.com/befabri/trpcgo/internal/gojson"
 )
 
 // tRPC clients add fields to procedure input that the Go input struct may not
@@ -75,11 +77,11 @@ func structDeclaresJSONKey(st reflect.Type, key string) bool {
 // not a key: json skips it, or it is an embedded struct whose fields are
 // promoted instead.
 func jsonFieldName(f reflect.StructField) (string, bool) {
-	tag := f.Tag.Get("json")
-	if tag == "-" {
+	name, dropped := gojson.FieldName(f.Tag.Get("json"))
+	if dropped {
 		return "", false
 	}
-	if name, _, _ := strings.Cut(tag, ","); name != "" {
+	if name != "" {
 		return name, true
 	}
 	if !f.IsExported() || (f.Anonymous && structType(f.Type) != nil) {

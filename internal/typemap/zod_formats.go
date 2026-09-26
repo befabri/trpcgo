@@ -2,7 +2,9 @@ package typemap
 
 import (
 	"encoding/json"
+	"net/url"
 	"regexp/syntax"
+	"strconv"
 	"unicode"
 )
 
@@ -179,8 +181,9 @@ func buildGoEmailValidator() string {
 
 // The validator's URL tag uses net/url.Parse, not the browser WHATWG URL
 // parser. This implements its syntax checks and the tag's file/opaque rules;
-// it deliberately performs no network or domain-existence checks.
-const goURLValidator = `(value: string): boolean => {
+// it deliberately performs no network or domain-existence checks. Where Go
+// releases parse hosts differently, the generator's url.Parse decides.
+var goURLValidator = `(value: string): boolean => {
   // validator lowercases before parsing. These are Go's only non-ASCII
   // runes that become ASCII; all other case changes preserve URL grammar.
   value = value.replace(/\u0130/g, "i").replace(/\u212a/g, "k");
@@ -227,6 +230,7 @@ const goURLValidator = `(value: string): boolean => {
       if (!/^[a-zA-Z0-9\-._:~!$&'()*+,;=%@]*$(?![\s\S])/.test(user) || !validEscapes(user)) return false;
     }
     const open = host.lastIndexOf("[");
+    if (open > 0 && ` + strconv.FormatBool(goURLBracketLeads) + `) return false;
     if (open >= 0) {
       const close = host.lastIndexOf("]");
       if (close < open || !/^(?::[0-9]*)?$(?![\s\S])/.test(host.slice(close + 1))) return false;
@@ -245,7 +249,7 @@ const goURLValidator = `(value: string): boolean => {
     } else {
       let colon = host.indexOf(":");
       if (colon >= 0) {
-        if (scheme === "postgres" || scheme === "postgresql") colon = host.lastIndexOf(":");
+        if (` + goURLHostColons() + `) colon = host.lastIndexOf(":");
         if (!/^:[0-9]*$(?![\s\S])/.test(host.slice(colon))) return false;
       }
       if (unescapeHost(host) === null) return false;
@@ -255,6 +259,26 @@ const goURLValidator = `(value: string): boolean => {
   const path = text.replace(/%([0-9a-fA-F]{2})/g, (_, pair: string) => String.fromCharCode(parseInt(pair, 16)));
   return scheme === "file" ? path.length > 0 && path !== "/" : host.length > 0 || fragment.length > 0;
 }`
+
+// goURLBracketLeads reports that url.Parse accepts a bracketed IP literal
+// only at the start of the host. Earlier releases took the last bracket.
+var goURLBracketLeads = !ParsesURL("http://a[::1]")
+
+// goURLHostColons returns a TypeScript expression over scheme reporting
+// whether url.Parse lets the host hold extra colons, with the port after the
+// last. Go 1.26 allows it for PostgreSQL only, Go 1.27 for every scheme but
+// HTTP, and GODEBUG urlstrictcolons=0 for HTTP too.
+func goURLHostColons() string {
+	http, postgres, other := ParsesURL("http://a:1:2"), ParsesURL("postgres://a:1:2"), ParsesURL("x://a:1:2")
+	return `(scheme === "http" || scheme === "https" ? ` + strconv.FormatBool(http) + ` : scheme === "postgres" || scheme === "postgresql" ? ` + strconv.FormatBool(postgres) + ` : ` + strconv.FormatBool(other) + `)`
+}
+
+// ParsesURL reports whether net/url, which validator's url tag uses, parses
+// value. Its host rules changed between Go releases.
+func ParsesURL(value string) bool {
+	_, err := url.Parse(value)
+	return err == nil
+}
 
 // Parse net.ParseIP's address language directly. Browser/Zod URL or IP parsers
 // have different acceptance rules, especially zones and mapped addresses.

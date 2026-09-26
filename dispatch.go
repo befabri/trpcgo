@@ -208,6 +208,10 @@ func decodeStrictInput(ptr reflect.Value, raw json.RawMessage) error {
 	return nil
 }
 
+// strictInputError maps a strict decoding error to its client error. Only the
+// message identifies an unknown field, and the error type decides nothing:
+// Go 1.27's default decoder returns *json.UnmarshalTypeError for malformed
+// quoted numbers, times and Base64 values that earlier decoders return bare.
 func strictInputError(err error) error {
 	if _, ok := errors.AsType[*json.SyntaxError](err); ok {
 		return NewError(CodeParseError, "failed to parse input")
@@ -215,10 +219,10 @@ func strictInputError(err error) error {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return NewError(CodeParseError, "failed to parse input")
 	}
-	if _, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
-		return NewError(CodeBadRequest, "invalid input type")
+	if strings.HasPrefix(err.Error(), "json: unknown field ") {
+		return NewError(CodeBadRequest, "unknown field in input")
 	}
-	return NewError(CodeBadRequest, "unknown field in input")
+	return NewError(CodeBadRequest, "invalid input type")
 }
 
 func (r *Router) validateInput(inputType reflect.Type, input any) error {

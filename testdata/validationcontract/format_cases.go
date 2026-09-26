@@ -2,8 +2,15 @@ package validationcontract
 
 import (
 	"slices"
+	"strings"
+	"unicode"
+
+	"github.com/befabri/trpcgo/internal/typemap"
 )
 
+// Unicode cases compute Valid with the running Go's tables, which validator
+// and the generator share. Characters added in Unicode 16 and 17 tell
+// releases apart.
 var FormatCases = []Case{
 	{Name: "format/url-go-lowercase-ascii-user", Type: "FormatURL", JSON: `{"value":"http://K@example.com"}`, Valid: true},
 	{Name: "format/url-go-lowercase-dotted-i-user", Type: "FormatURL", JSON: `{"value":"http://İ@example.com"}`, Valid: true},
@@ -11,6 +18,11 @@ var FormatCases = []Case{
 	{Name: "format/url-go-lowercase-file-scheme", Type: "FormatURL", JSON: `{"value":"FİLE:/tmp/file"}`, Valid: true},
 	{Name: "format/url-go-lowercase-nonascii-user", Type: "FormatURL", JSON: `{"value":"http://Σ@example.com"}`, Valid: false},
 	{Name: "format/url-go-lowercase-nonascii-scheme", Type: "FormatURL", JSON: `{"value":"Σ:opaque"}`, Valid: false},
+	// Host rules follow the net/url of the Go running the suite, and its
+	// urlstrictcolons GODEBUG setting.
+	{Name: "format/url-bracket-after-host", Type: "FormatURL", JSON: `{"value":"http://a[::1]"}`, Valid: typemap.ParsesURL("http://a[::1]")},
+	{Name: "format/url-postgres-extra-colon", Type: "FormatURL", JSON: `{"value":"postgres://a:1:2"}`, Valid: typemap.ParsesURL("postgres://a:1:2")},
+	{Name: "format/url-other-extra-colon", Type: "FormatURL", JSON: `{"value":"mongodb://a:1:2"}`, Valid: typemap.ParsesURL("mongodb://a:1:2")},
 	{Name: "format/email-ordinary", Type: "FormatEmail", JSON: `{"value":"user@example.com"}`, Valid: true},
 	{Name: "format/email-plus", Type: "FormatEmail", JSON: `{"value":"a+b@example.com"}`, Valid: true},
 	{Name: "format/email-unicode", Type: "FormatEmail", JSON: `{"value":"é@例.测试"}`, Valid: true},
@@ -43,7 +55,7 @@ var FormatCases = []Case{
 	{Name: "format/url-large-port", Type: "FormatURL", JSON: `{"value":"http://example.com:99999999999"}`, Valid: true},
 	{Name: "format/url-empty-port", Type: "FormatURL", JSON: `{"value":"http://example.com:"}`, Valid: true},
 	{Name: "format/url-invalid-port", Type: "FormatURL", JSON: `{"value":"http://example.com:abc"}`, Valid: false},
-	{Name: "format/url-multicolon", Type: "FormatURL", JSON: `{"value":"http://a:b:12"}`, Valid: false},
+	{Name: "format/url-multicolon", Type: "FormatURL", JSON: `{"value":"http://a:b:12"}`, Valid: typemap.ParsesURL("http://a:b:12")},
 	{Name: "format/url-postgres-multicolon", Type: "FormatURL", JSON: `{"value":"postgres://a:b:12"}`, Valid: true},
 	{Name: "format/url-unicode-host", Type: "FormatURL", JSON: `{"value":"http://例.test"}`, Valid: true},
 	{Name: "format/url-unicode-user", Type: "FormatURL", JSON: `{"value":"http://é@example.com"}`, Valid: false},
@@ -87,22 +99,26 @@ var FormatCases = []Case{
 	{Name: "format/alphaunicode-bmp", Type: "FormatAlphaUnicode", JSON: `{"value":"é東京"}`, Valid: true},
 	{Name: "format/alphaunicode-astral", Type: "FormatAlphaUnicode", JSON: `{"value":"𝒜"}`, Valid: true},
 	{Name: "format/alphaunicode-unicode15-kawi", Type: "FormatAlphaUnicode", JSON: `{"value":"𑼂"}`, Valid: true},
-	{Name: "format/alphaunicode-unicode16-todhri", Type: "FormatAlphaUnicode", JSON: `{"value":"𐗀"}`, Valid: false},
+	{Name: "format/alphaunicode-unicode16-todhri", Type: "FormatAlphaUnicode", JSON: `{"value":"𐗀"}`, Valid: unicode.IsLetter('𐗀')},
+	{Name: "format/alphaunicode-unicode17-sidetic", Type: "FormatAlphaUnicode", JSON: `{"value":"𐥀"}`, Valid: unicode.IsLetter('𐥀')},
 	{Name: "format/alphaunicode-combining", Type: "FormatAlphaUnicode", JSON: `{"value":"é"}`, Valid: false},
 	{Name: "format/alphaunicode-number", Type: "FormatAlphaUnicode", JSON: `{"value":"²"}`, Valid: false},
 	{Name: "format/alphaunicode-empty", Type: "FormatAlphaUnicode", JSON: `{"value":""}`, Valid: false},
 	{Name: "format/alphanumunicode-numbers", Type: "FormatAlphanumUnicode", JSON: `{"value":"A²Ⅳ٢"}`, Valid: true},
-	{Name: "format/alphanumunicode-unicode16-digit", Type: "FormatAlphanumUnicode", JSON: `{"value":"𐵀"}`, Valid: false},
+	{Name: "format/alphanumunicode-unicode16-digit", Type: "FormatAlphanumUnicode", JSON: `{"value":"𐵀"}`, Valid: unicode.In('𐵀', unicode.L, unicode.N)},
+	{Name: "format/alphanumunicode-unicode17-digit", Type: "FormatAlphanumUnicode", JSON: `{"value":"𑷠"}`, Valid: unicode.In('𑷠', unicode.L, unicode.N)},
 	{Name: "format/alphanumunicode-punctuation", Type: "FormatAlphanumUnicode", JSON: `{"value":"A-"}`, Valid: false},
 	{Name: "format/lowercase-ordinary", Type: "FormatLowercase", JSON: `{"value":"hello 123"}`, Valid: true},
 	{Name: "format/lowercase-uppercase", Type: "FormatLowercase", JSON: `{"value":"Hello"}`, Valid: false},
 	{Name: "format/lowercase-dotted-i", Type: "FormatLowercase", JSON: `{"value":"İ"}`, Valid: false},
-	{Name: "format/lowercase-unicode16-uppercase", Type: "FormatLowercase", JSON: `{"value":"Ᲊ"}`, Valid: true},
+	{Name: "format/lowercase-unicode16-uppercase", Type: "FormatLowercase", JSON: `{"value":"Ᲊ"}`, Valid: strings.ToLower("Ᲊ") == "Ᲊ"},
+	{Name: "format/lowercase-unicode17-uppercase", Type: "FormatLowercase", JSON: `{"value":"𖺠"}`, Valid: strings.ToLower("𖺠") == "𖺠"},
 	{Name: "format/uppercase-sharp-s", Type: "FormatUppercase", JSON: `{"value":"ß"}`, Valid: true},
 	{Name: "format/uppercase-ligature", Type: "FormatUppercase", JSON: `{"value":"ﬀ"}`, Valid: true},
 	{Name: "format/uppercase-greek-simple-uppercase", Type: "FormatUppercase", JSON: `{"value":"ᾀ"}`, Valid: false},
 	{Name: "format/uppercase-greek-capital", Type: "FormatUppercase", JSON: `{"value":"ᾈ"}`, Valid: true},
-	{Name: "format/uppercase-unicode16-lowercase", Type: "FormatUppercase", JSON: `{"value":"ᲊ"}`, Valid: true},
+	{Name: "format/uppercase-unicode16-lowercase", Type: "FormatUppercase", JSON: `{"value":"ᲊ"}`, Valid: strings.ToUpper("ᲊ") == "ᲊ"},
+	{Name: "format/uppercase-unicode17-lowercase", Type: "FormatUppercase", JSON: `{"value":"𖺻"}`, Valid: strings.ToUpper("𖺻") == "𖺻"},
 	{Name: "format/uppercase-empty", Type: "FormatUppercase", JSON: `{"value":""}`, Valid: false},
 	{Name: "format/timeequal-single-digit-hour", Type: "FormatTimeEqual", JSON: `{"a":"2024-01-02T03:04:05Z","b":"2024-01-02T3:04:05Z"}`, Valid: true},
 	{Name: "format/timeequal-comma-fraction", Type: "FormatTimeEqual", JSON: `{"a":"2024-01-02T03:04:05.123456789Z","b":"2024-01-02T03:04:05,1234567899Z"}`, Valid: true},

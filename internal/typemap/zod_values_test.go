@@ -50,7 +50,8 @@ func TestHoistZodRuntimeHelpers(t *testing.T) {
 // schema acceptance test alone cannot detect a one-ULP error away from a bound.
 func TestQuotedFloatDecoderMatchesGo(t *testing.T) {
 	inputs := []string{
-		"", "null", "null\n", "NaN", "-NaN", "Inf", "+Inf", "-Inf", "-iNfiNitY", "-Inf\n",
+		"", "null", "null\n", "NaN", "nan", "-NaN", "+NaN", "Inf", "+Inf", "-Inf", "-iNfiNitY", "-Inf\n",
+		"infinity", "+Infinity", "infin", "+", "-", "++1", "+-1", "--1", "+_1", "+.5", "+1e2", "+0x1p0",
 		"0", "-0", "00", "+0", ".1", "-.1", "1.", "1e2", "1e+2", "1e-2", "1e", "1e+",
 		"1_000", "1__000", "1_", "1_.0", "1._0", "1.0_1", "1e1_0", "1e_10", "1e+_10",
 		"0x1p0", "-0X1P2", "0x_1p0", "0x.8p0", "0x_.8p0", "0x1.p0", "0x1_ffp+2", "0x1",
@@ -74,6 +75,7 @@ func TestQuotedFloatDecoderMatchesGo(t *testing.T) {
 		Input string `json:"input"`
 		Bits  int    `json:"bits"`
 		Valid bool   `json:"valid"`
+		NaN   bool   `json:"nan"`
 		Value string `json:"value"`
 	}
 	var vectors []vector
@@ -98,7 +100,8 @@ func TestQuotedFloatDecoderMatchesGo(t *testing.T) {
 				err = json.Unmarshal(wire, &target)
 				value = target.Value
 			}
-			vectors = append(vectors, vector{input, bits, err == nil, fmt.Sprintf("%016x", math.Float64bits(value))})
+			// NaN payload bits differ between Go and JavaScript; only NaN-ness is Go's.
+			vectors = append(vectors, vector{input, bits, err == nil, math.IsNaN(value), fmt.Sprintf("%016x", math.Float64bits(value))})
 		}
 	}
 	encoded, err := json.Marshal(vectors)
@@ -109,11 +112,16 @@ func TestQuotedFloatDecoderMatchesGo(t *testing.T) {
 const bytes = new DataView(new ArrayBuffer(8));
 const failures: unknown[] = [];
 for (const test of vectors) {
-  const value = decode(test.input, test.bits as 32 | 64);
-  const valid = !Number.isNaN(value);
+  let value = 0, valid = true;
+  try {
+    value = decode(test.input, test.bits as 32 | 64);
+  } catch {
+    valid = false;
+  }
   bytes.setFloat64(0, value);
   const encoded = bytes.getBigUint64(0).toString(16).padStart(16, "0");
-  if (valid !== test.valid || (valid && encoded !== test.value)) failures.push({ ...test, actualValid: valid, actualValue: encoded });
+  const matches = test.nan ? Number.isNaN(value) : encoded === test.value;
+  if (valid !== test.valid || (valid && !matches)) failures.push({ ...test, actualValid: valid, actualValue: encoded });
 }
 if (failures.length) throw new Error(JSON.stringify(failures));
 `

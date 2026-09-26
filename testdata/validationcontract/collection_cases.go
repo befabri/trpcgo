@@ -2,6 +2,8 @@ package validationcontract
 
 import (
 	"slices"
+
+	"github.com/befabri/trpcgo/internal/gojson"
 )
 
 var ContainerCases = []Case{
@@ -118,11 +120,15 @@ var UniqueCases = []Case{
 	{Name: "unique/quoted/null-zero", Type: "UniqueQuotedRecords", JSON: `{"values":[{"id":"null","label":"a"},{"id":"0","label":"b"}]}`},
 	{Name: "unique/quoted-float/rounded", Type: "UniqueFloatRecords", JSON: `{"values":[{"id":"16777216","label":"a"},{"id":"16777217","label":"b"}]}`},
 	{Name: "unique/quoted-float/distinct", Type: "UniqueFloatRecords", JSON: `{"values":[{"id":"1","label":"a"},{"id":"2","label":"b"}]}`, Valid: true},
+	{Name: "unique/quoted-float/signed-zero-duplicate", Type: "UniqueFloatRecords", JSON: `{"values":[{"id":"0","label":"a"},{"id":"-0","label":"b"}]}`},
+	{Name: "unique/quoted-float/infinity-duplicate", Type: "UniqueFloatRecords", JSON: `{"values":[{"id":"-Inf","label":"a"},{"id":"-infinity","label":"b"}]}`},
+	// Go map keys never match a NaN, so every NaN is unique.
+	{Name: "unique/quoted-float/nan-distinct", Type: "UniqueFloatRecords", JSON: `{"values":[{"id":"NaN","label":"a"},{"id":"nan","label":"b"}]}`, Valid: !gojson.QuotedNumberPrefix},
 	{Name: "unique/quoted-number/text-distinct", Type: "UniqueNumberRecords", JSON: `{"values":[{"amount":"1","label":"a"},{"amount":"1.0","label":"b"}]}`, Valid: true},
 	{Name: "unique/quoted-number/text-duplicate", Type: "UniqueNumberRecords", JSON: `{"values":[{"amount":"1","label":"a"},{"amount":"1","label":"b"}]}`},
 	{Name: "unique/quoted-number/nested-literal-duplicate", Type: "UniqueNumberRecords", JSON: `{"values":[{"amount":"\"1\"","label":"a"},{"amount":"1","label":"b"}]}`},
 	{Name: "unique/quoted-number/null-zero-duplicate", Type: "UniqueNumberRecords", JSON: `{"values":[{"amount":"null","label":"a"},{"amount":"null","label":"b"}]}`},
-	{Name: "unique/quoted-number/null-zero-distinct", Type: "UniqueNumberRecords", JSON: `{"values":[{"amount":"null","label":"a"},{"amount":"0","label":"b"}]}`, Valid: true},
+	{Name: "unique/quoted-number/null-zero-distinct", Type: "UniqueNumberRecords", JSON: `{"values":[{"amount":"null","label":"a"},{"amount":"0","label":"b"}]}`, Valid: gojson.LenientQuotedNumber},
 	{Name: "unique/map/distinct", Type: "UniqueMapStructs", JSON: `{"values":{"a":{"label":"x"},"b":{"label":"y"}}}`, Valid: true},
 	{Name: "unique/map/parameter-is-ignored", Type: "UniqueMapStructs", JSON: `{"values":{"a":{"label":"x"},"b":{"label":"x"}}}`},
 	{Name: "unique/embedded/selected-distinct", Type: "UniqueEmbeddedRecords", JSON: `{"values":[{"identifier":"a","label":"x"},{"identifier":"b","label":"x"}]}`, Valid: true},

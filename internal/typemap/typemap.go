@@ -8,9 +8,10 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"unicode"
 
 	"golang.org/x/tools/go/types/typeutil"
+
+	"github.com/befabri/trpcgo/internal/gojson"
 )
 
 // TypeDefKind distinguishes what kind of TypeScript declaration to emit.
@@ -708,21 +709,17 @@ func fieldComment(tag string, comments map[int]string, index int) string {
 	return comment
 }
 
-// QuotePropName wraps a property name in quotes if it is not a valid
-// JavaScript identifier (e.g. contains hyphens, starts with a digit).
+// QuotePropName quotes a property name unless it is an ASCII JavaScript
+// identifier. Whether a non-ASCII letter is one depends on the engine's
+// Unicode version.
 func QuotePropName(name string) string {
 	if name == "" {
 		return `""`
 	}
 	for i, r := range name {
-		if i == 0 {
-			if !unicode.IsLetter(r) && r != '_' && r != '$' {
-				return ZodStringLiteral(name)
-			}
-		} else {
-			if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '$' {
-				return ZodStringLiteral(name)
-			}
+		letter := 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || r == '_' || r == '$'
+		if !letter && (i == 0 || r < '0' || r > '9') {
+			return ZodStringLiteral(name)
 		}
 	}
 	return name
@@ -742,16 +739,14 @@ func ParseJSONTag(rawTag string) (name string, omitempty bool, skip bool) {
 	if !ok {
 		return "", false, false
 	}
-	if jsonTag == "-" {
-		return "", false, true
-	}
-	name, options, _ := strings.Cut(jsonTag, ",")
+	_, options, _ := strings.Cut(jsonTag, ",")
 	for p := range strings.SplitSeq(options, ",") {
 		if p == "omitempty" || p == "omitzero" {
 			omitempty = true
 		}
 	}
-	return name, omitempty, false
+	name, skip = gojson.FieldName(jsonTag)
+	return name, omitempty, skip
 }
 
 func isPointer(t types.Type) bool {

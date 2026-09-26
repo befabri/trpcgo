@@ -16,7 +16,7 @@ env:
 
 jobs:
   test:
-    name: Test (${{ matrix.go }})
+    name: Test (${{ matrix.go }}${{ matrix.experiment && format(' {0}', matrix.experiment) || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -28,6 +28,15 @@ jobs:
         #         library (e.g. a stdlib type becoming an alias) surfaces here
         #         first instead of in a user's build.
         go: ['go.mod', 'stable']
+        experiment: ['']
+        include:
+          # Go 1.27 keeps the original encoding/json behind this experiment.
+          # Generated schemas follow whichever decoder builds the generator,
+          # so both decoders of the newest release must pass.
+          - go: 'stable'
+            experiment: 'nojsonv2'
+    env:
+      GOEXPERIMENT: ${{ matrix.experiment }}
     steps:
       - uses: actions/checkout@v7
 

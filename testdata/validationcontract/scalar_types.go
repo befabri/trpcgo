@@ -230,6 +230,10 @@ type ScalarQuotedFloatPositive struct {
 	Value float64 `json:"value,string" validate:"gt=0"`
 }
 
+type ScalarQuotedFloatRequiredNe struct {
+	Value float64 `json:"value,string" validate:"required,ne=1"`
+}
+
 type ScalarQuotedFloatPointer struct {
 	Value *float64 `json:"value,string" validate:"omitnil,gt=0"`
 }
@@ -253,6 +257,11 @@ type ScalarStringExcludes struct {
 type ScalarCrossQuotedFloat struct {
 	A float64 `json:"a,string"`
 	B float64 `json:"b,string" validate:"eqfield=A"`
+}
+
+type ScalarCrossQuotedFloatNotEqual struct {
+	A float64 `json:"a,string"`
+	B float64 `json:"b,string" validate:"nefield=A"`
 }
 
 type ScalarCrossQuotedFloatPointer struct {

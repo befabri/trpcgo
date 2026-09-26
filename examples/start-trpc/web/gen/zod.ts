@@ -62,6 +62,8 @@ const $trpcgoEmail = (value: string): boolean => {
   }
   return Array.from(active).some((index) => machine[index]![0] === 4);
  };
+const $goFolds: ReadonlyMap<number, number> = /* @__PURE__ */ new Map();
+
 const $goCheck0 = /* @__PURE__ */ $trpcgoValid(() => z.string());
 const $goCheck1 = /* @__PURE__ */ $trpcgoValid(() => z.int());
 
@@ -262,9 +264,23 @@ type $GoJSONDecoder = (value: unknown, previous: unknown) => unknown;
 
 function $goJSONFieldName(name: string, names: readonly string[]): string | undefined {
   if (names.includes(name)) return name;
-  // Unicode simple case folding matches Go's field lookup without expanding
-  // characters such as sharp s into multiple letters. The end check is strict.
-  return names.find(candidate => new RegExp("^" + candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![\\s\\S])", "iu").test(name));
+  const folded = $goFoldName(name);
+  return names.find(candidate => $goFoldName(candidate) === folded);
+}
+
+// Go folds each rune to the smallest rune of its case orbit with its own
+// Unicode tables. ASCII, the Kelvin sign and the long s fold alike in every
+// version; $goFolds covers the other runes of this module's field names.
+function $goFoldName(name: string): string {
+  let folded = "";
+  for (const rune of name.replace(/\p{Surrogate}/gu, "\uFFFD")) {
+    const point = rune.codePointAt(0)!;
+    if (point < 0x80) folded += rune.toUpperCase();
+    else if (point === 0x212a) folded += "K";
+    else if (point === 0x17f) folded += "S";
+    else folded += String.fromCodePoint($goFolds.get(point) ?? point);
+  }
+  return folded;
 }
 
 // A fixed-array element decodes into its Go zero value, so an element object

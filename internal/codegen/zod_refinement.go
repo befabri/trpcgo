@@ -242,7 +242,7 @@ func zodRefinementOperand(name string, field typemap.Field) zodRefinementValue {
 	operand := zodRefinementValue{value: zodRefinementRawOperand(name, field)}
 	if field.IsPointer {
 		operand.guard = zodDataAccess(name) + " != null"
-		if field.JSONString {
+		if field.JSONString && typemap.ZodQuotedNull(field.GoKind) {
 			operand.guard += " && " + zodDataAccess(name) + " !== \"null\""
 		}
 	}
@@ -304,7 +304,7 @@ func zodRefinementSkip(ref typemap.Refinement, field typemap.Field, value string
 	kind := zodComparisonKind(field)
 	if field.IsPointer || kind == "slice" || kind == "map" {
 		skip := zodDataAccess(ref.Field) + " == null"
-		if field.IsPointer && field.JSONString {
+		if field.IsPointer && field.JSONString && typemap.ZodQuotedNull(field.GoKind) {
 			skip += " || " + zodDataAccess(ref.Field) + " === \"null\""
 		}
 		if omitzero {
@@ -503,14 +503,25 @@ func writeZodMissingCustomChecks(ew *errWriter, fields []typemap.Field) {
 // zodSchemaChecks declares, once per module, each schema that a predicate
 // tests. A schema written inside the predicate would be built again on every
 // call. Each declaration builds its schema on first use, so it may reference
-// schemas the module declares later, including recursive ones.
+// schemas the module declares later, including recursive ones. It also keeps
+// the runes of the JSON field names decodeGoJSON matches, for their folding.
 type zodSchemaChecks struct {
-	names   map[string]string
-	schemas []string
+	names      map[string]string
+	schemas    []string
+	fieldRunes map[rune]bool
 }
 
 func newZodSchemaChecks() *zodSchemaChecks {
-	return &zodSchemaChecks{names: map[string]string{}}
+	return &zodSchemaChecks{names: map[string]string{}, fieldRunes: map[rune]bool{}}
+}
+
+// fieldName returns the literal for a JSON field name that decodeGoJSON
+// matches case-insensitively, recording its runes for the module's folds.
+func (c *zodSchemaChecks) fieldName(name string) string {
+	for _, r := range name {
+		c.fieldRunes[r] = true
+	}
+	return typemap.ZodStringLiteral(name)
 }
 
 // check returns the name of the predicate that tests a value against schema.
@@ -530,10 +541,11 @@ func (c *zodSchemaChecks) call(schema, value string) string {
 	return c.check(schema) + "(" + value + ")"
 }
 
-// declarations declares the checks. Declaring one builds nothing, so a bundler
-// may drop the checks an application never calls.
+// declarations declares the checks and the field name folds. Declaring one
+// builds nothing, so a bundler may drop the checks an application never calls.
 func (c *zodSchemaChecks) declarations() string {
 	var out strings.Builder
+	out.WriteString(zodGoFolds(c.fieldRunes))
 	for i, schema := range c.schemas {
 		out.WriteString("const $goCheck" + strconv.Itoa(i) + " = /* @__PURE__ */ " + typemap.ZodSchemaCheck(schema) + ";\n")
 	}

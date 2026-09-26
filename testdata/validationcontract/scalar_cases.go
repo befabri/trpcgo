@@ -2,6 +2,8 @@ package validationcontract
 
 import (
 	"slices"
+
+	"github.com/befabri/trpcgo/internal/gojson"
 )
 
 // ScalarCases compares server tag semantics with generated schema behavior.
@@ -176,8 +178,11 @@ var ScalarBoundaryCases = []Case{
 	{Name: "quoted-float/exponent", Type: "ScalarQuotedFloat", JSON: `{"value":"1e2"}`, Valid: true},
 	{Name: "quoted-float/trailing-point", Type: "ScalarQuotedFloat", JSON: `{"value":"1."}`, Valid: true},
 	{Name: "quoted-float/negative-leading-point", Type: "ScalarQuotedFloat", JSON: `{"value":"-.1"}`, Valid: true},
-	{Name: "quoted-float/leading-point", Type: "ScalarQuotedFloat", JSON: `{"value":".1"}`, Valid: false},
-	{Name: "quoted-float/leading-plus", Type: "ScalarQuotedFloat", JSON: `{"value":"+0.1"}`, Valid: false},
+	// Without QuotedNumberPrefix the decoder takes all of strconv's syntax.
+	{Name: "quoted-float/leading-point", Type: "ScalarQuotedFloat", JSON: `{"value":".1"}`, Valid: !gojson.QuotedNumberPrefix},
+	{Name: "quoted-float/leading-plus", Type: "ScalarQuotedFloat", JSON: `{"value":"+0.1"}`, Valid: !gojson.QuotedNumberPrefix},
+	{Name: "quoted-float/plus-hexadecimal", Type: "ScalarQuotedFloat", JSON: `{"value":"+0x1p0"}`, Valid: !gojson.QuotedNumberPrefix},
+	{Name: "quoted-float/double-sign", Type: "ScalarQuotedFloat", JSON: `{"value":"+-1"}`, Valid: false},
 	{Name: "quoted-float/hexadecimal", Type: "ScalarQuotedFloat", JSON: `{"value":"0x1p0"}`, Valid: true},
 	{Name: "quoted-float/negative-hexadecimal", Type: "ScalarQuotedFloat", JSON: `{"value":"-0x1p1"}`, Valid: true},
 	{Name: "quoted-float/underscore", Type: "ScalarQuotedFloat", JSON: `{"value":"1_000"}`, Valid: true},
@@ -195,8 +200,21 @@ var ScalarBoundaryCases = []Case{
 	{Name: "quoted-float/negative-infinity", Type: "ScalarQuotedFloat", JSON: `{"value":"-Inf"}`, Valid: true},
 	{Name: "quoted-float/negative-infinity-long", Type: "ScalarQuotedFloat", JSON: `{"value":"-iNfiNitY"}`, Valid: true},
 	{Name: "quoted-float/negative-infinity-trailing-newline", Type: "ScalarQuotedFloat", JSON: `{"value":"-Inf\n"}`, Valid: false},
-	{Name: "quoted-float/positive-infinity", Type: "ScalarQuotedFloat", JSON: `{"value":"Inf"}`, Valid: false},
-	{Name: "quoted-float/nan", Type: "ScalarQuotedFloat", JSON: `{"value":"NaN"}`, Valid: false},
+	{Name: "quoted-float/positive-infinity", Type: "ScalarQuotedFloat", JSON: `{"value":"Inf"}`, Valid: !gojson.QuotedNumberPrefix},
+	{Name: "quoted-float/signed-positive-infinity", Type: "ScalarQuotedFloat", JSON: `{"value":"+Infinity"}`, Valid: !gojson.QuotedNumberPrefix},
+	{Name: "quoted-float/infinity-prefix", Type: "ScalarQuotedFloat", JSON: `{"value":"infin"}`, Valid: false},
+	{Name: "quoted-float/nan", Type: "ScalarQuotedFloat", JSON: `{"value":"NaN"}`, Valid: !gojson.QuotedNumberPrefix},
+	{Name: "quoted-float/nan-lowercase", Type: "ScalarQuotedFloat", JSON: `{"value":"nan"}`, Valid: !gojson.QuotedNumberPrefix},
+	{Name: "quoted-float/signed-nan", Type: "ScalarQuotedFloat", JSON: `{"value":"-NaN"}`, Valid: false},
+	{Name: "quoted-float/plus-signed-nan", Type: "ScalarQuotedFloat", JSON: `{"value":"+NaN"}`, Valid: false},
+	// NaN is nonzero and unequal to every value, itself included.
+	{Name: "quoted-float/nan-required-ne", Type: "ScalarQuotedFloatRequiredNe", JSON: `{"value":"NaN"}`, Valid: !gojson.QuotedNumberPrefix},
+	{Name: "quoted-float/infinity-required-ne", Type: "ScalarQuotedFloatRequiredNe", JSON: `{"value":"Inf"}`, Valid: !gojson.QuotedNumberPrefix},
+	{Name: "quoted-float/required-ne-zero", Type: "ScalarQuotedFloatRequiredNe", JSON: `{"value":"0"}`, Valid: false},
+	{Name: "quoted-float/required-ne-equal", Type: "ScalarQuotedFloatRequiredNe", JSON: `{"value":"1"}`, Valid: false},
+	{Name: "quoted-float/required-ne-other", Type: "ScalarQuotedFloatRequiredNe", JSON: `{"value":"2"}`, Valid: true},
+	{Name: "quoted-float/nan-positive", Type: "ScalarQuotedFloatPositive", JSON: `{"value":"NaN"}`, Valid: false},
+	{Name: "quoted-float/infinity-positive", Type: "ScalarQuotedFloatPositive", JSON: `{"value":"infinity"}`, Valid: !gojson.QuotedNumberPrefix},
 	{Name: "quoted-float/float32-decimal-above-halfway", Type: "ScalarQuotedFloat32Greater", JSON: `{"value":"1.0000000596046447753906250000000000001"}`, Valid: true},
 	{Name: "quoted-float/float32-decimal-halfway", Type: "ScalarQuotedFloat32Greater", JSON: `{"value":"1.000000059604644775390625"}`, Valid: false},
 	{Name: "quoted-float/float32-hexadecimal-above-halfway", Type: "ScalarQuotedFloat32Greater", JSON: `{"value":"0x1.0000010000000000000001p0"}`, Valid: true},
@@ -215,7 +233,13 @@ var ScalarBoundaryCases = []Case{
 	{Name: "quoted-float/crossfield-hexadecimal", Type: "ScalarCrossQuotedFloat", JSON: `{"a":"2","b":"0x1p1"}`, Valid: true},
 	{Name: "quoted-float/crossfield-underscore", Type: "ScalarCrossQuotedFloat", JSON: `{"a":"1000","b":"1_000"}`, Valid: true},
 	{Name: "quoted-float/crossfield-different", Type: "ScalarCrossQuotedFloat", JSON: `{"a":"1","b":"0x1p1"}`, Valid: false},
-	{Name: "quoted-float/crossfield-invalid-grammar", Type: "ScalarCrossQuotedFloat", JSON: `{"a":"0.1","b":".1"}`, Valid: false},
+	{Name: "quoted-float/crossfield-invalid-grammar", Type: "ScalarCrossQuotedFloat", JSON: `{"a":"0.1","b":"0.1_"}`, Valid: false},
+	{Name: "quoted-float/crossfield-leading-point", Type: "ScalarCrossQuotedFloat", JSON: `{"a":"0.1","b":".1"}`, Valid: !gojson.QuotedNumberPrefix},
+	{Name: "quoted-float/crossfield-infinity", Type: "ScalarCrossQuotedFloat", JSON: `{"a":"Inf","b":"+Infinity"}`, Valid: !gojson.QuotedNumberPrefix},
+	{Name: "quoted-float/crossfield-nan", Type: "ScalarCrossQuotedFloat", JSON: `{"a":"NaN","b":"NaN"}`, Valid: false},
+	{Name: "quoted-float/crossfield-not-equal-nan", Type: "ScalarCrossQuotedFloatNotEqual", JSON: `{"a":"NaN","b":"NaN"}`, Valid: !gojson.QuotedNumberPrefix},
+	{Name: "quoted-float/crossfield-not-equal-same", Type: "ScalarCrossQuotedFloatNotEqual", JSON: `{"a":"1","b":"1"}`, Valid: false},
+	{Name: "quoted-float/crossfield-not-equal-different", Type: "ScalarCrossQuotedFloatNotEqual", JSON: `{"a":"1","b":"2"}`, Valid: true},
 	{Name: "quoted-float/crossfield-null-zero", Type: "ScalarCrossQuotedFloat", JSON: `{"a":"0","b":"null"}`, Valid: true},
 	{Name: "quoted-float/crossfield-negative-infinity", Type: "ScalarCrossQuotedFloat", JSON: `{"a":"-Inf","b":"-Infinity"}`, Valid: true},
 	{Name: "quoted-float/crossfield-negative-infinity-different", Type: "ScalarCrossQuotedFloat", JSON: `{"a":"-Inf","b":"-1"}`, Valid: false},
@@ -237,8 +261,11 @@ var ScalarBoundaryCases = []Case{
 	{Name: "string-equality/not-equal-surrogate-pair", Type: "ScalarStringNotEqual", JSON: `{"value":"\ud83d\ude00"}`, Valid: true},
 	{Name: "string-equality/not-equal-ascii", Type: "ScalarStringNotEqual", JSON: `{"value":"a"}`, Valid: true},
 	{Name: "string-equality/quoted-equal-replacement", Type: "ScalarQuotedStringEqual", JSON: `{"value":"\"�\""}`, Valid: true},
-	{Name: "string-equality/quoted-equal-lone-high-surrogate", Type: "ScalarQuotedStringEqual", JSON: `{"value":"\"\\ud800\""}`, Valid: true},
-	{Name: "string-equality/quoted-equal-lone-low-surrogate", Type: "ScalarQuotedStringEqual", JSON: `{"value":"\"\\udc00\""}`, Valid: true},
+	// Go replaces an unpaired surrogate in the outer string on every decoder.
+	// One escaped inside the nested literal follows the gojson probe.
+	{Name: "string-equality/quoted-equal-lone-high-surrogate", Type: "ScalarQuotedStringEqual", JSON: `{"value":"\"\\ud800\""}`, Valid: gojson.ReplacesQuotedSurrogates},
+	{Name: "string-equality/quoted-equal-lone-low-surrogate", Type: "ScalarQuotedStringEqual", JSON: `{"value":"\"\\udc00\""}`, Valid: gojson.ReplacesQuotedSurrogates},
+	{Name: "string-equality/quoted-equal-outer-lone-surrogate", Type: "ScalarQuotedStringEqual", JSON: `{"value":"\"\ud800\""}`, Valid: true},
 	{Name: "string-equality/quoted-equal-surrogate-pair", Type: "ScalarQuotedStringEqual", JSON: `{"value":"\"\\ud83d\\ude00\""}`, Valid: false},
 	{Name: "string-equality/quoted-equal-ascii", Type: "ScalarQuotedStringEqual", JSON: `{"value":"\"a\""}`, Valid: false},
 	{Name: "string-equality/oneof-surrogate", Type: "ScalarStringOneof", JSON: `{"value":"\ud800"}`, Valid: true},
@@ -266,6 +293,7 @@ func init() {
 		inputFixture[Float32Wire](),
 		inputFixture[ScalarCrossQuotedFloat](),
 		inputFixture[ScalarCrossQuotedFloat32](),
+		inputFixture[ScalarCrossQuotedFloatNotEqual](),
 		inputFixture[ScalarCrossQuotedFloatPointer](),
 		inputFixture[ScalarFloat32Minimum](),
 		inputFixture[ScalarOmitNilBool](),
@@ -277,6 +305,7 @@ func init() {
 		inputFixture[ScalarQuotedFloat64Greater](),
 		inputFixture[ScalarQuotedFloatPointer](),
 		inputFixture[ScalarQuotedFloatPositive](),
+		inputFixture[ScalarQuotedFloatRequiredNe](),
 		inputFixture[ScalarQuotedStringEqual](),
 		inputFixture[ScalarStringBoundary](),
 		inputFixture[ScalarStringContains](),

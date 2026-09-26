@@ -134,9 +134,13 @@ func zodZeroValue(field typemap.Field) string {
 		case "bool":
 			zero = "false"
 		case "json.Number":
-			// The zero Number has no quoted number spelling; Go leaves it for
-			// the quoted null spelling.
+			// Rules on a padded zero Number fail generation, so the spelling
+			// only has to decode: the quoted null on a lenient decoder, any
+			// number on a strict one, which has no spelling for empty text.
 			zero = "null"
+			if !typemap.ZodQuotedNull(field.GoKind) {
+				zero = "0"
+			}
 		}
 		return typemap.ZodStringLiteral(zero)
 	}
@@ -467,7 +471,7 @@ func zodArrayIsZero(field typemap.Field, value string) string {
 
 func zodArrayZeroExpr(field typemap.Field, value string) string {
 	if field.IsPointer {
-		if field.JSONString {
+		if field.JSONString && typemap.ZodQuotedNull(field.GoKind) {
 			return "(" + value + " == null || " + value + " === \"null\")"
 		}
 		return "(" + value + " == null)"
@@ -476,7 +480,11 @@ func zodArrayZeroExpr(field typemap.Field, value string) string {
 		decoded := typemap.ZodQuotedScalarValue("String(value)", field.GoKind)
 		plain := field
 		plain.JSONString = false
-		return "((value: unknown) => value == null || value === \"null\" || " + zodArrayIsZero(plain, decoded) + ")(" + value + ")"
+		null := "value == null"
+		if typemap.ZodQuotedNull(field.GoKind) {
+			null += " || value === \"null\""
+		}
+		return "((value: unknown) => " + null + " || " + zodArrayIsZero(plain, decoded) + ")(" + value + ")"
 	}
 	if field.ArrayLen != nil {
 		child := zodElementField(unwrapZodParentheses(strings.TrimSuffix(zodFieldType(field), "[]")), field.Element)

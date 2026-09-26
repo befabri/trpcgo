@@ -200,7 +200,14 @@ func TestGoJSONMergeRuntime(t *testing.T) {
 		}
 		writeZodJSONHelpers(ew)
 		writeZodMergeHelpers(ew, nil, nil, style)
-		writeZodWireChecks(ew, nil, nil, style, newZodSchemaChecks(), false)
+		checks := newZodSchemaChecks()
+		writeZodWireChecks(ew, nil, nil, style, checks, false)
+		// A module registers the names its objects match; these are the
+		// assertions' field names.
+		for _, name := range []string{"Σ", "ß"} {
+			checks.fieldName(name)
+		}
+		ew.print(checks.declarations())
 		ew.println(goJSONMergeAssertions)
 		runJSONHelperProgram(t, map[string]string{"main.ts": source.String()})
 	}

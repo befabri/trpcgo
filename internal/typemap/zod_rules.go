@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/befabri/trpcgo/internal/gojson"
 )
 
 // zodCheck is a typed rendering instruction. Constraints are never serialized
@@ -768,7 +770,7 @@ func zodJSONString(f Field, inner string, style ZodStyle) string {
 	// Normalize only the refinement's local parameter. The schema still
 	// returns the original wire string, including the quoted null spelling.
 	nullPrefix := ""
-	if !f.MapKey {
+	if !f.MapKey && ZodQuotedNull(f.GoKind) {
 		if f.IsPointer {
 			nullPrefix = `if (value === "null") return ` + ZodMissingValuePredicate(f) + "; "
 		} else {
@@ -779,9 +781,11 @@ func zodJSONString(f Field, inner string, style ZodStyle) string {
 	parsed := "JSON.parse(value)"
 	switch {
 	case isSignedIntegerKind(f.GoKind) || isUnsignedIntegerKind(f.GoKind):
-		pattern := `/^-?[0-9]+$(?![\s\S])/`
-		if f.MapKey {
-			pattern = `/^[+-]?[0-9]+$(?![\s\S])/`
+		// strconv, which decodes map keys, takes a leading plus sign. A quoted
+		// field takes it too unless the decoder requires a minus sign or digit.
+		pattern := `/^[+-]?[0-9]+$(?![\s\S])/`
+		if !f.MapKey && gojson.QuotedNumberPrefix {
+			pattern = `/^-?[0-9]+$(?![\s\S])/`
 		}
 		if isUnsignedIntegerKind(f.GoKind) {
 			pattern = `/^[0-9]+$(?![\s\S])/`
@@ -810,22 +814,35 @@ func zodJSONString(f Field, inner string, style ZodStyle) string {
 		guard = `if (value !== "true" && value !== "false") return false; `
 	case f.GoKind == "string":
 		guard = `if (!value.startsWith('"') || !value.endsWith('"')) return false; `
+		if !gojson.ReplacesQuotedSurrogates {
+			// Go replaces an unpaired surrogate in the outer string with
+			// U+FFFD before reading the nested literal, so one that survives
+			// parsing came from an escape in that literal, which is an error.
+			guard += `if (/\p{Surrogate}/u.test(JSON.parse(value.replace(/\p{Surrogate}/gu, "\uFFFD")))) return false; `
+		}
 	case f.GoKind == "json.Number":
-		// encoding/json stores a payload that starts like a number as the
+		inner = ApplyZodRules("z.string()", f, style)
+		parsed = "value"
+		if !gojson.LenientQuotedNumber {
+			// The payload must be a JSON number; the quoted null spelling is not one.
+			guard = `if (!/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$(?![\s\S])/.test(value)) return false; `
+			break
+		}
+		// A lenient decoder stores a payload that starts like a number as the
 		// Number's text without checking the rest, unquotes a nested string
 		// literal that must then be a valid JSON number, and leaves the quoted
 		// null spelling as the zero Number. The rules see that text.
-		inner = ApplyZodRules("z.string()", f, style)
 		if !f.IsPointer {
 			nullPrefix = `if (value === "null") return valid(""); `
 		}
 		guard = `if (value.startsWith('"')) { if (!value.endsWith('"')) return false; value = JSON.parse(value); if (typeof value !== "string" || !/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$(?![\s\S])/.test(value)) return false; } else if (!/^[-0-9]/.test(value)) return false; `
-		parsed = "value"
 	case f.GoKind == "float32" || f.GoKind == "float64":
-		// The wire parser enforces the destination's range. A quoted -Inf is
-		// valid Go input, so scalar rules must not add z.number's finite policy.
+		// The decoder enforces the destination's range and throws on what Go
+		// rejects. Quoted infinities, and NaN where the decoder takes strconv's
+		// syntax, are valid Go input, so rules must not add z.number's finite
+		// policy.
 		inner = ApplyZodRules("z.custom<number>()", f, style)
-		guard = "const decoded = " + ZodQuotedFloatValue("value", f.GoKind) + "; if (Number.isNaN(decoded)) return false; "
+		guard = "const decoded = " + ZodQuotedFloatValue("value", f.GoKind) + "; "
 		parsed = "decoded"
 	}
 	return "z.string().check(z.refine(" + zodBoundCheck(inner, "try { "+nullPrefix+guard+"return valid("+parsed+"); } catch { return false; }") + "))"

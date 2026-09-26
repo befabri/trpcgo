@@ -5,9 +5,11 @@ description: Supported Go, tRPC client, HTTP, Zod, and CORS expectations.
 
 ## Go
 
-trpcgo requires Go 1.26 or newer.
+trpcgo requires Go 1.26 or newer. Go 1.27 is supported with and without `GOEXPERIMENT=nojsonv2`.
 
 The module's `go.mod` sets this minimum, and the implementation uses APIs such as `errors.AsType`.
+
+Generate with the Go toolchain that builds your server, and regenerate after changing it. Generated schemas follow its Unicode tables and its `encoding/json` decoder, which Go 1.27 changed. See [Go Versions](/reference/zod-validation/#go-versions).
 
 ## tRPC Client
 

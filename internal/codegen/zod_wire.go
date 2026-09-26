@@ -1,8 +1,12 @@
 package codegen
 
 import (
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/befabri/trpcgo/internal/typemap"
 )
@@ -308,7 +312,10 @@ func zodWireCheck(f typemap.Field, value, path string, style typemap.ZodStyle, c
 	case f.Inline != nil:
 		check = zodWireObjectCheck(f.Inline.Fields, value, path, style, checks)
 	case f.JSONString:
-		check = value + " === \"null\" ? undefined : " + zodWireValue(typemap.ZodType(f, style), value, path, checks)
+		check = zodWireValue(typemap.ZodType(f, style), value, path, checks)
+		if typemap.ZodQuotedNull(f.GoKind) {
+			check = value + " === \"null\" ? undefined : " + check
+		}
 	case f.GoKind == "[]byte":
 		// A JSON array of bytes also decodes into a []byte.
 		check = "Array.isArray(" + value + ") ? $goWireArray(" + value + ", " + path + ", undefined, " + zodWireElement(typemap.Field{Type: "number", GoKind: "uint8"}, style, checks) + ") : " + zodWireValue(typemap.ZodType(f, style), value, path, checks)
@@ -352,7 +359,7 @@ func zodWireObjectCheck(fields []typemap.Field, value, path string, style typema
 			check = zodWireElement(field, style, checks)
 		}
 		// Computed keys preserve a Go JSON field literally named __proto__.
-		members = append(members, "["+typemap.ZodStringLiteral(field.Name)+"]: "+check)
+		members = append(members, "["+checks.fieldName(field.Name)+"]: "+check)
 	}
 	return "$goWireObject(" + value + ", " + path + ", {" + strings.Join(members, ", ") + "})"
 }
@@ -374,9 +381,23 @@ func writeZodMergeHelpers(ew *errWriter, order []string, defs map[string]typemap
 
 function $goJSONFieldName(name: string, names: readonly string[]): string | undefined {
   if (names.includes(name)) return name;
-  // Unicode simple case folding matches Go's field lookup without expanding
-  // characters such as sharp s into multiple letters. The end check is strict.
-  return names.find(candidate => new RegExp("^" + candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![\\s\\S])", "iu").test(name));
+  const folded = $goFoldName(name);
+  return names.find(candidate => $goFoldName(candidate) === folded);
+}
+
+// Go folds each rune to the smallest rune of its case orbit with its own
+// Unicode tables. ASCII, the Kelvin sign and the long s fold alike in every
+// version; $goFolds covers the other runes of this module's field names.
+function $goFoldName(name: string): string {
+  let folded = "";
+  for (const rune of name.replace(/\p{Surrogate}/gu, "\uFFFD")) {
+    const point = rune.codePointAt(0)!;
+    if (point < 0x80) folded += rune.toUpperCase();
+    else if (point === 0x212a) folded += "K";
+    else if (point === 0x17f) folded += "S";
+    else folded += String.fromCodePoint($goFolds.get(point) ?? point);
+  }
+  return folded;
 }
 
 // A fixed-array element decodes into its Go zero value, so an element object
@@ -518,7 +539,7 @@ func zodMergePredicate(field typemap.Field, value, previous string) string {
 	// an existing scalar/struct unchanged. Quoted null follows the same rule.
 	reset := field.IsPointer || field.GoKind == "map" || field.GoKind == "slice" || field.GoKind == "[]byte" || field.GoKind == "unknown" || field.GoKind == "json.RawMessage" || ts == "unknown"
 	null := value + " === null"
-	if field.JSONString {
+	if field.JSONString && typemap.ZodQuotedNull(field.GoKind) {
 		null = "(" + null + " || " + value + " === \"null\")"
 	}
 	if reset {
@@ -590,4 +611,36 @@ function $goIntegerMap<S extends z.core.$ZodType>(schema: S, key: z.core.$ZodTyp
   }), schema);
 }`)
 	ew.println("")
+}
+
+// zodGoFolds declares $goFolds, mapping each non-ASCII rune in a field name
+// rune's case orbit to the orbit's smallest rune, as Go folds it. The Kelvin
+// sign and long s are folded inline, so ASCII names declare an empty map in
+// every Unicode version.
+func zodGoFolds(runes map[rune]bool) string {
+	folds := map[rune]rune{}
+	for r := range runes {
+		if r < utf8.RuneSelf {
+			continue
+		}
+		orbit := []rune{r}
+		for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
+			orbit = append(orbit, next)
+		}
+		smallest := slices.Min(orbit)
+		for _, member := range orbit {
+			if member != smallest && member >= utf8.RuneSelf && member != '\u212a' && member != '\u017f' {
+				folds[member] = smallest
+			}
+		}
+	}
+	if len(folds) == 0 {
+		return "const $goFolds: ReadonlyMap<number, number> = /* @__PURE__ */ new Map();\n\n"
+	}
+	entries := make([]string, 0, len(folds))
+	for _, member := range slices.Sorted(maps.Keys(folds)) {
+		entries = append(entries, "["+strconv.Itoa(int(member))+", "+strconv.Itoa(int(folds[member]))+"]")
+	}
+	return "// Go Unicode " + unicode.Version + " case folding for this module's field names.\n" +
+		"const $goFolds: ReadonlyMap<number, number> = /* @__PURE__ */ new Map([" + strings.Join(entries, ", ") + "]);\n\n"
 }

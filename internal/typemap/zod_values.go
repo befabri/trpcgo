@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/befabri/trpcgo/internal/gojson"
 )
 
 // HoistZodRuntimeHelpers extracts generated runtime helpers from a complete
@@ -13,8 +15,6 @@ import (
 // '$' prefix cannot collide with names originating from Go identifiers.
 func HoistZodRuntimeHelpers(source string) (declarations, body string) {
 	body = source
-	// Outer helpers precede helpers embedded inside them. Both accumulated
-	// declarations and the body are rewritten so dependencies are shared too.
 	for _, helper := range []struct{ name, expression string }{
 		{"$trpcgoIssue", goIssueCheck},
 		{"$trpcgoValid", goSchemaCheck},
@@ -52,12 +52,11 @@ func ZodGoStringValue(value string) string {
 //
 // throws reports that evaluating the expression can raise. Zod may run an
 // object refinement after a field check has failed, so the payload may still
-// be malformed: BigInt and JSON.parse throw on it, while the float decoder
-// checks the syntax itself and returns NaN. A caller that embeds a throwing
+// be malformed, and every decoder throws on it. A caller that embeds a throwing
 // expression in a predicate must catch, so safeParse reports an issue.
 func ZodQuotedScalar(value, goKind string) (expr string, throws bool) {
 	if goKind == "float32" || goKind == "float64" {
-		return ZodQuotedFloatValue(value, goKind), false
+		return ZodQuotedFloatValue(value, goKind), true
 	}
 	if goKind == "json.Number" {
 		return ZodQuotedNumberValue(value), true
@@ -67,6 +66,13 @@ func ZodQuotedScalar(value, goKind string) (expr string, throws bool) {
 		return "BigInt(" + text + ")", true
 	}
 	return "JSON.parse(" + text + ")", true
+}
+
+// ZodQuotedNull reports whether encoding/json treats the quoted null spelling
+// of a json:",string" field of goKind as JSON null. Only a lenient decoder
+// does so for json.Number.
+func ZodQuotedNull(goKind string) bool {
+	return goKind != "json.Number" || gojson.LenientQuotedNumber
 }
 
 // ZodQuotedScalarValue is ZodQuotedScalar for callers that catch exceptions
@@ -88,16 +94,19 @@ func zodQuotedZero(goKind string) string {
 }
 
 // ZodQuotedNumberValue evaluates the payload of a json:",string" json.Number
-// as encoding/json stores it: the quoted null spelling leaves the zero Number,
-// a nested string literal is unquoted, and any other payload is the Number's
-// text. The schema has already rejected the payloads Go's decoder rejects.
+// as encoding/json stores it: the text itself, or with a lenient decoder the
+// zero Number for the quoted null spelling and the unquoted nested literal.
+// The schema has already rejected the payloads Go rejects.
 func ZodQuotedNumberValue(value string) string {
+	if !gojson.LenientQuotedNumber {
+		return "String(" + value + ")"
+	}
 	return `((text: string) => text === "null" ? "" : text.startsWith('"') ? JSON.parse(text) as string : text)(` + value + ")"
 }
 
 // ZodQuotedFloatValue evaluates the payload of a json:",string" floating-point
-// field. Invalid syntax and overflow produce NaN; explicit negative infinity
-// and the scalar null spelling follow encoding/json. Callers handle pointer
+// field and throws on a payload encoding/json rejects, including one that
+// overflows. The scalar null spelling decodes to zero; callers handle pointer
 // null presence separately. The same decoder serves scalar and field rules.
 func ZodQuotedFloatValue(value, goKind string) string {
 	bits := "64"
@@ -107,19 +116,31 @@ func ZodQuotedFloatValue(value, goKind string) string {
 	return "(" + goQuotedFloatDecoder + ")(" + value + ", " + bits + ")"
 }
 
+// goQuotedFloatPrefix is the decoder's first check. With QuotedNumberPrefix it
+// rejects everything not starting with a minus sign or digit, NaN included;
+// otherwise NaN decodes here and the patterns below admit the rest of
+// strconv's syntax.
+func goQuotedFloatPrefix() string {
+	if gojson.QuotedNumberPrefix {
+		return `if (!/^[-0-9]/.test(input)) throw new SyntaxError("quoted float must begin with a minus sign or digit");`
+	}
+	return `if (/^nan$(?![\s\S])/i.test(input)) return NaN;`
+}
+
 // Decimal and hexadecimal significands are parsed exactly. Rounding the exact
 // rational once to the destination format avoids float32 double rounding and
 // hexadecimal overflow/underflow introduced by intermediate JS numbers.
-const goQuotedFloatDecoder = `(input: string, bits: 32 | 64): number => {
+var goQuotedFloatDecoder = `(input: string, bits: 32 | 64): number => {
   if (input === "null") return 0;
-  if (!/^[-0-9]/.test(input)) return NaN;
-  if (/^-inf(?:inity)?$(?![\s\S])/i.test(input)) return -Infinity;
-  const decimal = /^-?(?:[0-9](?:_?[0-9])*(?:\.(?:[0-9](?:_?[0-9])*)?)?|\.[0-9](?:_?[0-9])*)(?:[eE][+-]?[0-9](?:_?[0-9])*)?$(?![\s\S])/;
-  const hexadecimal = /^-?0[xX](?:_?[0-9a-fA-F](?:_?[0-9a-fA-F])*(?:\.(?:[0-9a-fA-F](?:_?[0-9a-fA-F])*)?)?|\.[0-9a-fA-F](?:_?[0-9a-fA-F])*)[pP][+-]?[0-9](?:_?[0-9])*$(?![\s\S])/;
+  ` + goQuotedFloatPrefix() + `
+  const infinity = /^([+-]?)inf(?:inity)?$(?![\s\S])/i.exec(input);
+  if (infinity) return infinity[1] === "-" ? -Infinity : Infinity;
+  const decimal = /^[+-]?(?:[0-9](?:_?[0-9])*(?:\.(?:[0-9](?:_?[0-9])*)?)?|\.[0-9](?:_?[0-9])*)(?:[eE][+-]?[0-9](?:_?[0-9])*)?$(?![\s\S])/;
+  const hexadecimal = /^[+-]?0[xX](?:_?[0-9a-fA-F](?:_?[0-9a-fA-F])*(?:\.(?:[0-9a-fA-F](?:_?[0-9a-fA-F])*)?)?|\.[0-9a-fA-F](?:_?[0-9a-fA-F])*)[pP][+-]?[0-9](?:_?[0-9])*$(?![\s\S])/;
   const hex = hexadecimal.test(input);
-  if (!hex && !decimal.test(input)) return NaN;
+  if (!hex && !decimal.test(input)) throw new SyntaxError("invalid quoted float");
   const negative = input.startsWith("-");
-  const text = input.replace(/_/g, "").replace(/^-/, "");
+  const text = input.replace(/_/g, "").replace(/^[+-]/, "");
   const parts = text.split(hex ? /[pP]/ : /[eE]/);
   const mantissa = parts[0]!.replace(/^0[xX]/, "");
   const point = mantissa.indexOf(".");
@@ -131,7 +152,7 @@ const goQuotedFloatDecoder = `(input: string, bits: 32 | 64): number => {
   const order = (digits.length - 1) * (hex ? 4 : 1) + scale;
   // Bounds are intentionally outside both IEEE formats; they also prevent
   // huge exponents from allocating enormous powers of ten or bit shifts.
-  if (order > (hex ? 1030 : 310)) return NaN;
+  if (order > (hex ? 1030 : 310)) throw new RangeError("quoted float overflows");
   if (order < (hex ? -1080 : -330)) return negative ? -0 : 0;
   let numerator = BigInt((hex ? "0x" : "") + digits);
   let denominator = 1n;
@@ -146,7 +167,7 @@ const goQuotedFloatDecoder = `(input: string, bits: 32 | 64): number => {
   const precision = bits === 32 ? 24 : 53;
   const minimum = bits === 32 ? -126 : -1022;
   const maximum = bits === 32 ? 127 : 1023;
-  if (exponent2 > maximum) return NaN;
+  if (exponent2 > maximum) throw new RangeError("quoted float overflows");
   if (exponent2 < minimum - precision) return negative ? -0 : 0;
   const quantum = Math.max(exponent2, minimum) - precision + 1;
   const shift = binaryScale - quantum;
@@ -156,7 +177,7 @@ const goQuotedFloatDecoder = `(input: string, bits: 32 | 64): number => {
   const remainder = numerator % denominator;
   if (remainder * 2n > denominator || (remainder * 2n === denominator && (rounded & 1n) !== 0n)) rounded++;
   const result = Number(rounded) * 2 ** quantum;
-  if (!Number.isFinite(result) || (bits === 32 && !Number.isFinite(Math.fround(result)))) return NaN;
+  if (!Number.isFinite(result) || (bits === 32 && !Number.isFinite(Math.fround(result)))) throw new RangeError("quoted float overflows");
   return negative ? -result : result;
 }`
 
@@ -295,9 +316,12 @@ func zodEqualityKey(d *GoEqualityType, value, index string, quoted bool) string 
 			key = `((number: number) => Number.isNaN(number) ? ["nan", ` + index + `] : ["number", String(number)])(` + number + ")"
 		}
 	}
+	if quoted {
+		key = "(() => { try { return " + key + "; } catch { return [\"invalid\", " + index + "]; } })()"
+	}
 	if d.Pointer {
 		nilCheck := "value == null"
-		if quoted {
+		if quoted && ZodQuotedNull(d.Kind) {
 			nilCheck += ` || value === "null"`
 		}
 		key = "(" + nilCheck + ` ? ["nil"] : ` + key + ")"

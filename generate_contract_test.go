@@ -254,7 +254,7 @@ const arbitrary: typeof parsed.value = 'unknown';
 void literal; void named; void arbitrary;
 const valid = [
   baseline,
-  {...baseline, value: '\ud800', quoted: '"\\udc00"', float: '0x1p1', narrow: '0.100000001'},
+  {...baseline, value: '\ud800', quoted: '"\udc00"', float: '0x1p1', narrow: '0.100000001'},
   {...baseline, value: 'ok', quoted: '"ok"', float: '0x_1p0', narrow: '1.0000000596046447753906250000000000001'},
   {...baseline, sparse: {'\ud800': 1}},
   {...baseline, optional: 'null'},
@@ -269,7 +269,7 @@ const results = valid.map(input => {
 });
 for (const input of [
   {...baseline, quoted: 'unknown'},
-  {...baseline, float: '.1'},
+  {...baseline, float: '1x'},
   {...baseline, float: '1e999'},
   {...baseline, narrow: '3.5e38'},
   {...baseline, sparse: {'unknown': 128}},
@@ -610,7 +610,7 @@ for (const value of [
 ]) { EnumInputSchema.parse(value); }
 for (const value of [
  {...input,sparse:{ready:128}}, {...input,sparse:{other:-129}},
- {...input,fraction:'.1'}, {...input,ratio:'1e999'}
+ {...input,fraction:'1x'}, {...input,ratio:'1e999'}
 ]) { if(EnumInputSchema.safeParse(value).success) throw new Error('underlying scalar constraint lost: '+JSON.stringify(value)); }
 void open;
 `

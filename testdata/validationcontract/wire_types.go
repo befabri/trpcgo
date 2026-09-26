@@ -68,9 +68,10 @@ type WireQuotedString struct {
 	Value string `json:"value,string" validate:"email,oneof=admin@example.com"`
 }
 
-// encoding/json stores a quoted json.Number payload that starts like a number
-// as the Number's text, unquotes a nested string literal that must then be a
-// valid number, and leaves the zero Number for the quoted null spelling.
+// A lenient encoding/json stores a quoted json.Number payload that starts like
+// a number as the Number's text, unquotes a nested string literal that must
+// then be a valid number, and leaves the zero Number for the quoted null
+// spelling; Go 1.27's default decoder takes only a JSON number.
 type WireQuotedJSONNumber struct {
 	Value json.Number `json:"value,string"`
 }
@@ -119,6 +120,30 @@ type DuplicateStructMap struct {
 type DuplicateEntryValues struct {
 	Details map[string]DuplicateDetails `json:"details,omitempty" validate:"dive"`
 	Lists   map[string][]DuplicateEntry `json:"lists,omitempty" validate:"dive,dive"`
+}
+
+// encoding/json matches a key to a field by Go's simple case folding, so the
+// Kelvin sign matches k, long s matches s, and final sigma matches σ. Its
+// tables follow the Go release: ɤ gains the capital Ɤ in Unicode 16, and ꟓ
+// gains ꟒ in Unicode 17, while ﬅ and ﬆ start folding together.
+type WireFoldedNames struct {
+	Kilo     int `json:"kilo,omitempty"`
+	Es       int `json:"es,omitempty"`
+	Sigma    int `json:"σ,omitempty"`
+	Horn     int `json:"ɤ,omitempty"`
+	Thorn    int `json:"ꟓ,omitempty"`
+	Ligature int `json:"ﬅ,omitempty"`
+}
+
+// encoding/json keeps a field's Go name when its tag names an invalid key.
+// Which names are valid depends on the decoder: Go 1.27's default decoder
+// accepts symbols and sets no field whose name holds a quote, and the Unicode
+// tables decide whether ᲊ is a letter.
+type WireTagNames struct {
+	Emoji int `json:"😀,omitempty"`
+	Sign  int `json:"a©b,omitempty"`
+	Tje   int `json:"ᲊ,omitempty"`
+	Quote int `json:"a'b,omitempty"`
 }
 
 type DuplicateQuotedFloat struct {

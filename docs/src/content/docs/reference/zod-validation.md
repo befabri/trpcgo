@@ -5,7 +5,7 @@ description: How generated Zod schemas match go-playground/validator and encodin
 
 Generated schemas accept and reject what the Go server does: validator's rules applied to the value `encoding/json` decodes. This page lists the cases where that behavior is not obvious. For everyday use, see [Zod Schemas](/zod-schemas/).
 
-Format checks are tested against Go 1.26 and validator v10.30.4. Email, URL, IP, and timestamp checks use parsers derived from Go's, and Unicode character classes use the generator's Go Unicode tables.
+Format checks are tested against Go 1.26, Go 1.27, and validator v10.30.4. Email, URL, IP, and timestamp checks use parsers derived from Go's, and Unicode character classes use the generator's Go Unicode tables.
 
 ## Tags
 
@@ -84,7 +84,7 @@ The TypeScript property is a string, and the schema validates the integer with `
 
 - The option also works on float, bool, string, and `json.Number` fields, and keeps their string encoding.
 - Quoted floats follow Go's grammar for the option, including hexadecimal floats and digit separators, and round to the field's float size. Cross-field comparisons use the same rounding.
-- A quoted `json.Number` accepts what Go's decoder stores: text that starts like a number, whatever follows, or a nested string literal holding a valid JSON number. Its rules see that stored text.
+- A quoted `json.Number` accepts what Go's decoder stores, and its rules see that text. See [Go Versions](#go-versions).
 - The string `"null"` validates as a JSON `null` does in Go: pointers are nil and other fields keep their zero value. Parsing keeps `"null"`.
 
 ## Strings And Time
@@ -97,7 +97,7 @@ The TypeScript property is a string, and the schema validates the integer with `
 
 [`decodeGoJSON`](/zod-schemas/#validate-raw-json) decodes JSON text as Go does before validating it:
 
-- Field names match case-insensitively.
+- Field names match case-insensitively, with Go's case folding.
 - Repeated struct fields merge according to their Go types. Repeated map fields combine entries, and each map entry decodes into a fresh value.
 - A value Go cannot decode fails at its path in the text, even if a later key overwrote it.
 - Validator rules apply to the final value of each field or entry.
@@ -107,6 +107,18 @@ The TypeScript property is a string, and the schema validates the integer with `
 `safeParse` on an object from `JSON.parse` cannot see overwritten keys, but it rejects keys that name the same Go entry, such as `"01"` and `"1"` in a `map[int]` field.
 
 `decodeGoJSON` is not a complete Go decoder. It does not run custom `UnmarshalJSON` or `UnmarshalText` methods, and map key types it cannot decode fail generation.
+
+## Go Versions
+
+Schemas follow the Go toolchain that generates them: its Unicode tables and its `encoding/json` decoder. Go 1.27 moved to Unicode 17 and to `encoding/json/v2`. Building with `GOEXPERIMENT=nojsonv2` keeps the original decoder.
+
+- `alphaunicode`, `alphanumunicode`, `lowercase`, `uppercase`, and field-name matching use the generating Go's Unicode tables.
+- `url` follows the generating Go's `net/url`, including its `urlstrictcolons` GODEBUG setting. Go 1.27 rejects a bracket after the first character of a host and accepts extra host colons for every scheme but `http` and `https`.
+- A tag naming a key Go rejects keeps the Go field name. Go 1.27's default decoder accepts symbols such as emoji, and ignores a field whose tag name holds a backslash or quote.
+- Go 1.27's default decoder accepts a leading `+` in quoted integers, and any `strconv.ParseFloat` syntax in quoted floats, including `Inf` and `NaN`.
+- A quoted `NaN` is nonzero for `required` and unequal to every value, itself included.
+- Go 1.27's default decoder stores only a JSON number in a quoted `json.Number`. The original decoder also stores text that starts like a number, or a nested string literal holding one.
+- Go 1.27's default decoder rejects an unpaired surrogate escape inside a quoted string's nested literal.
 
 ## Custom Rule Predicates
 
