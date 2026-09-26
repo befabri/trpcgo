@@ -413,6 +413,9 @@ func validateZodConfiguredRules(f typemap.Field, strict bool) error {
 			if rule.Custom != nil && rule.Custom.ServerOnly {
 				continue
 			}
+			if rule.Custom == nil && !typemap.ValidatorAcceptsKind(rule.Tag, cmp.Or(f.ValidatorKind, f.GoKind)) {
+				return fmt.Errorf("rule %q panics in validator on Go kind %s", rule.Tag, cmp.Or(f.ValidatorKind, f.GoKind))
+			}
 			if strict && len(typemap.UnsupportedZodRules([]typemap.ValidateRule{rule})) > 0 {
 				return fmt.Errorf("rule %q has no client counterpart; configure a predicate or mark it serverOnly", rule.Tag)
 			}

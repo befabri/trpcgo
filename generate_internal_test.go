@@ -1,13 +1,21 @@
 package trpcgo
 
 import (
+	"bytes"
 	"encoding/json"
+	"go/importer"
+	"go/token"
+	"go/types"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/befabri/trpcgo/internal/codegen"
 	"github.com/befabri/trpcgo/internal/typemap"
 	"github.com/befabri/trpcgo/internal/typemap/testdata/embedding"
+	"github.com/befabri/trpcgo/zodconfig"
 )
 
 func TestReflectGoKindAndTypeScriptMapping(t *testing.T) {
@@ -142,4 +150,138 @@ func reflectInlineField(t *testing.T, element *typemap.ElementType, name string)
 	}
 	t.Fatalf("anonymous object %#v has no field %s", element.Inline, name)
 	return typemap.Field{}
+}
+
+func TestZodRejectsValidatorKindPanics(t *testing.T) {
+	timePkg, err := importer.Default().Import("time")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		kind   string
+		value  any
+		static types.Type
+		rules  []string
+	}{
+		{"float32", float32(1), types.Typ[types.Float32], []string{"oneof=1 2"}},
+		{"float64", float64(1), types.Typ[types.Float64], []string{"oneof=1 2"}},
+		{"bool", true, types.Typ[types.Bool], []string{"oneof=1", "min=1", "max=1", "len=1", "gt=1", "gte=1", "lt=1", "lte=1", "lowercase", "uppercase", "url"}},
+		{"struct", struct{}{}, types.NewStruct(nil, nil), []string{"oneof=1", "min=1", "max=1", "len=1", "gt=1", "gte=1", "lt=1", "lte=1", "eq=1", "ne=1", "lowercase", "uppercase", "url"}},
+		{"time.Time", time.Time{}, timePkg.Scope().Lookup("Time").Type(), []string{"oneof=1", "len=1", "eq=1", "ne=1", "lowercase", "uppercase", "url"}},
+		{"slice", []int{1}, types.NewSlice(types.Typ[types.Int]), []string{"oneof=1", "lowercase", "uppercase", "url"}},
+		{"array", [1]int{1}, types.NewArray(types.Typ[types.Int], 1), []string{"oneof=1", "lowercase", "uppercase", "url"}},
+		{"map", map[string]int{"a": 1}, types.NewMap(types.Typ[types.String], types.Typ[types.Int]), []string{"oneof=1", "lowercase", "uppercase", "url"}},
+		{"[]byte", []byte{1}, types.NewSlice(types.Typ[types.Byte]), []string{"oneof=1", "lowercase", "uppercase", "url"}},
+	} {
+		for _, rule := range tc.rules {
+			t.Run(tc.kind+"/"+rule, func(t *testing.T) {
+				for _, scope := range []string{"field", "pointer", "dive", "nested dive", "OR", "omission", "alias"} {
+					t.Run(scope, func(t *testing.T) {
+						rt, st := reflect.TypeOf(tc.value), tc.static
+						tag, path := rule, "Input.value"
+						config := zodconfig.Config{}
+						switch scope {
+						case "pointer":
+							rt, st = reflect.PointerTo(reflect.PointerTo(rt)), types.NewPointer(types.NewPointer(st))
+						case "dive":
+							rt, st = reflect.SliceOf(reflect.PointerTo(rt)), types.NewSlice(types.NewPointer(st))
+							tag, path = "dive,"+rule, path+"[]"
+						case "nested dive":
+							rt = reflect.MapOf(reflect.TypeFor[string](), reflect.SliceOf(rt))
+							st = types.NewMap(types.Typ[types.String], types.NewSlice(st))
+							tag, path = "dive,dive,"+rule, path+"[][]"
+						case "OR":
+							tag = "required|" + rule
+						case "omission":
+							tag = "omitempty," + rule
+						case "alias":
+							config.Aliases = map[string]string{"choice": rule}
+							tag = "choice"
+						}
+						kind := tc.kind
+						if kind == "[]byte" {
+							kind = "slice"
+						}
+						name, _, _ := strings.Cut(rule, "=")
+						testValidatorKindGeneration(t, rt, st, tag, path+": rule "+strconv.Quote(name)+" panics in validator on Go kind "+kind, config)
+					})
+				}
+			})
+		}
+	}
+	// Key rules must use the key kind rather than the map or value kind.
+	testValidatorKindGeneration(t, reflect.TypeFor[map[int]string](), types.NewMap(types.Typ[types.Int], types.Typ[types.String]),
+		"dive,keys,lowercase,endkeys", `Input.value{key}: rule "lowercase" panics in validator on Go kind int`, zodconfig.Config{})
+}
+
+// Safe Go rules without a Zod translation must retain the default-mode comment
+// and strict-mode error. In particular time comparisons must not be mistaken
+// for ordinary struct panics, nor json.Number for a numeric oneof.
+func TestZodKeepsSafeUntranslatedKinds(t *testing.T) {
+	type namedTime time.Time
+	for _, tc := range []struct {
+		value any
+		tag   string
+	}{
+		{[]int{1}, "eq=1"},
+		{map[string]int{"a": 1}, "ne=1"},
+		{time.Time{}, "gt"},
+		{time.Time{}, "min=1"},
+		{namedTime{}, "max=1"},
+		{1, "email"},
+	} {
+		for _, strict := range []bool{false, true} {
+			program, err := typemap.CompileValidation(zodconfig.Config{Strict: strict})
+			if err != nil {
+				t.Fatal(err)
+			}
+			field := reflectMappedField(reflect.StructField{Name: "Value", Type: reflect.TypeOf(tc.value), Tag: reflect.StructTag("validate:" + strconv.Quote(tc.tag))}, newReflectDefs(program), "value", false, typemap.TSTypeTag{}, false)
+			var out bytes.Buffer
+			err = codegen.WriteZodSchemas(&out, []codegen.ProcEntry{{InputTS: "Input"}}, []typemap.TypeDef{{Name: "Input", Kind: typemap.TypeDefInterface, Fields: []typemap.Field{field}}}, typemap.ZodStandard, codegen.ZodOptions{Validation: program})
+			if strict {
+				if err == nil || !strings.Contains(err.Error(), "cannot validate Go kind") || out.Len() != 0 {
+					t.Errorf("strict %s on %T: error=%v, output length=%d", tc.tag, tc.value, err, out.Len())
+				}
+			} else if err != nil || !strings.Contains(out.String(), "invalid zod params:") {
+				t.Errorf("default %s on %T: error=%v; missing unsupported translation comment", tc.tag, tc.value, err)
+			}
+		}
+	}
+	for _, value := range []any{1, "1", json.Number("1")} {
+		field := reflectMappedField(reflect.StructField{Name: "Value", Type: reflect.TypeOf(value), Tag: `validate:"oneof=1 2"`}, newReflectDefs(nil), "value", false, typemap.TSTypeTag{}, false)
+		var out bytes.Buffer
+		if err := codegen.WriteZodSchemas(&out, []codegen.ProcEntry{{InputTS: "Input"}}, []typemap.TypeDef{{Name: "Input", Kind: typemap.TypeDefInterface, Fields: []typemap.Field{field}}}, typemap.ZodStandard, codegen.ZodOptions{}); err != nil {
+			t.Errorf("valid oneof on %T: %v", value, err)
+		}
+	}
+}
+
+func testValidatorKindGeneration(t *testing.T, rt reflect.Type, st types.Type, tag, want string, config zodconfig.Config) {
+	t.Helper()
+	for _, strict := range []bool{false, true} {
+		config.Strict = strict
+		program, err := typemap.CompileValidation(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		structTag := "json:\"value\" validate:" + strconv.Quote(tag)
+		fields, _, _, _ := collectFieldsTS(reflect.StructOf([]reflect.StructField{{Name: "Value", Type: rt, Tag: reflect.StructTag(structTag)}}), newReflectDefs(program))
+		reflected := []typemap.TypeDef{{Name: "Input", Kind: typemap.TypeDefInterface, Fields: fields}}
+		m := typemap.NewMapper(nil)
+		m.SetValidation(program)
+		input := types.NewNamed(types.NewTypeName(token.NoPos, types.NewPackage("fixture", "fixture"), "Input", nil), types.NewStruct([]*types.Var{types.NewField(token.NoPos, nil, "Value", st, false)}, []string{structTag}), nil)
+		m.Convert(input)
+		for _, defs := range [][]typemap.TypeDef{reflected, m.Defs()} {
+			for _, style := range []typemap.ZodStyle{typemap.ZodStandard, typemap.ZodMini} {
+				var out bytes.Buffer
+				err := codegen.WriteZodSchemas(&out, []codegen.ProcEntry{{InputTS: "Input"}}, defs, style, codegen.ZodOptions{Validation: program})
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("strict=%v style=%v: error=%v, want %q", strict, style, err, want)
+				}
+				if out.Len() != 0 {
+					t.Fatalf("generation error wrote partial output: %s", out.String())
+				}
+			}
+		}
+	}
 }

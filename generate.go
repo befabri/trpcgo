@@ -538,7 +538,7 @@ func reflectTypeField(t reflect.Type, defs *reflectDefs, ts string) *typemap.Fie
 
 // descriptorField starts a field from its type's descriptor, typed as ts.
 func descriptorField(d *typemap.ElementType, ts string) *typemap.Field {
-	return &typemap.Field{Type: ts, Equality: d.Equality, ArrayLen: d.ArrayLen, GoKind: d.GoKind, GoType: d.GoType, IsPointer: d.IsPointer, Inline: d.Inline, Element: d.Element, Key: d.Key}
+	return &typemap.Field{Type: ts, Equality: d.Equality, ArrayLen: d.ArrayLen, GoKind: d.GoKind, ValidatorKind: d.ValidatorKind, GoType: d.GoType, IsPointer: d.IsPointer, Inline: d.Inline, Element: d.Element, Key: d.Key}
 }
 
 // reflectDescribeType records the element chain and anonymous objects of t.
@@ -548,7 +548,7 @@ func descriptorField(d *typemap.ElementType, ts string) *typemap.Field {
 // named type, and stopping there keeps the anonymous levels above it fully
 // described.
 func reflectDescribeType(t reflect.Type, defs *reflectDefs) *typemap.ElementType {
-	d := &typemap.ElementType{Type: goTypeToTS(t, defs), Equality: typemap.DescribeReflectEquality(t), GoKind: reflectGoKind(t), IsPointer: t.Kind() == reflect.Pointer}
+	d := &typemap.ElementType{Type: goTypeToTS(t, defs), Equality: typemap.DescribeReflectEquality(t), GoKind: reflectGoKind(t), ValidatorKind: typemap.ReflectValidatorKind(t), IsPointer: t.Kind() == reflect.Pointer}
 	for {
 		// Named pointers are dereferenced here, so they are tracked too.
 		if t.Name() != "" {

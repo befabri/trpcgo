@@ -370,7 +370,7 @@ func TestSupportedZodTagsAreConsistent(t *testing.T) {
 	}
 	for name, tags := range tables {
 		for _, tag := range tags {
-			if !supportedZodTags[tag] {
+			if supportedZodTags[tag] == 0 {
 				t.Errorf("%s contains %q, which supportedZodTags does not list", name, tag)
 			}
 		}

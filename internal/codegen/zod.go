@@ -679,6 +679,7 @@ func zodElementField(ts string, element *typemap.ElementType) typemap.Field {
 			field.Type = element.Type
 		}
 		field.GoKind = element.GoKind
+		field.ValidatorKind = element.ValidatorKind
 		field.ArrayLen = element.ArrayLen
 		field.Equality = element.Equality
 		field.GoType = element.GoType

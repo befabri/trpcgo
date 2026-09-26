@@ -55,12 +55,12 @@ func CompileValidation(c zodconfig.Config) (*ValidationProgram, error) {
 		return rules, nil
 	}
 	for name := range c.Rules {
-		if supportedZodTags[name] || validationStructuralTag(name) {
+		if supportedZodTags[name] != 0 || validationStructuralTag(name) {
 			return nil, fmt.Errorf("custom validation %q shadows a built-in rule; use a distinct name", name)
 		}
 	}
 	for name := range c.Aliases {
-		if supportedZodTags[name] || validationStructuralTag(name) {
+		if supportedZodTags[name] != 0 || validationStructuralTag(name) {
 			return nil, fmt.Errorf("validation alias %q shadows a built-in rule; use a distinct name", name)
 		}
 		if _, err := expand(name); err != nil {

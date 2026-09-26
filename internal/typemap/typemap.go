@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"golang.org/x/tools/go/types/typeutil"
 
@@ -68,20 +69,22 @@ type Refinement struct {
 // ElementType describes one level of a slice, array, or map element chain.
 // The chain stops at a struct element, which has its own TypeDef.
 type ElementType struct {
-	Equality   *GoEqualityType // Go comparable-value shape, independent of schema aliases.
-	ArrayLen   *int64          // Fixed Go array length; nil for slices and legacy metadata.
-	EnumValues []string        // Declared constant union values, formatted as TypeScript literals.
-	GoType     string          // Go type display for validator fallback comparisons.
-	Type       string          // TypeScript representation, preserving named references.
-	Inline     *TypeDef        // Anonymous struct metadata.
-	Key        *ElementType    // Map key metadata.
-	GoKind     string
-	IsPointer  bool
-	Element    *ElementType
+	ValidatorKind string          // Dereferenced validator kind, independent of JSON/Zod mapping.
+	Equality      *GoEqualityType // Go comparable-value shape, independent of schema aliases.
+	ArrayLen      *int64          // Fixed Go array length; nil for slices and legacy metadata.
+	EnumValues    []string        // Declared constant union values, formatted as TypeScript literals.
+	GoType        string          // Go type display for validator fallback comparisons.
+	Type          string          // TypeScript representation, preserving named references.
+	Inline        *TypeDef        // Anonymous struct metadata.
+	Key           *ElementType    // Map key metadata.
+	GoKind        string
+	IsPointer     bool
+	Element       *ElementType
 }
 
 // Field represents a field in a TypeScript interface.
 type Field struct {
+	ValidatorKind     string // Dereferenced validator kind, independent of JSON/Zod mapping.
 	Equality          *GoEqualityType
 	GoName            string       // Original Go field name, before JSON renaming/promotion.
 	TypeOverride      bool         // Explicit tstype; public writers must preserve the supplied type.
@@ -655,13 +658,14 @@ func (m *Mapper) collectField(field *types.Var, tag, jsonName string, omitempty 
 	// The descriptor already holds the schema type and kind of the field.
 	descriptor := m.describeType(field.Type())
 	f := Field{
-		GoName:    field.Name(),
-		Name:      jsonName,
-		Type:      m.convert(field.Type()),
-		ZodType:   descriptor.Type,
-		GoKind:    descriptor.GoKind,
-		IsPointer: isPointer(field.Type()),
-		Optional:  omitempty || isPointer(field.Type()),
+		GoName:        field.Name(),
+		Name:          jsonName,
+		Type:          m.convert(field.Type()),
+		ZodType:       descriptor.Type,
+		GoKind:        descriptor.GoKind,
+		ValidatorKind: descriptor.ValidatorKind,
+		IsPointer:     isPointer(field.Type()),
+		Optional:      omitempty || isPointer(field.Type()),
 	}
 	f.Inline, f.Element, f.Key = descriptor.Inline, descriptor.Element, descriptor.Key
 	f.ArrayLen = descriptor.ArrayLen
@@ -806,6 +810,76 @@ func goKind(t types.Type) string {
 	default:
 		return "unknown"
 	}
+}
+
+// ReflectValidatorKind returns the kind validator sees for t: the reflect
+// kind behind any pointers, or "time.Time" for a struct convertible to it,
+// which validator converts before comparing.
+func ReflectValidatorKind(t reflect.Type) string {
+	seen := make(map[reflect.Type]bool)
+	for t.Kind() == reflect.Pointer {
+		if seen[t] {
+			return "unknown"
+		}
+		seen[t] = true
+		t = t.Elem()
+	}
+	if t.Kind() == reflect.Struct && t.ConvertibleTo(reflect.TypeFor[time.Time]()) {
+		return "time.Time"
+	}
+	return t.Kind().String()
+}
+
+// typesValidatorKind is ReflectValidatorKind for go/types.
+func typesValidatorKind(t types.Type) string {
+	seen := make(map[types.Type]bool)
+	for {
+		t = types.Unalias(t)
+		ptr, ok := t.Underlying().(*types.Pointer)
+		if !ok {
+			break
+		}
+		if seen[t] {
+			return "unknown"
+		}
+		seen[t] = true
+		t = ptr.Elem()
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Basic:
+		if kind := basicKindNames[u.Kind()]; kind != "" {
+			return kind // byte and rune are uint8 and int32.
+		}
+		if u.Kind() == types.UnsafePointer {
+			return "unsafe.Pointer"
+		}
+		return u.Name()
+	case *types.Array:
+		return "array"
+	case *types.Slice:
+		return "slice"
+	case *types.Map:
+		return "map"
+	case *types.Chan:
+		return "chan"
+	case *types.Signature:
+		return "func"
+	case *types.Interface:
+		return "interface"
+	case *types.Struct:
+		// A struct convertible to time.Time has time's unexported fields,
+		// whose package supplies time.Time without importing another copy.
+		for i := range u.NumFields() {
+			pkg := u.Field(i).Pkg()
+			if pkg != nil && pkg.Path() == "time" {
+				if obj := pkg.Scope().Lookup("Time"); obj != nil && types.ConvertibleTo(t, obj.Type()) {
+					return "time.Time"
+				}
+			}
+		}
+		return "struct"
+	}
+	return "unknown"
 }
 
 // structPackage returns the package whose unexported fields a lookup on t may

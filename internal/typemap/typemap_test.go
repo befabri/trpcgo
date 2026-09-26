@@ -1,8 +1,12 @@
 package typemap
 
 import (
+	"go/importer"
+	"go/token"
 	"go/types"
+	"reflect"
 	"testing"
+	"time"
 )
 
 func TestBasicTypes(t *testing.T) {
@@ -237,5 +241,45 @@ func TestJSONRawMessageShapes(t *testing.T) {
 				t.Errorf("Convert = %q, want %q", got, "unknown")
 			}
 		})
+	}
+}
+
+func TestValidatorKindPreservesTimeConversion(t *testing.T) {
+	pkg, err := importer.Default().Import("time")
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeType := pkg.Scope().Lookup("Time").Type()
+	named := types.NewNamed(types.NewTypeName(token.NoPos, types.NewPackage("fixture", "fixture"), "Clock", nil), timeType.Underlying(), nil)
+	for _, typ := range []types.Type{timeType, named, types.NewPointer(named), types.NewPointer(types.NewPointer(named))} {
+		m := NewMapper(nil)
+		if kind := m.describeType(typ).ValidatorKind; kind != "time.Time" {
+			t.Errorf("validator kind of %s = %q, want time.Time", typ, kind)
+		}
+	}
+	type clock time.Time
+	for _, typ := range []reflect.Type{reflect.TypeFor[time.Time](), reflect.TypeFor[clock](), reflect.TypeFor[*clock](), reflect.TypeFor[**clock]()} {
+		if kind := ReflectValidatorKind(typ); kind != "time.Time" {
+			t.Errorf("validator kind of %s = %q, want time.Time", typ, kind)
+		}
+	}
+}
+
+func TestValidatorKindPreservesNonJSONKinds(t *testing.T) {
+	for _, tc := range []struct {
+		typ  types.Type
+		want string
+	}{
+		{types.Universe.Lookup("byte").Type(), "uint8"},
+		{types.Universe.Lookup("rune").Type(), "int32"},
+		{types.Typ[types.Uintptr], "uintptr"},
+		{types.Typ[types.Complex64], "complex64"},
+		{types.Typ[types.UnsafePointer], "unsafe.Pointer"},
+		{types.NewChan(types.SendRecv, types.Typ[types.Int]), "chan"},
+		{types.NewSignatureType(nil, nil, nil, nil, nil, false), "func"},
+	} {
+		if kind := NewMapper(nil).describeType(tc.typ).ValidatorKind; kind != tc.want {
+			t.Errorf("validator kind of %s = %q, want %s", tc.typ, kind, tc.want)
+		}
 	}
 }

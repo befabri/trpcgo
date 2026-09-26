@@ -16,6 +16,17 @@ func SupportedTags() []string {
 	return typemap.SupportedZodTags()
 }
 
+// ValidatorAcceptsKind is typemap.ValidatorAcceptsKind, for the example
+// server's validator oracle.
+func ValidatorAcceptsKind(tag, goKind string) bool {
+	return typemap.ValidatorAcceptsKind(tag, goKind)
+}
+
+// ValidatorKind is typemap.ReflectValidatorKind.
+func ValidatorKind(t reflect.Type) string {
+	return typemap.ReflectValidatorKind(t)
+}
+
 // StructuralTag reports whether tag is a directive that never rejects a value
 // on its own, so the Go validator can never attribute a rejection to it.
 func StructuralTag(tag string) bool {

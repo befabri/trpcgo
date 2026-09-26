@@ -14,6 +14,7 @@ Format checks are tested against Go 1.26, Go 1.27, and validator v10.30.4. Email
 - A format combined with another rule must satisfy both: `email,oneof=admin@example.com` accepts only that address.
 - `numeric` on a numeric Go field keeps the numeric schema instead of applying a string pattern.
 - Unsupported tags and invalid parameters become comments in the generated schema. Set `Strict` in [custom validation rules](/zod-schemas/#custom-validation-rules) to fail generation instead.
+- A rule that panics in validator on the field's Go kind, such as `oneof` on a float or `lowercase` on a number, fails generation.
 - Malformed `dive` or `keys` scopes fail generation.
 
 ## Required And Omission
@@ -92,6 +93,7 @@ The TypeScript property is a string, and the schema validates the integer with `
 - String rules check the text Go decodes. Unpaired surrogate escapes become U+FFFD, as in Go; valid pairs are kept.
 - `time.Time` accepts Go's JSON timestamp grammar, including offsets, comma fractions, and the other spellings Go accepts. Parsing keeps the original string, and comparisons use its offset and full nanosecond precision.
 - Go's `time.Time.UnmarshalJSON` can tell escaped timestamp characters from literal ones. `JSON.parse` has already decoded them, so schemas cannot.
+- `min`, `max`, `gt`, `gte`, `lt`, and `lte` on `time.Time` compare with the server's current time in Go and become comments in the schema.
 
 ## decodeGoJSON
 

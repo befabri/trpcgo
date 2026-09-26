@@ -5,9 +5,13 @@ import (
 	"errors"
 	"io"
 	"math"
+	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+	"unsafe"
 
 	"github.com/befabri/trpcgo"
 	"github.com/befabri/trpcgo/testdata/fieldcomposition"
@@ -178,9 +182,7 @@ func TestUniqueUnsupportedValuesPanicInGoValidator(t *testing.T) {
 		{"noncomparable selected field", "unique=ID", []struct{ ID []int }{{[]int{1}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			panicked := false
-			func() { defer func() { panicked = recover() != nil }(); _ = validator.New().Var(tc.value, tc.tag) }()
-			if !panicked {
+			if panicked, _ := recovers(func() { _ = validator.New().Var(tc.value, tc.tag) }); !panicked {
 				t.Fatal("backend accepted an unsupported unique comparison")
 			}
 		})
@@ -213,4 +215,111 @@ func TestGeneratedRefinementContractMatchesGo(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Use tagged fields, not Var: validator skips a struct's own rules when it
+// has no field name. Every kind is exercised directly and through non-nil
+// pointers/interfaces so their unwrapping cannot conceal an invalid rule.
+func TestValidatorKindsMatchGenerator(t *testing.T) {
+	type namedFloat float64
+	type namedBool bool
+	samples := []any{
+		true, int(1), int8(1), int16(1), int32(1), int64(1),
+		uint(1), uint8(1), uint16(1), uint32(1), uint64(1), uintptr(1),
+		float32(1), float64(1), complex64(1), complex128(1), "1",
+		[1]int{1}, []int{1}, map[string]int{"one": 1}, struct{ N int }{1},
+		make(chan int), func() {}, unsafe.Pointer(new(int)),
+		time.Unix(1, 0).UTC(), []byte{1}, json.Number("1"), json.RawMessage(`1`),
+		namedFloat(1), namedBool(true),
+	}
+	seen := make(map[reflect.Kind]bool)
+	for _, value := range samples {
+		seen[reflect.TypeOf(value).Kind()] = true
+	}
+	// Invalid has no field type; pointer and interface are tested as wrappers.
+	for kind := reflect.Bool; kind <= reflect.UnsafePointer; kind++ {
+		if kind != reflect.Pointer && kind != reflect.Interface && !seen[kind] {
+			t.Fatalf("no validator sample for Go kind %s", kind)
+		}
+	}
+	validate := validator.New()
+	for _, tag := range validationcontract.SupportedTags() {
+		t.Run(tag, func(t *testing.T) {
+			for _, sample := range samples {
+				typ := reflect.TypeOf(sample)
+				kind := validationcontract.ValidatorKind(typ)
+				t.Run(typ.String(), func(t *testing.T) {
+					for _, value := range []reflect.Value{reflect.Zero(typ), reflect.ValueOf(sample)} {
+						pointer := reflect.New(typ)
+						pointer.Elem().Set(value)
+						iface := reflect.New(reflect.TypeFor[any]()).Elem()
+						iface.Set(value)
+						for _, field := range []reflect.Value{value, pointer, iface} {
+							input, rule := validatorKindInput(tag, field)
+							panicked, panicValue := recovers(func() { _ = validate.Struct(input) })
+							wantPanic := !validationcontract.ValidatorAcceptsKind(tag, kind)
+							if panicked != wantPanic {
+								t.Errorf("%s on %s (zero=%v): panic=%v (%v), generator expects panic=%v", rule, field.Type(), value.IsZero(), panicked, panicValue, wantPanic)
+							}
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+// Ordered rules accept any time-convertible struct. Keep this distinction
+// covered without treating all type-dependent panics as kind restrictions:
+// nefield, for example, asserts time.Time directly instead of converting.
+func TestOrderedValidatorKindsAcceptDefinedTime(t *testing.T) {
+	type namedTime time.Time
+	validate := validator.New()
+	for _, tag := range []string{"min", "max", "gt", "gte", "lt", "lte"} {
+		for _, sample := range []namedTime{{}, namedTime(time.Unix(1, 0).UTC())} {
+			value := reflect.ValueOf(sample)
+			input, rule := validatorKindInput(tag, value)
+			panicked, panicValue := recovers(func() { _ = validate.Struct(input) })
+			if panicked || !validationcontract.ValidatorAcceptsKind(tag, validationcontract.ValidatorKind(value.Type())) {
+				t.Errorf("%s on defined time: panic=%v (%v), want both Go and generator to support the kind", rule, panicked, panicValue)
+			}
+		}
+	}
+}
+
+func validatorKindInput(tag string, value reflect.Value) (any, string) {
+	rule := tag
+	switch tag {
+	case "min", "max", "len", "gt", "gte", "lt", "lte", "eq", "ne", "oneof",
+		"contains", "excludes", "containsany", "excludesall", "startswith", "endswith", "startsnotwith", "endsnotwith":
+		// 1 is a valid signed/unsigned/float/length/bool parameter.
+		rule += "=1"
+	case "eqfield", "nefield", "gtfield", "gtefield", "ltfield", "ltefield":
+		rule += "=Other"
+	case "keys", "endkeys":
+		// These delimit scopes rather than constrain kinds. Exercise each in
+		// a valid map scope; malformed placement is tested by the parser.
+		entries := reflect.MakeMap(reflect.MapOf(reflect.TypeFor[string](), value.Type()))
+		entries.SetMapIndex(reflect.ValueOf("one"), value)
+		value = entries
+		rule = "dive,keys,endkeys"
+	}
+	typ := reflect.StructOf([]reflect.StructField{
+		{Name: "Value", Type: value.Type(), Tag: reflect.StructTag("validate:" + strconv.Quote(rule))},
+		{Name: "Other", Type: value.Type()},
+	})
+	input := reflect.New(typ).Elem()
+	input.Field(0).Set(value)
+	input.Field(1).Set(value)
+	return input.Interface(), rule
+}
+
+// recovers runs fn and reports whether it panicked, with the panic value.
+func recovers(fn func()) (panicked bool, value any) {
+	defer func() {
+		value = recover()
+		panicked = value != nil
+	}()
+	fn()
+	return false, nil
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"maps"
 	"math"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -405,61 +406,114 @@ func parseOneofValues(param string) []string {
 	return values
 }
 
-// supportedZodTags is the complete set of validate tags that produce Zod output.
-// Tags not in this set are flagged as unsupported in generated schemas.
-var supportedZodTags = map[string]bool{
-	// Structural (consumed before Zod generation).
-	"required":  true,
-	"omitempty": true,
-	"omitzero":  true,
-	"dive":      true,
-	"omitnil":   true, "keys": true, "endkeys": true, "structonly": true, "nostructlevel": true,
-	"eq": true, "ne": true, "unique": true, "excludes": true, "containsany": true, "excludesall": true, "startsnotwith": true, "endsnotwith": true, "ascii": true, "printascii": true, "number": true, "alphaunicode": true, "alphanumunicode": true, "base64rawurl": true,
-	// Format tags (become Zod base types).
-	"email":            true,
-	"url":              true,
-	"uuid":             true,
-	"e164":             true,
-	"jwt":              true,
-	"base64":           true,
-	"base64url":        true,
-	"lowercase":        true,
-	"uppercase":        true,
-	"ip":               true,
-	"ipv4":             true,
-	"ipv6":             true,
-	"hostname":         true,
-	"hostname_rfc1123": true,
-	"hexadecimal":      true,
-	"ulid":             true,
-	"mac":              true,
-	"cidrv4":           true,
-	"cidrv6":           true,
-	// Enum.
-	"oneof": true,
-	// Constraints.
-	"min": true,
-	"max": true,
-	"len": true,
-	"gt":  true,
-	"gte": true,
-	"lt":  true,
-	"lte": true,
-	// Regex patterns.
-	"alphanum": true,
-	"alpha":    true,
-	"numeric":  true,
-	// String constraints.
-	"startswith": true,
-	"endswith":   true,
-	"contains":   true,
-	// Cross-field (emitted as .refine() at object level).
-	"gtefield": true,
-	"ltefield": true,
-	"gtfield":  true,
-	"ltfield":  true,
-	"eqfield":  true,
-	"nefield":  true,
+// validatorKinds is the set of field kinds a built-in rule runs on without
+// panicking, independent of what Zod can express. time.Time has its own bit
+// because the ordered rules accept it and panic on other structs.
+type validatorKinds uint64
+
+const (
+	validatorString         validatorKinds = 1 << reflect.String
+	validatorSigned         validatorKinds = 1<<reflect.Int | 1<<reflect.Int8 | 1<<reflect.Int16 | 1<<reflect.Int32 | 1<<reflect.Int64
+	validatorUnsigned       validatorKinds = 1<<reflect.Uint | 1<<reflect.Uint8 | 1<<reflect.Uint16 | 1<<reflect.Uint32 | 1<<reflect.Uint64
+	validatorFloat          validatorKinds = 1<<reflect.Float32 | 1<<reflect.Float64
+	validatorCollection     validatorKinds = 1<<reflect.Array | 1<<reflect.Slice | 1<<reflect.Map
+	validatorTime           validatorKinds = 1 << 32
+	validatorAny            validatorKinds = ^validatorKinds(0)
+	validatorNumberOrLength                = validatorString | validatorSigned | validatorUnsigned | 1<<reflect.Uintptr | validatorFloat | validatorCollection
+)
+
+// supportedZodTags lists every translated tag with the kinds validator's
+// baked_in.go accepts for it; the example server checks the table against the
+// real validator. validatorAny means the rule reads Value.String() and panics
+// on nothing, not that Zod can express it. unique also needs comparable
+// elements, which ValidateZodFieldRules checks.
+var supportedZodTags = map[string]validatorKinds{
+	"required":         validatorAny,
+	"omitempty":        validatorAny,
+	"omitzero":         validatorAny,
+	"omitnil":          validatorAny,
+	"dive":             validatorCollection,
+	"keys":             validatorAny,
+	"endkeys":          validatorAny,
+	"structonly":       validatorAny,
+	"nostructlevel":    validatorAny,
+	"eq":               validatorNumberOrLength | 1<<reflect.Bool,
+	"ne":               validatorNumberOrLength | 1<<reflect.Bool,
+	"unique":           validatorCollection,
+	"excludes":         validatorAny,
+	"containsany":      validatorAny,
+	"excludesall":      validatorAny,
+	"startsnotwith":    validatorAny,
+	"endsnotwith":      validatorAny,
+	"ascii":            validatorAny,
+	"printascii":       validatorAny,
+	"number":           validatorAny,
+	"alphaunicode":     validatorAny,
+	"alphanumunicode":  validatorAny,
+	"base64rawurl":     validatorAny,
+	"email":            validatorAny,
+	"url":              validatorString,
+	"uuid":             validatorAny,
+	"e164":             validatorAny,
+	"jwt":              validatorAny,
+	"base64":           validatorAny,
+	"base64url":        validatorAny,
+	"lowercase":        validatorString,
+	"uppercase":        validatorString,
+	"ip":               validatorAny,
+	"ipv4":             validatorAny,
+	"ipv6":             validatorAny,
+	"hostname":         validatorAny,
+	"hostname_rfc1123": validatorAny,
+	"hexadecimal":      validatorAny,
+	"ulid":             validatorAny,
+	"mac":              validatorAny,
+	"cidrv4":           validatorAny,
+	"cidrv6":           validatorAny,
+	"oneof":            validatorString | validatorSigned | validatorUnsigned,
+	"min":              validatorNumberOrLength | validatorTime,
+	"max":              validatorNumberOrLength | validatorTime,
+	"len":              validatorNumberOrLength,
+	"gt":               validatorNumberOrLength | validatorTime,
+	"gte":              validatorNumberOrLength | validatorTime,
+	"lt":               validatorNumberOrLength | validatorTime,
+	"lte":              validatorNumberOrLength | validatorTime,
+	"alphanum":         validatorAny,
+	"alpha":            validatorAny,
+	"numeric":          validatorAny,
+	"startswith":       validatorAny,
+	"endswith":         validatorAny,
+	"contains":         validatorAny,
+	"gtefield":         validatorAny,
+	"ltefield":         validatorAny,
+	"gtfield":          validatorAny,
+	"ltfield":          validatorAny,
+	"eqfield":          validatorAny,
+	"nefield":          validatorAny,
+}
+
+// ValidatorAcceptsKind reports whether validator runs tag on a field of goKind
+// without a kind panic. Unknown tags, unresolved kinds and interfaces report
+// true, as only the runtime value decides.
+func ValidatorAcceptsKind(tag, goKind string) bool {
+	allowed, supported := supportedZodTags[tag]
+	if !supported || goKind == "" || goKind == "unknown" || goKind == "interface" {
+		return true
+	}
+	switch goKind {
+	case "time.Time":
+		return allowed&validatorTime != 0
+	case "json.Number":
+		goKind = "string"
+	case "[]byte", "json.RawMessage":
+		goKind = "slice"
+	}
+	for kind := reflect.Bool; kind <= reflect.UnsafePointer; kind++ {
+		if kind.String() == goKind {
+			return allowed&(1<<kind) != 0
+		}
+	}
+	return true
 }
 
 // SupportedZodTags lists every validate tag the generator translates, sorted.
@@ -517,7 +571,7 @@ func UnsupportedZodRules(rules []ValidateRule) []ValidateRule {
 		if r.Custom != nil && !r.Custom.ServerOnly {
 			continue
 		}
-		if !supportedZodTags[r.Tag] {
+		if supportedZodTags[r.Tag] == 0 {
 			unsupported = append(unsupported, r)
 		}
 	}
@@ -562,7 +616,7 @@ func invalidZodRule(rule ValidateRule, goKind string) bool {
 	if _, format := zodFormats[rule.Tag]; format && goKind != "" && goKind != "string" && goKind != "json.Number" {
 		return !((rule.Tag == "numeric" || rule.Tag == "number") && isNumericKind(goKind))
 	}
-	if !supportedZodTags[rule.Tag] {
+	if supportedZodTags[rule.Tag] == 0 {
 		return false
 	}
 	switch rule.Tag {

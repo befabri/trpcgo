@@ -108,7 +108,7 @@ func JSONStringOption(tag, kind string) bool {
 
 func (m *Mapper) typeField(t types.Type) *Field {
 	d := m.describeType(t)
-	return &Field{Type: d.Type, Equality: d.Equality, ArrayLen: d.ArrayLen, GoKind: d.GoKind, GoType: d.GoType, EnumValues: d.EnumValues, IsPointer: d.IsPointer, Inline: d.Inline, Element: d.Element, Key: d.Key}
+	return &Field{Type: d.Type, Equality: d.Equality, ArrayLen: d.ArrayLen, GoKind: d.GoKind, ValidatorKind: d.ValidatorKind, GoType: d.GoType, EnumValues: d.EnumValues, IsPointer: d.IsPointer, Inline: d.Inline, Element: d.Element, Key: d.Key}
 }
 
 // describeType records the element chain and anonymous objects of t. A named
@@ -117,7 +117,7 @@ func (m *Mapper) typeField(t types.Type) *Field {
 // to a named struct. Every Go type cycle passes through a named type, and
 // stopping there keeps the anonymous levels above it fully described.
 func (m *Mapper) describeType(t types.Type) *ElementType {
-	d := &ElementType{Type: m.ConvertZod(t), Equality: DescribeTypesEquality(t), GoKind: goKind(t), IsPointer: isPointer(types.Unalias(t))}
+	d := &ElementType{Type: m.ConvertZod(t), Equality: DescribeTypesEquality(t), GoKind: goKind(t), ValidatorKind: typesValidatorKind(t), IsPointer: isPointer(types.Unalias(t))}
 	t = types.Unalias(t)
 	for {
 		ptr, ok := t.(*types.Pointer)
